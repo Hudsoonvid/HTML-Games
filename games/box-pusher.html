@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Box Pusher</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>📦 Box Pusher</h1>
+  <div class="stats">Moves <b id="moves">0</b> Pushes <b id="pushes">0</b> Solved <b id="solved">0</b></div>
+</header>
+<div class="controls">
+  <button class="btn alt" id="prev">◀</button>
+  <select id="pick"></select>
+  <button class="btn alt" id="next">▶</button>
+  <button class="btn alt" id="undo">↶ Undo</button>
+  <button class="btn alt" id="reset">↺ Restart</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="560" height="440"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<div class="touchpad"><button id="tL">◀</button><button id="tU">▲</button><button id="tD">▼</button><button id="tR">▶</button></div>
+<p class="help">Push every crate onto a target. You can only push (never pull), one crate at a time. <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd> or swipe to move, <kbd>Z</kbd>/<kbd>U</kbd> undo, <kbd>R</kbd> restart.</p>
+<script src="shared.js"></script>
+<script>
+// Every level here was verified solvable with a breadth-first push solver.
+const LEVELS = [
+  ['#######', '#     #', '# .$@ #', '#     #', '#######'],
+  [' ######', ' #    #', '##$## #', '# .   #', '# $@. #', '#######'],
+  ['########', '#  .   #', '# #$## #', '# .$ @ #', '# #$## #', '#  .   #', '########'],
+  ['########', '#      #', '# $  . #', '#  ##  #', '# .  $ #', '#   @  #', '########'],
+  ['  ####', '###  #', '# $  #', '# .$.#', '## @ #', ' #####'],
+  ['#######', '#. .  #', '# $$  #', '#  #@ #', '#     #', '#######'],
+  ['  ######', '  #    #', '### $# #', '#  $ . #', '# #.## #', '# $ .@ #', '#   ####', '#####'],
+  ['#########', '#   #   #', '# $ . $ #', '# .@ .  #', '#   $   #', '#       #', '#########'],
+  ['#######', '#.    #', '#.$$$ #', '#.  @ #', '#######'],
+  ['#########', '#.  #  .#', '# $   $ #', '#  #@#  #', '# $   $ #', '#.  #  .#', '#########'],
+  ['  #####', '  #   #', '###$# ##', '# .$.  #', '#  @#  #', '## $  .#', ' #######'],
+  ['########', '#   #  #', '# $  $ #', '#.# ## #', '#.  $  #', '#.#  @ #', '########'],
+  [' #######', ' #  .  #', '##$#$#.#', '#  @   #', '# $#.  #', '#    ###', '######'],
+  ['  #######', '  #     #', '### ### #', '# $ $ $ #', '#  ...  #', '### @ ###', '  #####']
+];
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+let idx = Store.get('sokoban-level', 0), W, H, walls, goals, boxes, player, inside, moves, pushes, history, T, ox, oy, face = 'down';
+let solved = new Set(Store.get('sokoban-solved', []));
+
+const pickEl = document.getElementById('pick');
+LEVELS.forEach((_, i) => { const o = document.createElement('option'); o.value = i; o.textContent = 'Level ' + (i + 1); pickEl.appendChild(o); });
+
+function load(i) {
+  idx = clamp(i, 0, LEVELS.length - 1);
+  Store.set('sokoban-level', idx);
+  const rows = LEVELS[idx];
+  H = rows.length;
+  W = Math.max(...rows.map(r => r.length));
+  walls = new Set(); goals = new Set(); boxes = new Set();
+  rows.forEach((row, y) => [...row.padEnd(W)].forEach((c, x) => {
+    const k = y * W + x;
+    if (c === '#') walls.add(k);
+    if ('.*+'.includes(c)) goals.add(k);
+    if ('$*'.includes(c)) boxes.add(k);
+    if ('@+'.includes(c)) player = k;
+  }));
+  // flood fill from the player to know which floor is inside the walls
+  inside = new Set([player]);
+  const q = [player];
+  while (q.length) {
+    const k = q.pop();
+    for (const d of [1, -1, W, -W]) {
+      const n = k + d;
+      if (n >= 0 && n < W * H && !walls.has(n) && !inside.has(n)) { inside.add(n); q.push(n); }
+    }
+  }
+  moves = 0; pushes = 0; history = [];
+  T = Math.floor(Math.min(cv.width / W, cv.height / H, 64));
+  ox = Math.floor((cv.width - W * T) / 2);
+  oy = Math.floor((cv.height - H * T) / 2);
+  pickEl.value = idx;
+  delete ov.dataset.won;
+  overlay(ov, null);
+  hud();
+  draw();
+}
+
+function hud() {
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('pushes').textContent = pushes;
+  document.getElementById('solved').textContent = `${solved.size}/${LEVELS.length}`;
+}
+
+function step(dx, dy) {
+  if (!ov.classList.contains('hidden')) {
+    if (ov.dataset.won) load(idx + 1);
+    return;
+  }
+  face = dx > 0 ? 'right' : dx < 0 ? 'left' : dy < 0 ? 'up' : 'down';
+  const d = dy * W + dx, to = player + d;
+  if (walls.has(to)) return draw();
+  if (boxes.has(to)) {
+    const beyond = to + d;
+    if (walls.has(beyond) || boxes.has(beyond)) return draw();
+    history.push({ player, boxes: new Set(boxes), moves, pushes });
+    boxes.delete(to);
+    boxes.add(beyond);
+    pushes++;
+    Sound.beep(goals.has(beyond) ? 760 : 260, 0.05, 'triangle', 0.04);
+  } else {
+    history.push({ player, boxes: new Set(boxes), moves, pushes });
+  }
+  player = to;
+  moves++;
+  hud();
+  draw();
+  if ([...boxes].every(b => goals.has(b))) {
+    solved.add(idx);
+    Store.set('sokoban-solved', [...solved]);
+    hud();
+    ov.dataset.won = '1';
+    const last = idx === LEVELS.length - 1;
+    overlay(ov, `<h2>${last ? 'All levels complete! 🏆' : 'Level complete!'}</h2><p>${moves} moves · ${pushes} pushes</p>` +
+      (last ? '<button class="btn" onclick="load(0)">Back to level 1</button>' : `<button class="btn" onclick="load(${idx + 1})">Next level</button>`));
+  }
+}
+
+function undo() {
+  const h = history.pop();
+  if (!h) return;
+  ({ player, moves, pushes } = h);
+  boxes = h.boxes;
+  overlay(ov, null);
+  delete ov.dataset.won;
+  hud();
+  draw();
+}
+
+function draw() {
+  ctx.fillStyle = '#0b0c18';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const k = y * W + x, px = ox + x * T, py = oy + y * T;
+    if (walls.has(k)) {
+      ctx.fillStyle = '#4c3d7a';
+      ctx.fillRect(px, py, T, T);
+      ctx.fillStyle = '#5f4d96';
+      ctx.fillRect(px + 2, py + 2, T / 2 - 3, T / 2 - 3);
+      ctx.fillRect(px + T / 2 + 1, py + T / 2 + 1, T / 2 - 3, T / 2 - 3);
+    } else if (inside.has(k)) {
+      ctx.fillStyle = (x + y) % 2 ? '#1e2140' : '#22264a';
+      ctx.fillRect(px, py, T, T);
+    }
+    if (goals.has(k)) {
+      ctx.strokeStyle = '#22d3ee';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(px + T / 2, py + T / 2, T * 0.18, 0, 7); ctx.stroke();
+    }
+    if (boxes.has(k)) {
+      const on = goals.has(k);
+      ctx.fillStyle = on ? '#16a34a' : '#d97706';
+      ctx.beginPath(); ctx.roundRect(px + 4, py + 4, T - 8, T - 8, 5); ctx.fill();
+      ctx.strokeStyle = on ? '#14532d' : '#92400e';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(px + 9, py + 9, T - 18, T - 18);
+      ctx.beginPath(); ctx.moveTo(px + 9, py + 9); ctx.lineTo(px + T - 9, py + T - 9); ctx.moveTo(px + T - 9, py + 9); ctx.lineTo(px + 9, py + T - 9); ctx.stroke();
+    }
+  }
+  const px = ox + (player % W) * T + T / 2, py = oy + Math.floor(player / W) * T + T / 2;
+  ctx.fillStyle = '#f472b6';
+  ctx.beginPath(); ctx.arc(px, py, T * 0.32, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff';
+  const ex = { left: -1, right: 1, up: 0, down: 0 }[face], ey = { up: -1, down: 1, left: 0, right: 0 }[face];
+  [-1, 1].forEach(s => {
+    const exx = px + (ey ? s * T * 0.12 : ex * T * 0.12), eyy = py + (ex ? s * T * 0.12 : ey * T * 0.12) - (ex ? T * 0.05 : 0);
+    ctx.beginPath(); ctx.arc(exx, eyy, T * 0.07, 0, 7); ctx.fill();
+  });
+}
+
+const DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1], a: [-1, 0], d: [1, 0], w: [0, -1], s: [0, 1] };
+document.addEventListener('keydown', e => {
+  if (DIRS[e.key]) step(...DIRS[e.key]);
+  else if (e.key === 'z' || e.key === 'u' || e.key === 'Z' || e.key === 'U' || e.key === 'Backspace') undo();
+  else if (e.key === 'r' || e.key === 'R') load(idx);
+});
+onSwipe(cv, d => step(...{ left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[d]));
+[['tL', [-1, 0]], ['tR', [1, 0]], ['tU', [0, -1]], ['tD', [0, 1]]].forEach(([id, d]) =>
+  document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); step(...d); }));
+document.getElementById('undo').onclick = undo;
+document.getElementById('reset').onclick = () => load(idx);
+document.getElementById('prev').onclick = () => load(idx - 1);
+document.getElementById('next').onclick = () => load(idx + 1);
+pickEl.onchange = () => load(+pickEl.value);
+load(idx);
+</script>
+</body>
+</html>

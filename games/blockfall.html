@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blockfall</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🧱 Blockfall</h1>
+  <div class="stats">Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="480" height="600"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad">
+  <button id="tL">◀</button><button id="tR">▶</button><button id="tRot">⟳</button><button id="tD">▼</button><button id="tH">⤓</button>
+</div>
+<p class="help"><kbd>←</kbd><kbd>→</kbd> move · <kbd>↑</kbd>/<kbd>X</kbd> rotate · <kbd>Z</kbd> rotate left · <kbd>↓</kbd> soft drop · <kbd>Space</kbd> hard drop · <kbd>C</kbd>/<kbd>Shift</kbd> hold · <kbd>P</kbd> pause</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = 10, H = 20, S = 30;
+const SHAPES = {
+  I: [[0, 0, 0, 0], [1, 1, 1, 1], [0, 0, 0, 0], [0, 0, 0, 0]],
+  J: [[1, 0, 0], [1, 1, 1], [0, 0, 0]],
+  L: [[0, 0, 1], [1, 1, 1], [0, 0, 0]],
+  O: [[1, 1], [1, 1]],
+  S: [[0, 1, 1], [1, 1, 0], [0, 0, 0]],
+  T: [[0, 1, 0], [1, 1, 1], [0, 0, 0]],
+  Z: [[1, 1, 0], [0, 1, 1], [0, 0, 0]]
+};
+const COLORS = { I: '#22d3ee', J: '#3b82f6', L: '#f97316', O: '#facc15', S: '#22c55e', T: '#a855f7', Z: '#ef4444' };
+let board, piece, nextQ, hold, canHold, score, lines, level, dropAcc, lockAcc, lockMoves, state = 'ready', last = 0;
+let best = Store.get('blockfall-best', 0);
+document.getElementById('best').textContent = best;
+
+const rotateCW = m => m[0].map((_, i) => m.map(r => r[i]).reverse());
+const rotateCCW = m => m[0].map((_, i) => m.map(r => r[r.length - 1 - i]));
+
+let bag = [];
+function nextType() {
+  if (!bag.length) bag = shuffle(Object.keys(SHAPES));
+  return bag.pop();
+}
+
+function spawn(type) {
+  const m = SHAPES[type].map(r => r.slice());
+  piece = { type, m, x: Math.floor((W - m.length) / 2), y: type === 'I' ? -1 : 0 };
+  lockAcc = 0;
+  lockMoves = 0;
+  if (collides(piece.m, piece.x, piece.y)) gameOver();
+}
+
+function collides(m, px, py) {
+  for (let y = 0; y < m.length; y++) for (let x = 0; x < m[y].length; x++) {
+    if (!m[y][x]) continue;
+    const bx = px + x, by = py + y;
+    if (bx < 0 || bx >= W || by >= H) return true;
+    if (by >= 0 && board[by][bx]) return true;
+  }
+  return false;
+}
+
+function move(dx, dy) {
+  if (!collides(piece.m, piece.x + dx, piece.y + dy)) {
+    piece.x += dx;
+    piece.y += dy;
+    if (dx && lockMoves < 15) { lockAcc = 0; lockMoves++; }
+    return true;
+  }
+  return false;
+}
+
+function rotate(dir) {
+  const m = dir > 0 ? rotateCW(piece.m) : rotateCCW(piece.m);
+  for (const [kx, ky] of [[0, 0], [-1, 0], [1, 0], [-2, 0], [2, 0], [0, -1], [-1, -1], [1, -1]]) {
+    if (!collides(m, piece.x + kx, piece.y + ky)) {
+      piece.m = m;
+      piece.x += kx;
+      piece.y += ky;
+      if (lockMoves < 15) { lockAcc = 0; lockMoves++; }
+      return;
+    }
+  }
+}
+
+function ghostY() {
+  let y = piece.y;
+  while (!collides(piece.m, piece.x, y + 1)) y++;
+  return y;
+}
+
+function hardDrop() {
+  const y = ghostY();
+  score += (y - piece.y) * 2;
+  piece.y = y;
+  lock();
+}
+
+function lock() {
+  for (let y = 0; y < piece.m.length; y++) for (let x = 0; x < piece.m[y].length; x++) {
+    if (!piece.m[y][x]) continue;
+    if (piece.y + y < 0) return gameOver();
+    board[piece.y + y][piece.x + x] = piece.type;
+  }
+  let cleared = 0;
+  for (let y = H - 1; y >= 0; y--) {
+    if (board[y].every(Boolean)) {
+      board.splice(y, 1);
+      board.unshift(Array(W).fill(null));
+      cleared++;
+      y++;
+    }
+  }
+  if (cleared) {
+    score += [0, 100, 300, 500, 800][cleared] * level;
+    lines += cleared;
+    level = Math.floor(lines / 10) + 1;
+    Sound.beep(520 + cleared * 120, 0.12, 'triangle');
+  }
+  canHold = true;
+  spawn(nextQ.shift());
+  nextQ.push(nextType());
+}
+
+function doHold() {
+  if (!canHold) return;
+  canHold = false;
+  const t = piece.type;
+  if (hold) spawn(hold);
+  else { spawn(nextQ.shift()); nextQ.push(nextType()); }
+  hold = t;
+}
+
+const gravity = () => Math.max(40, 1000 * Math.pow(0.85, level - 1));
+
+function update(dt) {
+  dropAcc += dt;
+  const g = gravity();
+  while (dropAcc >= g) {
+    dropAcc -= g;
+    if (!move(0, 1)) break;
+  }
+  if (collides(piece.m, piece.x, piece.y + 1)) {
+    lockAcc += dt;
+    if (lockAcc > 500) lock();
+  } else {
+    lockAcc = 0;
+  }
+}
+
+function cell(x, y, color, alpha = 1, size = S) {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.fillRect(x + 1, y + 1, size - 2, size - 2);
+  ctx.fillStyle = 'rgba(255,255,255,.25)';
+  ctx.fillRect(x + 1, y + 1, size - 2, 4);
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.fillRect(x + 1, y + size - 5, size - 2, 4);
+  ctx.globalAlpha = 1;
+}
+
+function drawMini(type, ox, oy) {
+  if (!type) return;
+  const m = SHAPES[type], s = 20;
+  const w = m[0].length * s, h = m.length * s;
+  m.forEach((r, y) => r.forEach((v, x) => { if (v) cell(ox + x * s + (80 - w) / 2, oy + y * s + (60 - h) / 2, COLORS[type], 1, s); }));
+}
+
+function draw() {
+  ctx.fillStyle = '#070912';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.strokeStyle = '#131830';
+  for (let x = 0; x <= W; x++) { ctx.beginPath(); ctx.moveTo(x * S + .5, 0); ctx.lineTo(x * S + .5, H * S); ctx.stroke(); }
+  for (let y = 0; y <= H; y++) { ctx.beginPath(); ctx.moveTo(0, y * S + .5); ctx.lineTo(W * S, y * S + .5); ctx.stroke(); }
+  board.forEach((r, y) => r.forEach((t, x) => { if (t) cell(x * S, y * S, COLORS[t]); }));
+  if (piece && state !== 'ready') {
+    const gy = ghostY();
+    piece.m.forEach((r, y) => r.forEach((v, x) => { if (v && gy + y >= 0) cell((piece.x + x) * S, (gy + y) * S, COLORS[piece.type], 0.2); }));
+    piece.m.forEach((r, y) => r.forEach((v, x) => { if (v && piece.y + y >= 0) cell((piece.x + x) * S, (piece.y + y) * S, COLORS[piece.type]); }));
+  }
+  // side panel
+  ctx.fillStyle = '#11142a';
+  ctx.fillRect(300, 0, 180, 600);
+  ctx.fillStyle = '#9097b8';
+  ctx.font = '14px system-ui';
+  ctx.fillText('NEXT', 320, 30);
+  nextQ.slice(0, 3).forEach((t, i) => drawMini(t, 330, 40 + i * 70));
+  ctx.fillStyle = '#9097b8';
+  ctx.fillText('HOLD', 320, 270);
+  ctx.globalAlpha = canHold ? 1 : 0.4;
+  drawMini(hold, 330, 280);
+  ctx.globalAlpha = 1;
+  const stat = (label, val, y) => {
+    ctx.fillStyle = '#9097b8';
+    ctx.font = '14px system-ui';
+    ctx.fillText(label, 320, y);
+    ctx.fillStyle = '#e6e7f2';
+    ctx.font = 'bold 24px system-ui';
+    ctx.fillText(val, 320, y + 28);
+  };
+  stat('SCORE', score, 380);
+  stat('LINES', lines, 450);
+  stat('LEVEL', level, 520);
+}
+
+function loop(t) {
+  const dt = Math.min(100, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function start() {
+  board = Array.from({ length: H }, () => Array(W).fill(null));
+  bag = [];
+  nextQ = [nextType(), nextType(), nextType()];
+  hold = null;
+  canHold = true;
+  score = 0; lines = 0; level = 1; dropAcc = 0;
+  state = 'play';
+  spawn(nextType());
+  overlay(ov, null);
+}
+
+function gameOver() {
+  state = 'over';
+  best = recordBest('blockfall-best', score);
+  document.getElementById('best').textContent = best;
+  overlay(ov, `<h2>Game over</h2><p>Score ${score} · Lines ${lines}</p><p>Best ${best}</p><button class="btn" onclick="start()">Play again</button>`);
+}
+
+function togglePause() {
+  if (state === 'play') { state = 'paused'; overlay(ov, '<h2>Paused</h2><p>Press P to resume</p>'); }
+  else if (state === 'paused') { state = 'play'; overlay(ov, null); }
+}
+
+function act(a) {
+  if (state !== 'play') return;
+  if (a === 'left') move(-1, 0);
+  else if (a === 'right') move(1, 0);
+  else if (a === 'down') { if (move(0, 1)) { score += 1; dropAcc = 0; } }
+  else if (a === 'rot') rotate(1);
+  else if (a === 'rotl') rotate(-1);
+  else if (a === 'drop') hardDrop();
+  else if (a === 'hold') doHold();
+}
+
+document.addEventListener('keydown', e => {
+  const map = { ArrowLeft: 'left', ArrowRight: 'right', ArrowDown: 'down', ArrowUp: 'rot', x: 'rot', X: 'rot', z: 'rotl', Z: 'rotl', ' ': 'drop', c: 'hold', C: 'hold', Shift: 'hold' };
+  if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') return togglePause();
+  if ((state === 'ready' || state === 'over') && (e.key === ' ' || e.key === 'Enter')) return start();
+  if (map[e.key]) act(map[e.key]);
+});
+onSwipe(cv, d => act({ left: 'left', right: 'right', down: 'drop', up: 'hold' }[d]), 30);
+cv.addEventListener('click', () => act('rot'));
+[['tL', 'left'], ['tR', 'right'], ['tRot', 'rot'], ['tD', 'down'], ['tH', 'drop']].forEach(([id, a]) =>
+  document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); act(a); }));
+
+board = Array.from({ length: H }, () => Array(W).fill(null));
+nextQ = []; score = 0; lines = 0; level = 1; canHold = true;
+overlay(ov, '<h2>Blockfall</h2><p>Clear lines, level up, survive.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

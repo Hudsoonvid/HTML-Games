@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐍 Snake</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="440" height="440"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Steer with <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd> or <kbd>WASD</kbd> (swipe on touch). <kbd>Space</kbd> pauses. Eat the apples, don't bite yourself or the walls.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const ov = document.getElementById('ov');
+const N = 22, S = cv.width / N;
+let snake, dir, queue, food, score, step, acc = 0, last = 0, state = 'ready';
+let best = Store.get('snake-best', 0);
+document.getElementById('best').textContent = best;
+
+function reset() {
+  snake = [{ x: 8, y: 11 }, { x: 7, y: 11 }, { x: 6, y: 11 }];
+  dir = { x: 1, y: 0 };
+  queue = [];
+  score = 0;
+  step = 130;
+  placeFood();
+  hud();
+}
+
+function placeFood() {
+  if (snake.length >= N * N) return win();
+  do {
+    food = { x: randInt(0, N - 1), y: randInt(0, N - 1) };
+  } while (snake.some(s => s.x === food.x && s.y === food.y));
+}
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('best').textContent = best;
+}
+
+function turn(x, y) {
+  if (state === 'over') return;
+  if (state === 'ready') start();
+  const ref = queue.length ? queue[queue.length - 1] : dir;
+  if ((ref.x === -x && ref.y === -y) || (ref.x === x && ref.y === y)) return;
+  if (queue.length < 3) queue.push({ x, y });
+}
+
+function tick() {
+  if (queue.length) dir = queue.shift();
+  const h = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+  const hitsSelf = snake.some((s, i) => i < snake.length - 1 && s.x === h.x && s.y === h.y);
+  if (h.x < 0 || h.y < 0 || h.x >= N || h.y >= N || hitsSelf) return gameOver();
+  snake.unshift(h);
+  if (h.x === food.x && h.y === food.y) {
+    score++;
+    step = Math.max(55, 130 - score * 2.5);
+    Sound.beep(660, 0.06);
+    placeFood();
+    hud();
+  } else {
+    snake.pop();
+  }
+}
+
+function start() {
+  reset();
+  state = 'play';
+  acc = 0;
+  overlay(ov, null);
+}
+
+function gameOver() {
+  state = 'over';
+  Sound.beep(150, 0.3, 'sawtooth');
+  best = recordBest('snake-best', score);
+  hud();
+  overlay(ov, `<h2>Game over</h2><p>You scored ${score}. Best: ${best}</p><button class="btn" onclick="start()">Play again</button>`);
+}
+
+function win() {
+  state = 'over';
+  best = recordBest('snake-best', score);
+  overlay(ov, `<h2>You filled the board!</h2><p>Score ${score}</p><button class="btn" onclick="start()">Play again</button>`);
+}
+
+function togglePause() {
+  if (state === 'play') { state = 'paused'; overlay(ov, '<h2>Paused</h2><p>Press Space to resume</p>'); }
+  else if (state === 'paused') { state = 'play'; overlay(ov, null); }
+  else start();
+}
+
+function draw() {
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    ctx.fillStyle = (x + y) % 2 ? '#0d1424' : '#0a1020';
+    ctx.fillRect(x * S, y * S, S, S);
+  }
+  // apple
+  ctx.fillStyle = '#ef4444';
+  ctx.beginPath();
+  ctx.arc(food.x * S + S / 2, food.y * S + S / 2 + 1, S * 0.38, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#22c55e';
+  ctx.fillRect(food.x * S + S / 2, food.y * S + 2, 3, 5);
+  // snake
+  snake.forEach((s, i) => {
+    const t = i / snake.length;
+    ctx.fillStyle = `hsl(${140 - t * 40}, 70%, ${55 - t * 20}%)`;
+    const pad = i === 0 ? 1 : 2;
+    ctx.beginPath();
+    ctx.roundRect(s.x * S + pad, s.y * S + pad, S - pad * 2, S - pad * 2, 5);
+    ctx.fill();
+  });
+  // eyes
+  const h = snake[0];
+  ctx.fillStyle = '#fff';
+  const ex = dir.y !== 0 ? [0.3, 0.7] : [0.5 + dir.x * 0.2, 0.5 + dir.x * 0.2];
+  const ey = dir.x !== 0 ? [0.3, 0.7] : [0.5 + dir.y * 0.2, 0.5 + dir.y * 0.2];
+  for (let i = 0; i < 2; i++) {
+    ctx.beginPath();
+    ctx.arc(h.x * S + ex[i] * S, h.y * S + ey[i] * S, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function loop(t) {
+  const dt = Math.min(100, t - last);
+  last = t;
+  if (state === 'play') {
+    acc += dt;
+    while (acc >= step && state === 'play') { acc -= step; tick(); }
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+const KEYS = {
+  ArrowUp: [0, -1], w: [0, -1], W: [0, -1],
+  ArrowDown: [0, 1], s: [0, 1], S: [0, 1],
+  ArrowLeft: [-1, 0], a: [-1, 0], A: [-1, 0],
+  ArrowRight: [1, 0], d: [1, 0], D: [1, 0]
+};
+document.addEventListener('keydown', e => {
+  if (KEYS[e.key]) { if (state !== 'paused') turn(...KEYS[e.key]); }
+  else if (e.key === ' ' || e.key === 'p') togglePause();
+});
+onSwipe(cv, d => turn(...{ up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[d]));
+cv.addEventListener('click', () => { if (state !== 'play') togglePause(); });
+
+reset();
+overlay(ov, '<h2>Snake</h2><p>Press an arrow key, Space or tap to start</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

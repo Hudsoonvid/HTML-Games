@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gem Clicker</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .wrap { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; width: min(900px, calc(100vw - 24px)); align-items: flex-start; }
+  .left { flex: 1 1 320px; display: flex; flex-direction: column; align-items: center; gap: 8px; position: relative; }
+  #count { font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  #rate { color: var(--muted); }
+  #gem {
+    font-size: 150px; background: radial-gradient(circle, rgba(139,92,246,.35), transparent 65%); border: 0; cursor: pointer;
+    width: 260px; height: 260px; border-radius: 50%; transition: transform .06s; user-select: none; -webkit-user-select: none; touch-action: manipulation;
+    animation: float 3s ease-in-out infinite;
+  }
+  #gem:active { transform: scale(.92); }
+  @keyframes float { 50% { translate: 0 -8px; } }
+  .float { position: absolute; pointer-events: none; font-weight: 800; color: #e9d5ff; animation: up 1s ease-out forwards; }
+  @keyframes up { to { transform: translateY(-80px); opacity: 0; } }
+  .shop { flex: 1 1 320px; display: flex; flex-direction: column; gap: 8px; }
+  .item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); cursor: pointer; text-align: left; color: var(--fg); width: 100%; }
+  .item:disabled { opacity: .45; cursor: default; }
+  .item .ic { font-size: 30px; }
+  .item .info { flex: 1; }
+  .item .name { font-weight: 700; }
+  .item .desc { font-size: 12px; color: var(--muted); }
+  .item .own { font-size: 24px; font-weight: 800; color: var(--muted); }
+  .item .cost { font-size: 13px; color: #c4b5fd; }
+  h3 { margin: 6px 0; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>💎 Gem Clicker</h1>
+  <div class="stats">All-time <b id="total">0</b></div>
+</header>
+<div class="wrap">
+  <div class="left">
+    <div id="count">0 gems</div>
+    <div id="rate">0 per second</div>
+    <button id="gem" aria-label="Mine a gem">💎</button>
+    <div class="help" id="clickinfo"></div>
+    <button class="btn alt" id="reset">Reset progress</button>
+  </div>
+  <div class="shop">
+    <h3>Shop</h3>
+    <div id="items"></div>
+  </div>
+</div>
+<p class="help">Click the gem to mine. Spend gems on upgrades that mine for you — progress is saved in your browser and keeps growing (at half speed) while you're away.</p>
+<script src="shared.js"></script>
+<script>
+const ITEMS = [
+  { id: 'pick', name: 'Better Pickaxe', icon: '⛏️', base: 15, click: 1, desc: '+1 gem per click' },
+  { id: 'miner', name: 'Miner', icon: '👷', base: 25, rate: 0.3, desc: '+0.3 gems / sec' },
+  { id: 'cart', name: 'Mine Cart', icon: '🛒', base: 120, rate: 1.5, desc: '+1.5 gems / sec' },
+  { id: 'drill', name: 'Power Drill', icon: '🔩', base: 900, rate: 9, desc: '+9 gems / sec' },
+  { id: 'dyn', name: 'Dynamite Crew', icon: '🧨', base: 6500, rate: 55, desc: '+55 gems / sec' },
+  { id: 'dig', name: 'Excavator', icon: '🚜', base: 45000, rate: 320, desc: '+320 gems / sec' },
+  { id: 'gloves', name: 'Golden Gloves', icon: '🧤', base: 60000, click: 50, desc: '+50 gems per click' },
+  { id: 'lab', name: 'Crystal Lab', icon: '🧪', base: 350000, rate: 1900, desc: '+1,900 gems / sec' },
+  { id: 'portal', name: 'Gem Portal', icon: '🌀', base: 3e6, rate: 12000, desc: '+12,000 gems / sec' },
+  { id: 'moon', name: 'Moon Mine', icon: '🌕', base: 4e7, rate: 90000, desc: '+90,000 gems / sec' }
+];
+const fresh = () => ({ gems: 0, total: 0, owned: {}, saved: Date.now() });
+let S = Store.get('clicker-save', null) || fresh();
+S.owned = S.owned || {};
+
+function fmt(n) {
+  if (n < 1000) return n < 10 && n % 1 ? n.toFixed(1) : Math.floor(n).toLocaleString();
+  const u = ['', 'K', 'M', 'B', 'T', 'Qa', 'Qi'];
+  const e = Math.min(Math.floor(Math.log10(n) / 3), u.length - 1);
+  return (n / 10 ** (e * 3)).toFixed(2) + u[e];
+}
+const owned = id => S.owned[id] || 0;
+const cost = it => Math.ceil(it.base * Math.pow(1.15, owned(it.id)));
+const perClick = () => 1 + ITEMS.reduce((s, it) => s + (it.click || 0) * owned(it.id), 0);
+const perSec = () => ITEMS.reduce((s, it) => s + (it.rate || 0) * owned(it.id), 0);
+
+// offline earnings at half rate, capped at 8 hours
+const away = Math.min((Date.now() - (S.saved || Date.now())) / 1000, 8 * 3600);
+if (away > 5 && perSec() > 0) {
+  const earned = perSec() * away * 0.5;
+  S.gems += earned;
+  S.total += earned;
+  setTimeout(() => float(document.getElementById('gem'), `+${fmt(earned)} while away`), 400);
+}
+
+const list = document.getElementById('items');
+ITEMS.forEach(it => {
+  const b = document.createElement('button');
+  b.className = 'item';
+  b.innerHTML = `<span class="ic">${it.icon}</span><span class="info"><div class="name">${it.name}</div><div class="desc">${it.desc}</div><div class="cost"></div></span><span class="own"></span>`;
+  b.onclick = () => {
+    const c = cost(it);
+    if (S.gems < c) return;
+    S.gems -= c;
+    S.owned[it.id] = owned(it.id) + 1;
+    Sound.beep(660, 0.06, 'triangle');
+    render();
+  };
+  it.el = b;
+  list.appendChild(b);
+});
+
+function float(el, text) {
+  const f = document.createElement('div');
+  f.className = 'float';
+  f.textContent = text;
+  const left = el.parentElement;
+  f.style.left = (el.offsetLeft + el.offsetWidth / 2 - 20 + rand(-40, 40)) + 'px';
+  f.style.top = (el.offsetTop + 60 + rand(-20, 20)) + 'px';
+  left.appendChild(f);
+  setTimeout(() => f.remove(), 1000);
+}
+
+function render() {
+  document.getElementById('count').textContent = fmt(S.gems) + ' gems';
+  document.getElementById('rate').textContent = fmt(perSec()) + ' per second';
+  document.getElementById('total').textContent = fmt(S.total);
+  document.getElementById('clickinfo').textContent = `${fmt(perClick())} per click`;
+  ITEMS.forEach((it, i) => {
+    // reveal items one step beyond what you can afford
+    const visible = i === 0 || owned(ITEMS[i - 1].id) > 0 || S.total >= it.base * 0.5;
+    it.el.style.display = visible ? '' : 'none';
+    it.el.disabled = S.gems < cost(it);
+    it.el.querySelector('.cost').textContent = '💎 ' + fmt(cost(it));
+    it.el.querySelector('.own').textContent = owned(it.id) || '';
+  });
+}
+
+document.getElementById('gem').addEventListener('click', e => {
+  const n = perClick();
+  S.gems += n;
+  S.total += n;
+  float(e.currentTarget, '+' + fmt(n));
+  Sound.beep(rand(900, 1200), 0.03, 'square', 0.02);
+  render();
+});
+document.getElementById('reset').onclick = () => {
+  if (!confirm('Erase all progress?')) return;
+  S = fresh();
+  Store.set('clicker-save', S);
+  render();
+};
+
+let last = performance.now(), saveT = 0, renderT = 0;
+function loop(t) {
+  const dt = Math.min(1000, t - last) / 1000;
+  last = t;
+  const g = perSec() * dt;
+  S.gems += g;
+  S.total += g;
+  saveT += dt;
+  renderT += dt;
+  if (renderT > 0.1) { renderT = 0; render(); }
+  if (saveT > 3) { saveT = 0; S.saved = Date.now(); Store.set('clicker-save', S); }
+  requestAnimationFrame(loop);
+}
+window.addEventListener('beforeunload', () => { S.saved = Date.now(); Store.set('clicker-save', S); });
+render();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

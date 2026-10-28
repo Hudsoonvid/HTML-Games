@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tower of Hanoi</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #board { display: flex; gap: 10px; width: min(720px, calc(100vw - 24px)); height: 320px; align-items: flex-end; padding: 16px; background: linear-gradient(#1a1c33, #23264a); border-radius: 14px; border: 1px solid var(--line); }
+  .peg { flex: 1; height: 100%; position: relative; display: flex; flex-direction: column-reverse; align-items: center; cursor: pointer; padding-bottom: 14px; border-radius: 10px; }
+  .peg:hover { background: rgba(255,255,255,.03); }
+  .peg.sel { background: rgba(139,92,246,.12); }
+  .peg::before { content: ''; position: absolute; bottom: 14px; width: 10px; height: 88%; background: #78350f; border-radius: 5px 5px 0 0; }
+  .peg::after { content: attr(data-k); position: absolute; bottom: -4px; color: var(--muted); font-size: 12px; }
+  .base { position: absolute; bottom: 8px; left: 4%; right: 4%; height: 8px; background: #92400e; border-radius: 4px; }
+  .disk { height: 24px; border-radius: 12px; margin-top: 3px; position: relative; z-index: 1; box-shadow: inset 0 -4px 0 rgba(0,0,0,.2); transition: transform .12s; }
+  .disk.lift { transform: translateY(-30px); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🗼 Tower of Hanoi</h1>
+  <div class="stats">Moves <b id="moves">0</b> Minimum <b id="min">7</b></div>
+</header>
+<div class="controls">
+  <select id="n"></select>
+  <button class="btn" id="reset">Restart</button>
+  <button class="btn alt" id="solve">▶ Watch solution</button>
+</div>
+<div class="stage">
+  <div id="board"></div>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Move the whole tower to the right-most peg. Click a peg to pick up its top disk, then click another peg to drop it. A disk can never sit on a smaller one. Keys <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> select pegs.</p>
+<script src="shared.js"></script>
+<script>
+const boardEl = document.getElementById('board'), ov = document.getElementById('ov'), nEl = document.getElementById('n');
+for (let i = 3; i <= 8; i++) nEl.insertAdjacentHTML('beforeend', `<option value="${i}" ${i === 4 ? 'selected' : ''}>${i} disks</option>`);
+let n, pegs, sel = null, moves, solving = null;
+
+function reset() {
+  clearInterval(solving);
+  solving = null;
+  n = +nEl.value;
+  pegs = [[...Array(n).keys()].map(i => n - i), [], []];
+  sel = null;
+  moves = 0;
+  document.getElementById('min').textContent = 2 ** n - 1;
+  overlay(ov, null);
+  render();
+}
+
+function render() {
+  boardEl.innerHTML = '';
+  pegs.forEach((p, i) => {
+    const el = document.createElement('div');
+    el.className = 'peg' + (sel === i ? ' sel' : '');
+    el.dataset.k = i + 1;
+    el.innerHTML = '<div class="base"></div>';
+    p.forEach((d, k) => {
+      const disk = document.createElement('div');
+      disk.className = 'disk' + (sel === i && k === p.length - 1 ? ' lift' : '');
+      disk.style.width = (20 + d / n * 75) + '%';
+      disk.style.background = `hsl(${(d * 360 / n + 260) % 360}, 75%, 58%)`;
+      el.appendChild(disk);
+    });
+    el.onclick = () => { if (!solving) choose(i); };
+    boardEl.appendChild(el);
+  });
+  document.getElementById('moves').textContent = moves;
+}
+
+function move(from, to) {
+  const a = pegs[from], b = pegs[to];
+  if (!a.length || (b.length && b[b.length - 1] < a[a.length - 1])) return false;
+  b.push(a.pop());
+  moves++;
+  Sound.beep(300 + b[b.length - 1] * 60, 0.06, 'triangle', 0.04);
+  return true;
+}
+
+function choose(i) {
+  if (sel === null) { if (pegs[i].length) sel = i; }
+  else if (sel === i) sel = null;
+  else {
+    if (!move(sel, i)) Sound.beep(140, 0.12, 'sawtooth', 0.03);
+    sel = null;
+  }
+  render();
+  if (pegs[2].length === n) {
+    const perfect = moves === 2 ** n - 1;
+    if (!solving) recordBest('hanoi-' + n, moves, true);
+    setTimeout(() => overlay(ov, `<h2>${perfect ? 'Perfect solution! 🏆' : 'Tower moved!'}</h2><p>${moves} moves (minimum ${2 ** n - 1})</p><button class="btn" onclick="reset()">Play again</button>`), 200);
+  }
+}
+
+function solve() {
+  reset();
+  const steps = [];
+  (function h(k, a, b, c) { if (!k) return; h(k - 1, a, c, b); steps.push([a, c]); h(k - 1, b, a, c); })(n, 0, 1, 2);
+  let i = 0;
+  solving = setInterval(() => {
+    if (i >= steps.length) { clearInterval(solving); solving = null; return; }
+    const [a, c] = steps[i++];
+    move(a, c);
+    render();
+    if (i >= steps.length) { clearInterval(solving); solving = null; overlay(ov, `<h2>That's how it's done</h2><p>${moves} moves</p><button class="btn" onclick="reset()">Your turn</button>`); }
+  }, Math.max(60, 500 - n * 50));
+}
+
+document.addEventListener('keydown', e => { const i = +e.key - 1; if (i >= 0 && i <= 2 && !solving) choose(i); });
+document.getElementById('reset').onclick = reset;
+document.getElementById('solve').onclick = solve;
+nEl.onchange = reset;
+reset();
+</script>
+</body>
+</html>

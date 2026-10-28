@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whack-a-Mole</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #field {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    padding: 24px;
+    background: linear-gradient(#65a30d, #3f6212);
+    border-radius: 16px;
+    width: min(520px, calc(100vw - 24px));
+    position: relative;
+    cursor: crosshair;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+  }
+  .hole { aspect-ratio: 1; position: relative; overflow: hidden; border-radius: 50% 50% 46% 46% / 30% 30% 70% 70%; }
+  .hole::after { content: ''; position: absolute; left: 6%; right: 6%; bottom: 4%; height: 34%; background: #1c1917; border-radius: 50%; box-shadow: inset 0 8px 12px #000; }
+  .mole {
+    position: absolute; left: 18%; width: 64%; bottom: -75%; height: 72%;
+    font-size: min(64px, 13vw); display: flex; align-items: flex-start; justify-content: center;
+    transition: bottom .12s ease-out; z-index: 1;
+  }
+  .hole.up .mole { bottom: 18%; }
+  .hole.hit .mole { filter: grayscale(1) brightness(.6); transform: scaleY(.8); }
+  .hole::before { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 22%; background: #4d7c0f; z-index: 2; border-radius: 0 0 40% 40%; }
+  .pop { position: absolute; font-weight: 800; font-size: 22px; pointer-events: none; animation: rise .7s ease-out forwards; z-index: 3; }
+  @keyframes rise { to { transform: translateY(-40px); opacity: 0; } }
+  .timebar { width: min(520px, calc(100vw - 24px)); height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-top: 10px; }
+  .timebar div { height: 100%; background: var(--good); width: 100%; transition: width .1s linear; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔨 Whack-a-Mole</h1>
+  <div class="stats">Score <b id="score">0</b> Time <b id="time">30</b> Best <b id="best">0</b></div>
+</header>
+<div class="timebar"><div id="bar"></div></div>
+<div class="stage">
+  <div id="field"></div>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Click or tap moles as they pop up. 🐹 = 1 point, 👑 golden mole = 5 points, 💣 bomb = −5. You can also use the number keys <kbd>1</kbd>–<kbd>9</kbd> (numpad layout).</p>
+<script src="shared.js"></script>
+<script>
+const field = document.getElementById('field'), ov = document.getElementById('ov');
+const ROUND = 30000;
+let holes = [], score, timeLeft, state = 'ready', spawnT, last = 0;
+let best = Store.get('mole-best', 0);
+document.getElementById('best').textContent = best;
+
+for (let i = 0; i < 9; i++) {
+  const h = document.createElement('div');
+  h.className = 'hole';
+  h.innerHTML = '<div class="mole"></div>';
+  h.addEventListener('pointerdown', e => { e.preventDefault(); whack(i, e); });
+  field.appendChild(h);
+  holes.push({ el: h, mole: h.firstChild, up: false, kind: null, t: 0 });
+}
+
+function start() {
+  score = 0;
+  timeLeft = ROUND;
+  spawnT = 400;
+  holes.forEach(h => { h.up = false; h.el.classList.remove('up', 'hit'); });
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('time').textContent = Math.ceil(timeLeft / 1000);
+  document.getElementById('bar').style.width = (timeLeft / ROUND * 100) + '%';
+  document.getElementById('bar').style.background = timeLeft < 8000 ? 'var(--bad)' : 'var(--good)';
+}
+
+function popText(h, text, color) {
+  const p = document.createElement('div');
+  p.className = 'pop';
+  p.textContent = text;
+  p.style.color = color;
+  const r = h.el.getBoundingClientRect(), fr = field.getBoundingClientRect();
+  p.style.left = (r.left - fr.left + r.width / 2 - 14) + 'px';
+  p.style.top = (r.top - fr.top + 10) + 'px';
+  field.appendChild(p);
+  setTimeout(() => p.remove(), 700);
+}
+
+function whack(i) {
+  if (state !== 'play') return;
+  const h = holes[i];
+  if (!h.up || h.el.classList.contains('hit')) return;
+  h.el.classList.add('hit');
+  const pts = h.kind === 'bomb' ? -5 : h.kind === 'gold' ? 5 : 1;
+  score = Math.max(0, score + pts);
+  popText(h, (pts > 0 ? '+' : '') + pts, pts > 0 ? '#fef08a' : '#fca5a5');
+  Sound.beep(pts > 0 ? 600 + pts * 60 : 120, 0.08, pts > 0 ? 'square' : 'sawtooth', 0.04);
+  h.t = Math.min(h.t, 250);
+  hud();
+}
+
+function update(dt) {
+  timeLeft -= dt;
+  const progress = 1 - timeLeft / ROUND;
+  for (const h of holes) {
+    if (!h.up) continue;
+    h.t -= dt;
+    if (h.t <= 0) { h.up = false; h.el.classList.remove('up', 'hit'); }
+  }
+  spawnT -= dt;
+  if (spawnT <= 0) {
+    const free = holes.filter(h => !h.up);
+    if (free.length) {
+      const h = pick(free), r = Math.random();
+      h.kind = r < 0.12 ? 'bomb' : r < 0.2 ? 'gold' : 'mole';
+      h.mole.textContent = { mole: '🐹', gold: '👑', bomb: '💣' }[h.kind];
+      h.up = true;
+      h.t = (h.kind === 'gold' ? 650 : 1100) - progress * 450;
+      h.el.classList.remove('hit');
+      h.el.classList.add('up');
+    }
+    spawnT = rand(350, 800) * (1 - progress * 0.5);
+  }
+  if (timeLeft <= 0) {
+    timeLeft = 0;
+    state = 'over';
+    holes.forEach(h => { h.up = false; h.el.classList.remove('up', 'hit'); });
+    best = recordBest('mole-best', score);
+    document.getElementById('best').textContent = best;
+    overlay(ov, `<h2>Time's up!</h2><p>You scored ${score}. Best ${best}</p><button class="btn" onclick="start()">Play again</button>`);
+  }
+  hud();
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  requestAnimationFrame(loop);
+}
+
+// number keys mapped like a numpad: 7 8 9 on top
+document.addEventListener('keydown', e => {
+  const n = +e.key;
+  if (n >= 1 && n <= 9) whack([6, 7, 8, 3, 4, 5, 0, 1, 2][n - 1]);
+  if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') start();
+});
+
+overlay(ov, '<h2>Whack-a-Mole</h2><p>30 seconds. Hit as many moles as you can!</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

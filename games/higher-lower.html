@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Higher or Lower</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .row { display: flex; gap: 22px; align-items: center; justify-content: center; margin: 18px 0; }
+  .card { width: 130px; height: 182px; border-radius: 12px; background: #fff; color: #111827; position: relative; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-weight: 800; }
+  .card.red { color: #dc2626; }
+  .card .tl { position: absolute; left: 10px; top: 8px; font-size: 26px; line-height: 1; text-align: center; }
+  .card .br { position: absolute; right: 10px; bottom: 8px; font-size: 26px; line-height: 1; text-align: center; transform: rotate(180deg); }
+  .card .mid { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 64px; }
+  .card.back { background: repeating-linear-gradient(45deg, #4338ca 0 8px, #4f46e5 8px 16px); border: 5px solid #fff; }
+  .card.back > * { display: none; }
+  .card.flip { animation: flip .35s ease-out; }
+  @keyframes flip { from { transform: rotateY(90deg); } }
+  .big { font-size: 20px; padding: 14px 26px; }
+  #odds { color: var(--muted); font-size: 13px; text-align: center; }
+  #trail { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; max-width: 600px; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⬆️ Higher or Lower ⬇️</h1>
+  <div class="stats">Streak <b id="streak">0</b> Best <b id="best">0</b> Deck <b id="left">52</b></div>
+</header>
+<div class="row"><div id="cur"></div><div id="next"></div></div>
+<div class="controls">
+  <button class="btn big" id="lo">⬇ Lower</button>
+  <button class="btn big" id="hi">⬆ Higher</button>
+</div>
+<div id="odds"></div>
+<div class="msg" id="msg">Will the next card be higher or lower?</div>
+<div id="trail"></div>
+<p class="help">Aces are low, Kings are high. A tie keeps your streak alive. How long a streak can you build before the deck runs out? Keys: <kbd>↑</kbd> higher, <kbd>↓</kbd> lower.</p>
+<script src="shared.js"></script>
+<script>
+const SUITS = ['♠', '♥', '♦', '♣'], RANKS = ['', 'A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+let deck, cur, streak, busy = false, seen;
+let best = Store.get('hilo-best', 0);
+
+function cardHTML(c, extra = '') {
+  if (!c) return '<div class="card back"><span></span></div>';
+  const r = c.s === 1 || c.s === 2;
+  return `<div class="card ${r ? 'red' : ''} ${extra}"><div class="tl">${RANKS[c.r]}<br>${SUITS[c.s]}</div><div class="mid">${SUITS[c.s]}</div><div class="br">${RANKS[c.r]}<br>${SUITS[c.s]}</div></div>`;
+}
+
+function newDeck() {
+  deck = [];
+  for (let s = 0; s < 4; s++) for (let r = 1; r <= 13; r++) deck.push({ s, r });
+  shuffle(deck);
+  seen = [];
+}
+
+function start() {
+  newDeck();
+  cur = deck.pop();
+  streak = 0;
+  render();
+}
+
+function render() {
+  document.getElementById('cur').innerHTML = cardHTML(cur);
+  document.getElementById('next').innerHTML = cardHTML(null);
+  document.getElementById('streak').textContent = streak;
+  document.getElementById('best').textContent = best;
+  document.getElementById('left').textContent = deck.length;
+  const hi = deck.filter(c => c.r > cur.r).length, lo = deck.filter(c => c.r < cur.r).length, n = deck.length || 1;
+  document.getElementById('odds').textContent = `Odds from the remaining deck: higher ${Math.round(hi / n * 100)}% · lower ${Math.round(lo / n * 100)}% · tie ${Math.round((n - hi - lo) / n * 100)}%`;
+  document.getElementById('trail').innerHTML = seen.map(c => `<span style="color:${c.s === 1 || c.s === 2 ? '#f87171' : '#e5e7eb'}">${RANKS[c.r]}${SUITS[c.s]}</span>`).join(' ');
+}
+
+function guess(up) {
+  if (busy) return;
+  busy = true;
+  const next = deck.pop();
+  document.getElementById('next').innerHTML = cardHTML(next, 'flip');
+  const ok = next.r === cur.r || (up ? next.r > cur.r : next.r < cur.r);
+  const msg = document.getElementById('msg');
+  setTimeout(() => {
+    seen.push(cur);
+    if (ok) {
+      streak++;
+      best = recordBest('hilo-best', streak);
+      msg.textContent = next.r === cur.r ? 'A tie — you survive!' : pick(['Correct!', 'Nice call!', 'Yes!', 'Spot on!']);
+      Sound.beep(600 + Math.min(streak, 20) * 30, 0.08, 'triangle');
+      cur = next;
+      if (!deck.length) {
+        msg.textContent = `You went through the whole deck! Streak ${streak} 🏆 New deck…`;
+        newDeck();
+      }
+    } else {
+      msg.textContent = `Wrong — it was ${RANKS[next.r]}${SUITS[next.s]}. Your streak ended at ${streak}.`;
+      Sound.beep(160, 0.3, 'sawtooth');
+      streak = 0;
+      cur = next;
+      if (!deck.length) newDeck();
+    }
+    busy = false;
+    render();
+  }, 650);
+}
+
+document.getElementById('hi').onclick = () => guess(true);
+document.getElementById('lo').onclick = () => guess(false);
+document.addEventListener('keydown', e => { if (e.key === 'ArrowUp') guess(true); if (e.key === 'ArrowDown') guess(false); });
+start();
+</script>
+</body>
+</html>

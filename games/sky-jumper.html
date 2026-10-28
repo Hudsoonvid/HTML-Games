@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sky Jumper</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🦘 Sky Jumper</h1>
+  <div class="stats">Height <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="400" height="600"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Steer with <kbd>←</kbd><kbd>→</kbd> / <kbd>A</kbd><kbd>D</kbd>, or hold the left / right half of the screen. Bounce ever higher! Brown platforms crumble, blue ones move, springs launch you.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, PW = 64, PH = 12;
+let me, plats, camY, maxH, state = 'ready', last = 0, keys = {}, touchDir = 0, topY;
+let best = Store.get('jumper-best', 0);
+document.getElementById('best').textContent = best;
+
+function makePlat(y) {
+  const h = -y;
+  const r = Math.random();
+  let type = 'normal';
+  if (h > 1500 && r < Math.min(0.3, h / 20000)) type = 'moving';
+  else if (h > 800 && r < 0.45 && r > 0.3) type = 'break';
+  const p = { x: rand(0, W - PW), y, type, vx: type === 'moving' ? pick([-1.5, 1.5]) * (1 + h / 15000) : 0, spring: type === 'normal' && Math.random() < 0.07 };
+  return p;
+}
+
+function reset() {
+  me = { x: W / 2 - 15, y: H - 80, vx: 0, vy: -12, w: 30, h: 34, face: 1 };
+  plats = [{ x: W / 2 - PW / 2, y: H - 40, type: 'normal', vx: 0 }];
+  topY = H - 40;
+  while (topY > -H) addPlat();
+  camY = 0;
+  maxH = 0;
+}
+
+function addPlat() {
+  const h = -topY;
+  const gapMax = Math.min(150, 70 + h / 60);
+  topY -= rand(40, gapMax);
+  plats.push(makePlat(topY));
+  // make sure a breakable platform is never the only way up
+  if (plats[plats.length - 1].type === 'break') { topY -= rand(10, 30); plats.push({ ...makePlat(topY), type: 'normal', spring: false }); }
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  const dir = (keys.ArrowLeft || keys.a ? -1 : 0) + (keys.ArrowRight || keys.d ? 1 : 0) + touchDir;
+  me.vx += dir * 0.9 * f;
+  me.vx *= Math.pow(0.86, f);
+  if (dir) me.face = Math.sign(dir);
+  me.x += me.vx * f;
+  if (me.x > W) me.x -= W + me.w;
+  if (me.x < -me.w) me.x += W + me.w;
+  const prevBottom = me.y + me.h;
+  me.vy = Math.min(me.vy + 0.42 * f, 14);
+  me.y += me.vy * f;
+  if (me.vy > 0) {
+    for (const p of plats) {
+      if (p.broken) continue;
+      if (prevBottom <= p.y + 2 && me.y + me.h >= p.y && me.x + me.w - 6 > p.x && me.x + 6 < p.x + PW) {
+        if (p.type === 'break') { p.broken = true; p.fall = 0; Sound.beep(200, 0.08, 'sawtooth', 0.03); continue; }
+        me.y = p.y - me.h;
+        if (p.spring && me.x + me.w / 2 > p.x + PW / 2 - 14 && me.x + me.w / 2 < p.x + PW / 2 + 14) { me.vy = -21; Sound.beep(900, 0.15, 'triangle'); }
+        else { me.vy = -12.5; Sound.beep(520, 0.05, 'triangle', 0.03); }
+        break;
+      }
+    }
+  }
+  for (const p of plats) {
+    if (p.type === 'moving') { p.x += p.vx * f; if (p.x < 0 || p.x > W - PW) p.vx *= -1; }
+    if (p.broken) { p.fall += 0.5 * f; p.y += p.fall * f; }
+  }
+  // camera follows upward only
+  const screenY = me.y - camY;
+  if (screenY < H * 0.4) camY = me.y - H * 0.4;
+  maxH = Math.max(maxH, Math.floor((H - 80 - me.y) / 10));
+  document.getElementById('score').textContent = maxH;
+  while (topY > camY - 100) addPlat();
+  plats = plats.filter(p => p.y < camY + H + 60);
+  if (me.y - camY > H + 40) {
+    state = 'over';
+    best = recordBest('jumper-best', maxH);
+    document.getElementById('best').textContent = best;
+    Sound.beep(160, 0.4, 'sawtooth');
+    overlay(ov, `<h2>You fell!</h2><p>Height ${maxH} · Best ${best}</p><button class="btn" onclick="begin()">Jump again</button>`);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#fefce8';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#e7e5c4';
+  ctx.lineWidth = 1;
+  const off = ((-camY) % 20 + 20) % 20;
+  for (let y = off; y < H; y += 20) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  for (let x = 0; x < W; x += 20) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (const p of plats) {
+    const y = p.y - camY;
+    ctx.fillStyle = p.type === 'moving' ? '#3b82f6' : p.type === 'break' ? '#a16207' : '#22c55e';
+    ctx.beginPath(); ctx.roundRect(p.x, y, PW, PH, 6); ctx.fill();
+    if (p.type === 'break') { ctx.strokeStyle = '#713f12'; ctx.beginPath(); ctx.moveTo(p.x + 20, y); ctx.lineTo(p.x + 28, y + PH); ctx.moveTo(p.x + 44, y); ctx.lineTo(p.x + 38, y + PH); ctx.stroke(); }
+    if (p.spring) { ctx.fillStyle = '#64748b'; ctx.fillRect(p.x + PW / 2 - 8, y - 10, 16, 10); ctx.fillStyle = '#94a3b8'; ctx.fillRect(p.x + PW / 2 - 10, y - 12, 20, 3); }
+  }
+  // jumper
+  const x = me.x, y = me.y - camY;
+  ctx.fillStyle = '#84cc16';
+  ctx.beginPath(); ctx.roundRect(x, y + 4, me.w, me.h - 10, 10); ctx.fill();
+  ctx.fillStyle = '#4d7c0f';
+  ctx.fillRect(x + 4, y + me.h - 8, 5, 8); ctx.fillRect(x + 12, y + me.h - 8, 5, 8); ctx.fillRect(x + 20, y + me.h - 8, 5, 8);
+  ctx.fillStyle = '#84cc16';
+  ctx.fillRect(me.face > 0 ? x + me.w - 2 : x - 10, y + 12, 12, 8);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x + me.w / 2 + me.face * 5, y + 13, 5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(x + me.w / 2 + me.face * 7, y + 13, 2.2, 0, 7); ctx.fill();
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function begin() { reset(); state = 'play'; overlay(ov, null); }
+
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') begin();
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+cv.addEventListener('pointerdown', e => { e.preventDefault(); touchDir = canvasPoint(cv, e).x < W / 2 ? -1 : 1; });
+cv.addEventListener('pointermove', e => { if (touchDir) touchDir = canvasPoint(cv, e).x < W / 2 ? -1 : 1; });
+window.addEventListener('pointerup', () => { touchDir = 0; });
+
+reset();
+overlay(ov, '<h2>Sky Jumper</h2><p>How high can you go?</p><button class="btn" onclick="begin()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

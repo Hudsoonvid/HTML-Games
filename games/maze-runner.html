@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maze Runner</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🌀 Maze Runner</h1>
+  <div class="stats">Level <b id="level">1</b> Time <b id="time">0.0</b>s Steps <b id="steps">0</b></div>
+</header>
+<div class="controls">
+  <label class="help" style="margin:0"><input type="checkbox" id="fog"> Fog of war</label>
+  <button class="btn alt" id="restart">Restart from level 1</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="600" height="600"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<div class="touchpad"><button id="tL">◀</button><button id="tU">▲</button><button id="tD">▼</button><button id="tR">▶</button></div>
+<p class="help">Guide the dot from the top-left to the flag in the bottom-right with <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd>, WASD, swipes, or by dragging. Holding a key slides you along a corridor. Mazes grow every level.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+let level = 1, N, walls, px, py, steps, t0, done, trail, S;
+
+// walls[y][x] = bitmask: 1 top, 2 right, 4 bottom, 8 left
+function generate(n) {
+  const w = Array.from({ length: n }, () => Array(n).fill(15));
+  const seen = Array.from({ length: n }, () => Array(n).fill(false));
+  const stack = [[0, 0]];
+  seen[0][0] = true;
+  const D = [[0, -1, 1, 4], [1, 0, 2, 8], [0, 1, 4, 1], [-1, 0, 8, 2]];
+  while (stack.length) {
+    const [x, y] = stack[stack.length - 1];
+    const opts = D.filter(([dx, dy]) => { const nx = x + dx, ny = y + dy; return nx >= 0 && ny >= 0 && nx < n && ny < n && !seen[ny][nx]; });
+    if (!opts.length) { stack.pop(); continue; }
+    const [dx, dy, b, ob] = pick(opts);
+    w[y][x] &= ~b;
+    w[y + dy][x + dx] &= ~ob;
+    seen[y + dy][x + dx] = true;
+    stack.push([x + dx, y + dy]);
+  }
+  return w;
+}
+
+function startLevel() {
+  N = Math.min(6 + level * 2, 40);
+  walls = generate(N);
+  S = cv.width / N;
+  px = 0; py = 0; steps = 0; done = false;
+  trail = [[0, 0]];
+  t0 = null;
+  document.getElementById('level').textContent = level;
+  document.getElementById('steps').textContent = 0;
+  document.getElementById('time').textContent = '0.0';
+  overlay(ov, null);
+  draw();
+}
+
+function tryMove(dx, dy) {
+  if (done) return false;
+  const bit = dx > 0 ? 2 : dx < 0 ? 8 : dy > 0 ? 4 : 1;
+  if (walls[py][px] & bit) return false;
+  if (t0 === null) t0 = performance.now();
+  px += dx; py += dy;
+  steps++;
+  const lastT = trail[trail.length - 2];
+  if (lastT && lastT[0] === px && lastT[1] === py) trail.pop(); else trail.push([px, py]);
+  document.getElementById('steps').textContent = steps;
+  if (px === N - 1 && py === N - 1) finish();
+  return true;
+}
+
+// keep moving until reaching a junction or dead end (nice for big mazes)
+function slide(dx, dy) {
+  if (!tryMove(dx, dy)) return;
+  for (let k = 0; k < N * N && !done; k++) {
+    const w = walls[py][px];
+    const exits = [[0, -1, 1], [1, 0, 2], [0, 1, 4], [-1, 0, 8]].filter(([ex, ey, b]) => !(w & b) && !(ex === -dx && ey === -dy));
+    if (exits.length !== 1) break;
+    [dx, dy] = exits[0];
+    tryMove(dx, dy);
+  }
+  draw();
+}
+
+function finish() {
+  done = true;
+  const secs = ((performance.now() - t0) / 1000).toFixed(1);
+  const best = recordBest('maze-level-best', level);
+  Sound.beep(880, 0.25, 'triangle');
+  draw();
+  overlay(ov, `<h2>Level ${level} cleared!</h2><p>${secs}s · ${steps} steps · Highest level ${best}</p><button class="btn" onclick="level++; startLevel()">Next maze</button>`);
+}
+
+function draw() {
+  ctx.fillStyle = '#0b0c18';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  const fog = document.getElementById('fog').checked;
+  ctx.fillStyle = 'rgba(34,211,238,.15)';
+  trail.forEach(([x, y]) => ctx.fillRect(x * S, y * S, S, S));
+  ctx.fillStyle = '#22c55e';
+  ctx.font = `${S * 0.7}px system-ui`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('🏁', (N - 0.5) * S, (N - 0.5) * S);
+  ctx.strokeStyle = '#a78bfa';
+  ctx.lineWidth = Math.max(2, S * 0.12);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const w = walls[y][x], X = x * S, Y = y * S;
+    if (w & 1) { ctx.moveTo(X, Y); ctx.lineTo(X + S, Y); }
+    if (w & 8) { ctx.moveTo(X, Y); ctx.lineTo(X, Y + S); }
+    if (y === N - 1 && (w & 4)) { ctx.moveTo(X, Y + S); ctx.lineTo(X + S, Y + S); }
+    if (x === N - 1 && (w & 2)) { ctx.moveTo(X + S, Y); ctx.lineTo(X + S, Y + S); }
+  }
+  ctx.stroke();
+  ctx.fillStyle = '#f472b6';
+  ctx.beginPath(); ctx.arc((px + 0.5) * S, (py + 0.5) * S, S * 0.3, 0, 7); ctx.fill();
+  if (fog && !done) {
+    const g = ctx.createRadialGradient((px + 0.5) * S, (py + 0.5) * S, S * 1.5, (px + 0.5) * S, (py + 0.5) * S, S * 4);
+    g.addColorStop(0, 'rgba(11,12,24,0)');
+    g.addColorStop(1, 'rgba(11,12,24,1)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+function tick() {
+  if (t0 !== null && !done) document.getElementById('time').textContent = ((performance.now() - t0) / 1000).toFixed(1);
+  requestAnimationFrame(tick);
+}
+
+const DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1], a: [-1, 0], d: [1, 0], w: [0, -1], s: [0, 1] };
+document.addEventListener('keydown', e => {
+  if (DIRS[e.key]) slide(...DIRS[e.key]);
+  if (e.key === 'Enter' && done) { level++; startLevel(); }
+});
+// drag the dot with mouse / finger: step toward the pointer's cell
+let dragging = false, dragged = false;
+onSwipe(cv, d => { if (!dragged) slide(...{ left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[d]); });
+cv.addEventListener('pointerdown', e => { const p = canvasPoint(cv, e); dragged = false; if (Math.floor(p.x / S) === px && Math.floor(p.y / S) === py) dragging = dragged = true; });
+cv.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const p = canvasPoint(cv, e), cx = Math.floor(p.x / S), cy = Math.floor(p.y / S);
+  if (Math.abs(cx - px) + Math.abs(cy - py) === 1) { tryMove(cx - px, cy - py); draw(); }
+});
+window.addEventListener('pointerup', () => { dragging = false; });
+[['tL', [-1, 0]], ['tR', [1, 0]], ['tU', [0, -1]], ['tD', [0, 1]]].forEach(([id, d]) =>
+  document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); slide(...d); }));
+document.getElementById('fog').onchange = draw;
+document.getElementById('restart').onclick = () => { level = 1; startLevel(); };
+startLevel();
+tick();
+</script>
+</body>
+</html>

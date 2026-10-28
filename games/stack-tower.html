@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stack Tower</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏗️ Stack Tower</h1>
+  <div class="stats">Height <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="400" height="600"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Click, tap or press <kbd>Space</kbd> to drop the sliding block. Anything hanging over the edge gets sliced off. Perfect drops in a row make the block grow back.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, BH = 26;
+let tower, cur, debris, cam, camTarget, combo, state = 'ready', last = 0, flash = 0;
+let best = Store.get('stack-best', 0);
+document.getElementById('best').textContent = best;
+
+const color = i => `hsl(${(i * 9 + 200) % 360}, 70%, 58%)`;
+
+function reset() {
+  tower = [{ x: W / 2 - 110, w: 220, y: H - 80 }];
+  debris = [];
+  combo = 0;
+  cam = camTarget = 0;
+  spawn();
+}
+
+function spawn() {
+  const top = tower[tower.length - 1], n = tower.length;
+  const fromLeft = n % 2 === 0;
+  const speed = Math.min(2.2 + n * 0.08, 6.5);
+  cur = { x: fromLeft ? -top.w : W, w: top.w, y: top.y - BH, vx: fromLeft ? speed : -speed };
+}
+
+function drop() {
+  if (state === 'ready' || state === 'over') { reset(); state = 'play'; overlay(ov, null); return; }
+  if (state !== 'play') return;
+  const top = tower[tower.length - 1];
+  const l = Math.max(cur.x, top.x), r = Math.min(cur.x + cur.w, top.x + top.w);
+  if (r - l <= 0) {
+    debris.push({ ...cur, vy: 0, i: tower.length });
+    gameOver();
+    return;
+  }
+  if (Math.abs(cur.x - top.x) < 5) {
+    combo++;
+    cur.x = top.x;
+    let w = top.w;
+    if (combo >= 3) w = Math.min(220, w + 12);
+    tower.push({ x: top.x - (w - top.w) / 2, w, y: cur.y });
+    flash = 300;
+    Sound.beep(500 + Math.min(combo, 10) * 80, 0.1, 'triangle');
+  } else {
+    combo = 0;
+    // sliced-off part falls away
+    if (cur.x < l) debris.push({ x: cur.x, w: l - cur.x, y: cur.y, vy: 0, i: tower.length });
+    if (cur.x + cur.w > r) debris.push({ x: r, w: cur.x + cur.w - r, y: cur.y, vy: 0, i: tower.length });
+    tower.push({ x: l, w: r - l, y: cur.y });
+    Sound.beep(300, 0.05, 'square', 0.03);
+  }
+  document.getElementById('score').textContent = tower.length - 1;
+  if (tower.length * BH > H * 0.45) camTarget = tower.length * BH - H * 0.45;
+  spawn();
+}
+
+function gameOver() {
+  state = 'over';
+  Sound.beep(150, 0.4, 'sawtooth');
+  const s = tower.length - 1;
+  best = recordBest('stack-best', s);
+  document.getElementById('best').textContent = best;
+  overlay(ov, `<h2>Tower toppled!</h2><p>Height ${s} · Best ${best}</p><p>Click or press Space to build again</p>`);
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  if (state === 'play') {
+    cur.x += cur.vx * f;
+    if (cur.x > W - cur.w * 0.15 && cur.vx > 0) cur.vx *= -1;
+    if (cur.x < -cur.w * 0.85 && cur.vx < 0) cur.vx *= -1;
+  }
+  cam += (camTarget - cam) * Math.min(1, 0.08 * f);
+  debris.forEach(d => { d.vy += 0.5 * f; d.y += d.vy * f; });
+  debris = debris.filter(d => d.y + cam < H + 100);
+  flash = Math.max(0, flash - dt);
+}
+
+function block(b, i) {
+  const y = b.y + cam;
+  ctx.fillStyle = color(i);
+  ctx.fillRect(b.x, y, b.w, BH);
+  ctx.fillStyle = 'rgba(255,255,255,.25)';
+  ctx.fillRect(b.x, y, b.w, 4);
+  ctx.fillStyle = 'rgba(0,0,0,.18)';
+  ctx.fillRect(b.x, y + BH - 4, b.w, 4);
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  const hue = (200 + tower.length * 4) % 360;
+  g.addColorStop(0, `hsl(${hue}, 45%, 18%)`);
+  g.addColorStop(1, `hsl(${(hue + 40) % 360}, 45%, 8%)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  tower.forEach((b, i) => block(b, i));
+  debris.forEach(d => block(d, d.i));
+  if (state === 'play') block(cur, tower.length);
+  if (flash > 0) {
+    const t = tower[tower.length - 1];
+    ctx.strokeStyle = `rgba(255,255,255,${flash / 300})`;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(t.x - 4, t.y + cam - 4, t.w + 8, BH + 8);
+  }
+  ctx.fillStyle = 'rgba(255,255,255,.9)';
+  ctx.font = 'bold 54px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText(tower.length - 1, W / 2, 80);
+  if (combo >= 2) { ctx.font = 'bold 18px system-ui'; ctx.fillStyle = '#fde047'; ctx.fillText(`Perfect ×${combo}`, W / 2, 110); }
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) drop(); });
+cv.addEventListener('pointerdown', e => { e.preventDefault(); drop(); });
+ov.addEventListener('pointerdown', e => { e.preventDefault(); drop(); });
+
+reset();
+overlay(ov, '<h2>Stack Tower</h2><p>How tall can you build it?</p><p>Click or press Space to start</p>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

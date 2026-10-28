@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mancala</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #board {
+    display: grid; grid-template-columns: 1.1fr repeat(6, 1fr) 1.1fr; grid-template-rows: 1fr 1fr; gap: 10px;
+    width: min(760px, calc(100vw - 20px)); padding: 16px; border-radius: 60px; background: linear-gradient(#92400e, #78350f); box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  }
+  .pit, .store { border-radius: 50%; background: radial-gradient(circle at 50% 40%, #451a03, #2b1102); display: flex; flex-wrap: wrap; align-content: center; justify-content: center; gap: 2px; padding: 8px; position: relative; aspect-ratio: 1; border: 0; color: inherit; }
+  .store { grid-row: 1 / 3; aspect-ratio: auto; border-radius: 40px; }
+  .pit.mine { cursor: pointer; }
+  .pit.mine.can:hover { box-shadow: 0 0 0 3px #facc15 inset; }
+  .pit.flash { box-shadow: 0 0 0 3px #22d3ee inset; }
+  .seed { width: 11px; height: 11px; border-radius: 50%; box-shadow: inset -2px -2px 3px rgba(0,0,0,.4); }
+  .count { position: absolute; bottom: -2px; right: 6px; font-size: 13px; font-weight: 800; color: #fde68a; }
+  .store .count { bottom: 8px; right: 50%; transform: translateX(50%); font-size: 20px; }
+  .lbl { text-align: center; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🫘 Mancala</h1>
+  <div class="stats">You <b id="w">0</b> CPU <b id="l">0</b></div>
+</header>
+<div class="controls">
+  <select id="diff"><option value="2">Easy</option><option value="5" selected>Medium</option><option value="9">Hard</option></select>
+  <select id="seeds"><option value="3">3 seeds per pit</option><option value="4" selected>4 seeds per pit</option><option value="5">5 seeds per pit</option></select>
+  <button class="btn" id="new">New game</button>
+</div>
+<div class="lbl">⬆ CPU's pits (right to left) — CPU store on the left</div>
+<div class="msg" id="msg"></div>
+<div id="board"></div>
+<div class="lbl">⬇ Your pits (left to right) — your store on the right</div>
+<p class="help">Pick one of your pits to sow its seeds one by one counter-clockwise. Land your last seed in your store for another turn. Land in an empty pit on your side to capture the seeds opposite. When one side runs out, the other side keeps what's left. Most seeds wins.</p>
+<script src="shared.js"></script>
+<script>
+// indices: 0-5 your pits, 6 your store, 7-12 CPU pits, 13 CPU store
+const boardEl = document.getElementById('board'), msg = document.getElementById('msg');
+const SEED_COLORS = ['#f87171', '#60a5fa', '#4ade80', '#facc15', '#c084fc', '#fb923c', '#f472b6', '#e5e7eb'];
+let b, turn, over, busy, els = {}, gameId = 0;
+let rec = Store.get('mancala-record', { w: 0, l: 0 });
+
+function layout() {
+  boardEl.innerHTML = '';
+  const mk = (i, cls, row, col) => {
+    const el = document.createElement('button');
+    el.className = cls;
+    el.style.gridRow = row;
+    el.style.gridColumn = col;
+    if (i < 6) el.onclick = () => humanMove(i);
+    boardEl.appendChild(el);
+    els[i] = el;
+  };
+  mk(13, 'store', '1 / 3', '1');
+  for (let k = 0; k < 6; k++) mk(12 - k, 'pit', '1', String(k + 2));
+  for (let k = 0; k < 6; k++) mk(k, 'pit mine', '2', String(k + 2));
+  mk(6, 'store', '1 / 3', '8');
+}
+
+function newGame() {
+  gameId++;
+  const n = +document.getElementById('seeds').value;
+  b = Array(14).fill(n);
+  b[6] = b[13] = 0;
+  turn = 0; over = false; busy = false;
+  render();
+  msg.textContent = 'Your turn';
+}
+
+function render(flash = -1) {
+  for (let i = 0; i < 14; i++) {
+    const el = els[i];
+    const shown = Math.min(b[i], 24);
+    let seeds = '';
+    for (let k = 0; k < shown; k++) seeds += `<span class="seed" style="background:${SEED_COLORS[(i * 7 + k * 3) % SEED_COLORS.length]}"></span>`;
+    el.innerHTML = seeds + `<span class="count">${b[i]}</span>`;
+    el.classList.toggle('can', i < 6 && b[i] > 0 && turn === 0 && !over && !busy);
+    el.classList.toggle('flash', i === flash);
+  }
+  document.getElementById('w').textContent = rec.w;
+  document.getElementById('l').textContent = rec.l;
+}
+
+// Pure move: returns { b, again } without touching game state.
+function sow(bd, pit, player) {
+  const nb = bd.slice();
+  let seeds = nb[pit], i = pit;
+  nb[pit] = 0;
+  const myStore = player === 0 ? 6 : 13, oppStore = player === 0 ? 13 : 6;
+  while (seeds > 0) {
+    i = (i + 1) % 14;
+    if (i === oppStore) continue;
+    nb[i]++;
+    seeds--;
+  }
+  const mine = player === 0 ? i >= 0 && i <= 5 : i >= 7 && i <= 12;
+  if (mine && nb[i] === 1 && nb[12 - i] > 0) {
+    nb[myStore] += nb[12 - i] + 1;
+    nb[12 - i] = 0;
+    nb[i] = 0;
+  }
+  let ended = false;
+  const side0 = nb.slice(0, 6).reduce((a, v) => a + v, 0), side1 = nb.slice(7, 13).reduce((a, v) => a + v, 0);
+  if (!side0 || !side1) {
+    nb[6] += side0; nb[13] += side1;
+    for (let k = 0; k < 14; k++) if (k !== 6 && k !== 13) nb[k] = 0;
+    ended = true;
+  }
+  return { b: nb, again: i === myStore && !ended, ended, last: i };
+}
+
+function minimax(bd, d, player, alpha, beta) {
+  const moves = [];
+  for (let k = 0; k < 6; k++) { const p = player === 1 ? 7 + k : k; if (bd[p]) moves.push(p); }
+  if (d === 0 || !moves.length) return bd[13] - bd[6];
+  let best = player === 1 ? -Infinity : Infinity;
+  for (const m of moves) {
+    const r = sow(bd, m, player);
+    const next = r.ended ? player : r.again ? player : 1 - player;
+    const v = r.ended ? (r.b[13] - r.b[6]) * 100 : minimax(r.b, d - 1, next, alpha, beta);
+    if (player === 1) { best = Math.max(best, v); alpha = Math.max(alpha, v); }
+    else { best = Math.min(best, v); beta = Math.min(beta, v); }
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+function cpuChoose() {
+  const d = +document.getElementById('diff').value;
+  let best = null, bv = -Infinity;
+  for (let k = 0; k < 6; k++) {
+    const p = 7 + k;
+    if (!b[p]) continue;
+    const r = sow(b, p, 1);
+    const v = (r.ended ? (r.b[13] - r.b[6]) * 100 : minimax(r.b, d - 1, r.again ? 1 : 0, -Infinity, Infinity)) + (d <= 2 ? rand(-3, 3) : 0);
+    if (v > bv) { bv = v; best = p; }
+  }
+  return best;
+}
+
+// Animate sowing one seed at a time, then apply the real result.
+function animateMove(pit, player, done) {
+  busy = true;
+  const result = sow(b, pit, player);
+  const work = b.slice();
+  let seeds = work[pit], i = pit;
+  work[pit] = 0;
+  const oppStore = player === 0 ? 13 : 6;
+  const id = gameId;
+  const step = () => {
+    if (id !== gameId) return;
+    if (seeds > 0) {
+      i = (i + 1) % 14;
+      if (i === oppStore) return step();
+      work[i]++;
+      seeds--;
+      const saved = b;
+      b = work;
+      render(i);
+      b = saved;
+      Sound.beep(300 + (i % 7) * 60, 0.03, 'triangle', 0.03);
+      setTimeout(step, 140);
+    } else {
+      b = result.b;
+      busy = false;
+      render();
+      done(result);
+    }
+  };
+  step();
+}
+
+function finish() {
+  over = true;
+  render();
+  const you = b[6], cpu = b[13];
+  if (you !== cpu) { if (you > cpu) rec.w++; else rec.l++; Store.set('mancala-record', rec); render(); }
+  msg.textContent = you === cpu ? `Tie game, ${you}–${cpu}!` : you > cpu ? `You win ${you}–${cpu}! 🎉` : `CPU wins ${cpu}–${you}`;
+  Sound.beep(you > cpu ? 880 : 200, 0.4, 'triangle');
+}
+
+function humanMove(i) {
+  if (over || busy || turn !== 0 || !b[i]) return;
+  animateMove(i, 0, r => {
+    if (r.ended) return finish();
+    if (r.again) { msg.textContent = 'Landed in your store — go again!'; render(); return; }
+    turn = 1;
+    cpuTurn();
+  });
+}
+
+function cpuTurn() {
+  msg.textContent = 'CPU is thinking…';
+  render();
+  const id = gameId;
+  setTimeout(() => {
+    if (id !== gameId) return;
+    animateMove(cpuChoose(), 1, r => {
+      if (r.ended) return finish();
+      if (r.again) { msg.textContent = 'CPU goes again…'; return cpuTurn(); }
+      turn = 0;
+      msg.textContent = 'Your turn';
+      render();
+    });
+  }, 500);
+}
+
+layout();
+document.getElementById('new').onclick = newGame;
+document.getElementById('seeds').onchange = newGame;
+newGame();
+</script>
+</body>
+</html>

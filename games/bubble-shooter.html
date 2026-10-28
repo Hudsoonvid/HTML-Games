@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bubble Shooter</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🫧 Bubble Shooter</h1>
+  <div class="stats">Score <b id="score">0</b> Level <b id="level">1</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="480" height="640"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Aim with the mouse or finger and click / release to shoot (or <kbd>←</kbd><kbd>→</kbd> and <kbd>Space</kbd>). Match 3 or more of a colour to pop them; anything left hanging falls too. <kbd>X</kbd> swaps with the next bubble. The ceiling drops every 8 shots.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, R = 16, COLS = 14, ROWS = 22, ROWH = R * Math.sqrt(3), LEFT = (W - COLS * 2 * R) / 2;
+const DEAD = H - 92, SX = W / 2, SY = H - 44;
+const COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#facc15', '#a855f7', '#f97316', '#22d3ee'];
+let grid, roof, shot, cur, nxt, angle, score, level, shots, falling, pops, state = 'ready', last = 0, keys = {};
+let best = Store.get('bubble-best', 0);
+
+const odd = r => r % 2 === 1;
+const ncols = r => (odd(r) ? COLS - 1 : COLS);
+const cx = (r, c) => LEFT + R + c * 2 * R + (odd(r) ? R : 0);
+const cy = r => roof + R + r * ROWH;
+function neighbors(r, c) {
+  const d = odd(r) ? [[0, -1], [0, 1], [-1, 0], [-1, 1], [1, 0], [1, 1]] : [[0, -1], [0, 1], [-1, -1], [-1, 0], [1, -1], [1, 0]];
+  return d.map(([dr, dc]) => [r + dr, c + dc]).filter(([rr, cc]) => rr >= 0 && rr < ROWS && cc >= 0 && cc < ncols(rr));
+}
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('level').textContent = level;
+  document.getElementById('best').textContent = best;
+}
+
+function numColors() { return Math.min(4 + Math.floor((level - 1) / 2), COLORS.length); }
+
+function buildLevel() {
+  grid = Array.from({ length: ROWS }, (_, r) => Array(ncols(r)).fill(-1));
+  roof = 0;
+  const rows = Math.min(5 + level, 10), nc = numColors();
+  for (let r = 0; r < rows; r++) for (let c = 0; c < ncols(r); c++) {
+    // copy a neighbour's colour sometimes so clusters form
+    const up = r > 0 ? grid[r - 1][Math.min(c, ncols(r - 1) - 1)] : -1;
+    grid[r][c] = up >= 0 && Math.random() < 0.35 ? up : randInt(0, nc - 1);
+  }
+  shots = 0;
+  cur = randomColor();
+  nxt = randomColor();
+}
+
+function present() {
+  const s = new Set();
+  grid.forEach(row => row.forEach(v => { if (v >= 0) s.add(v); }));
+  return [...s];
+}
+function randomColor() {
+  const p = present();
+  return p.length ? pick(p) : randInt(0, numColors() - 1);
+}
+
+function start() {
+  score = 0; level = 1;
+  falling = []; pops = [];
+  angle = -Math.PI / 2;
+  shot = null;
+  buildLevel();
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function fire() {
+  if (state !== 'play' || shot) return;
+  shot = { x: SX, y: SY, vx: Math.cos(angle) * 13, vy: Math.sin(angle) * 13, color: cur };
+  cur = nxt;
+  nxt = randomColor();
+  Sound.beep(500, 0.04, 'triangle');
+}
+
+function snap(fromCell) {
+  let cands = [];
+  if (fromCell) cands = neighbors(...fromCell).filter(([r, c]) => grid[r][c] < 0);
+  else for (let c = 0; c < ncols(0); c++) if (grid[0][c] < 0) cands.push([0, c]);
+  if (!cands.length) for (let r = 0; r < ROWS; r++) for (let c = 0; c < ncols(r); c++) if (grid[r][c] < 0) cands.push([r, c]);
+  let bestCell = cands[0], bd = Infinity;
+  for (const [r, c] of cands) {
+    const d = Math.hypot(cx(r, c) - shot.x, cy(r) - shot.y);
+    if (d < bd) { bd = d; bestCell = [r, c]; }
+  }
+  const [r, c] = bestCell;
+  grid[r][c] = shot.color;
+  shot = null;
+  resolve(r, c);
+}
+
+function resolve(r, c) {
+  const color = grid[r][c];
+  const seen = new Set([r + ',' + c]), q = [[r, c]], group = [];
+  while (q.length) {
+    const [a, b] = q.pop();
+    group.push([a, b]);
+    for (const [na, nb] of neighbors(a, b)) {
+      const k = na + ',' + nb;
+      if (!seen.has(k) && grid[na][nb] === color) { seen.add(k); q.push([na, nb]); }
+    }
+  }
+  shots++;
+  if (group.length >= 3) {
+    group.forEach(([a, b]) => { pops.push({ x: cx(a, b), y: cy(a), color: grid[a][b], t: 250 }); grid[a][b] = -1; });
+    score += group.length * 10;
+    Sound.beep(700 + group.length * 40, 0.1, 'triangle');
+    // anything not connected to the ceiling falls
+    const hang = new Set(), hq = [];
+    for (let cc = 0; cc < ncols(0); cc++) if (grid[0][cc] >= 0) { hang.add('0,' + cc); hq.push([0, cc]); }
+    while (hq.length) {
+      const [a, b] = hq.pop();
+      for (const [na, nb] of neighbors(a, b)) {
+        const k = na + ',' + nb;
+        if (!hang.has(k) && grid[na][nb] >= 0) { hang.add(k); hq.push([na, nb]); }
+      }
+    }
+    let dropped = 0;
+    for (let a = 0; a < ROWS; a++) for (let b = 0; b < ncols(a); b++) {
+      if (grid[a][b] >= 0 && !hang.has(a + ',' + b)) {
+        falling.push({ x: cx(a, b), y: cy(a), vy: rand(-2, 0), vx: rand(-1, 1), color: grid[a][b] });
+        grid[a][b] = -1;
+        dropped++;
+      }
+    }
+    score += dropped * 20 * Math.max(1, Math.floor(dropped / 3));
+  }
+  if (shots % 8 === 0) { roof += ROWH; Sound.beep(150, 0.2, 'square', 0.03); }
+  hud();
+  if (!present().length) {
+    level++;
+    score += 500;
+    hud();
+    state = 'between';
+    overlay(ov, `<h2>Level cleared!</h2><p>+500 bonus</p><button class="btn" onclick="nextLevel()">Level ${level}</button>`);
+    return;
+  }
+  for (let a = 0; a < ROWS; a++) for (let b = 0; b < ncols(a); b++) {
+    if (grid[a][b] >= 0 && cy(a) + R > DEAD) {
+      state = 'over';
+      best = recordBest('bubble-best', score);
+      hud();
+      overlay(ov, `<h2>Game over</h2><p>The bubbles reached the line. Score ${score}</p><button class="btn" onclick="start()">Play again</button>`);
+      return;
+    }
+  }
+  // keep the queued colours valid
+  const p = present();
+  if (!p.includes(cur)) cur = randomColor();
+  if (!p.includes(nxt)) nxt = randomColor();
+}
+
+function nextLevel() { buildLevel(); state = 'play'; overlay(ov, null); }
+
+function update(dt) {
+  const f = dt / 16.67;
+  if (keys.ArrowLeft) angle -= 0.035 * f;
+  if (keys.ArrowRight) angle += 0.035 * f;
+  angle = clamp(angle, -Math.PI + 0.18, -0.18);
+  if (shot) {
+    const steps = 6;
+    for (let i = 0; i < steps && shot; i++) {
+      shot.x += shot.vx * f / steps;
+      shot.y += shot.vy * f / steps;
+      if (shot.x < LEFT + R) { shot.x = LEFT + R; shot.vx = Math.abs(shot.vx); }
+      if (shot.x > W - LEFT - R) { shot.x = W - LEFT - R; shot.vx = -Math.abs(shot.vx); }
+      if (shot.y - R <= roof) { snap(null); break; }
+      let hit = null;
+      for (let r = 0; r < ROWS && !hit; r++) {
+        if (Math.abs(cy(r) - shot.y) > 2 * R) continue;
+        for (let c = 0; c < ncols(r); c++) {
+          if (grid[r][c] >= 0 && Math.hypot(cx(r, c) - shot.x, cy(r) - shot.y) < 2 * R - 4) { hit = [r, c]; break; }
+        }
+      }
+      if (hit) snap(hit);
+    }
+  }
+  updateFx(dt);
+}
+
+function updateFx(dt) {
+  const f = dt / 16.67;
+  falling.forEach(b => { b.vy += 0.5 * f; b.y += b.vy * f; b.x += b.vx * f; });
+  falling = falling.filter(b => b.y < H + 40);
+  pops.forEach(p => { p.t -= dt; });
+  pops = pops.filter(p => p.t > 0);
+}
+
+function bubble(x, y, color, r = R - 1) {
+  const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.15, x, y, r);
+  g.addColorStop(0, '#ffffffcc');
+  g.addColorStop(0.25, color);
+  g.addColorStop(1, color);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.35)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function drawAim() {
+  let x = SX, y = SY, vx = Math.cos(angle), vy = Math.sin(angle);
+  ctx.fillStyle = 'rgba(255,255,255,.55)';
+  for (let i = 0; i < 70; i++) {
+    x += vx * 9; y += vy * 9;
+    if (x < LEFT + R) { x = 2 * (LEFT + R) - x; vx = -vx; }
+    if (x > W - LEFT - R) { x = 2 * (W - LEFT - R) - x; vx = -vx; }
+    if (y < roof + R) break;
+    let blocked = false;
+    for (let r = 0; r < ROWS && !blocked; r++) for (let c = 0; c < ncols(r); c++) if (grid[r][c] >= 0 && Math.hypot(cx(r, c) - x, cy(r) - y) < 2 * R - 4) { blocked = true; break; }
+    if (blocked) break;
+    if (i % 2 === 0) { ctx.beginPath(); ctx.arc(x, y, 2, 0, 7); ctx.fill(); }
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#0b1020';
+  ctx.fillRect(0, 0, W, H);
+  if (!grid) return;
+  ctx.fillStyle = '#1f2547';
+  ctx.fillRect(0, 0, W, roof);
+  ctx.fillStyle = '#334155';
+  ctx.fillRect(0, roof - 4, W, 4);
+  ctx.strokeStyle = 'rgba(239,68,68,.5)';
+  ctx.setLineDash([8, 8]);
+  ctx.beginPath(); ctx.moveTo(0, DEAD); ctx.lineTo(W, DEAD); ctx.stroke();
+  ctx.setLineDash([]);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < ncols(r); c++) if (grid[r][c] >= 0) bubble(cx(r, c), cy(r), COLORS[grid[r][c]]);
+  pops.forEach(p => { ctx.globalAlpha = p.t / 250; bubble(p.x, p.y, COLORS[p.color], R * (1.6 - p.t / 250 * 0.6)); });
+  ctx.globalAlpha = 1;
+  falling.forEach(b => bubble(b.x, b.y, COLORS[b.color]));
+  if (state === 'play' && !shot) drawAim();
+  if (shot) bubble(shot.x, shot.y, COLORS[shot.color]);
+  // launcher
+  ctx.save();
+  ctx.translate(SX, SY);
+  ctx.rotate(angle + Math.PI / 2);
+  ctx.fillStyle = '#475569';
+  ctx.fillRect(-6, -40, 12, 30);
+  ctx.restore();
+  if (!shot) bubble(SX, SY, COLORS[cur]);
+  ctx.fillStyle = '#9097b8';
+  ctx.font = '12px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText('NEXT', 60, H - 52);
+  bubble(60, H - 28, COLORS[nxt], 12);
+  ctx.fillText(`Drop in ${8 - (shots % 8)}`, W - 60, H - 30);
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  else if (falling) updateFx(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function aimAt(e) {
+  const p = canvasPoint(cv, e);
+  if (p.y < SY - 5) angle = clamp(Math.atan2(p.y - SY, p.x - SX), -Math.PI + 0.18, -0.18);
+}
+cv.addEventListener('pointermove', aimAt);
+cv.addEventListener('pointerdown', e => { aimAt(e); if (e.pointerType === 'mouse') fire(); });
+cv.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') { aimAt(e); fire(); } });
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === ' ') { if (state === 'play') fire(); else if (state === 'ready' || state === 'over') start(); }
+  if ((e.key === 'x' || e.key === 'X') && state === 'play' && !shot) [cur, nxt] = [nxt, cur];
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+score = 0; level = 1;
+hud();
+overlay(ov, '<h2>Bubble Shooter</h2><p>Pop groups of three or more.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

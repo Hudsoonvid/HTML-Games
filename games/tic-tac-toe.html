@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tic-Tac-Toe</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: min(380px, calc(100vw - 32px)); aspect-ratio: 1; }
+  .sq { border: 0; border-radius: 14px; background: var(--panel-2); font-size: min(80px, 18vw); font-weight: 900; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .sq:hover:empty { background: #2c3060; }
+  .sq.x { color: #22d3ee; } .sq.o { color: #f472b6; }
+  .sq.win { background: #3b2f6b; animation: pulse .6s ease-in-out 3; }
+  @keyframes pulse { 50% { transform: scale(1.06); } }
+  .sq span { animation: drop .15s ease-out; }
+  @keyframes drop { from { transform: scale(.3); opacity: 0; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>❌ Tic-Tac-Toe ⭕</h1>
+  <div class="stats">X <b id="sx">0</b> O <b id="so">0</b> Draws <b id="sd">0</b></div>
+</header>
+<div class="controls">
+  <select id="mode">
+    <option value="easy">vs CPU · Easy</option>
+    <option value="medium">vs CPU · Medium</option>
+    <option value="hard" selected>vs CPU · Unbeatable</option>
+    <option value="2p">2 players</option>
+  </select>
+  <button class="btn" id="new">New game</button>
+</div>
+<div class="msg" id="msg"></div>
+<div id="board"></div>
+<p class="help">Get three in a row. You are ❌ and move first; turns alternate who starts each new game. Keys <kbd>1</kbd>–<kbd>9</kbd> pick squares.</p>
+<script src="shared.js"></script>
+<script>
+const LINES = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]];
+const boardEl = document.getElementById('board'), msg = document.getElementById('msg');
+let gameId = 0, b, turn, over, starter = 'X', score = { X: 0, O: 0, D: 0 }, sqs = [];
+
+for (let i = 0; i < 9; i++) {
+  const s = document.createElement('button');
+  s.className = 'sq';
+  s.onclick = () => humanMove(i);
+  boardEl.appendChild(s);
+  sqs.push(s);
+}
+
+const mode = () => document.getElementById('mode').value;
+function winner(bd) {
+  for (const l of LINES) if (bd[l[0]] && bd[l[0]] === bd[l[1]] && bd[l[1]] === bd[l[2]]) return { p: bd[l[0]], line: l };
+  return bd.every(Boolean) ? { p: 'D' } : null;
+}
+
+function minimax(bd, player, depth) {
+  const w = winner(bd);
+  if (w) return { score: w.p === 'O' ? 10 - depth : w.p === 'X' ? depth - 10 : 0 };
+  let best = { score: player === 'O' ? -Infinity : Infinity };
+  for (let i = 0; i < 9; i++) {
+    if (bd[i]) continue;
+    bd[i] = player;
+    const r = minimax(bd, player === 'O' ? 'X' : 'O', depth + 1);
+    bd[i] = null;
+    if (player === 'O' ? r.score > best.score : r.score < best.score) best = { score: r.score, move: i };
+  }
+  return best;
+}
+
+function cpuMove() {
+  const empty = b.map((v, i) => (v ? -1 : i)).filter(i => i >= 0);
+  let m;
+  const level = mode();
+  if (level === 'easy' && Math.random() < 0.75) m = pick(empty);
+  else if (level === 'medium' && Math.random() < 0.35) m = pick(empty);
+  else m = empty.length === 9 ? pick([0, 2, 4, 6, 8]) : minimax(b.slice(), 'O', 0).move;
+  place(m);
+}
+
+function place(i) {
+  b[i] = turn;
+  Sound.beep(turn === 'X' ? 520 : 400, 0.05, 'triangle', 0.04);
+  turn = turn === 'X' ? 'O' : 'X';
+  render();
+  const w = winner(b);
+  if (w) {
+    over = true;
+    score[w.p]++;
+    Store.set('ttt-score', score);
+    if (w.line) w.line.forEach(k => sqs[k].classList.add('win'));
+    const vsCpu = mode() !== '2p';
+    msg.textContent = w.p === 'D' ? "It's a draw!" : vsCpu ? (w.p === 'X' ? 'You win! 🎉' : 'The CPU wins.') : `${w.p} wins!`;
+    Sound.beep(w.p === 'D' ? 300 : 880, 0.25, 'triangle');
+    renderScore();
+    return;
+  }
+  msg.textContent = mode() === '2p' ? `${turn} to move` : turn === 'X' ? 'Your move' : 'CPU is thinking…';
+  if (mode() !== '2p' && turn === 'O') { const id = gameId; setTimeout(() => { if (id === gameId) cpuMove(); }, 350); }
+}
+
+function humanMove(i) {
+  if (over || b[i]) return;
+  if (mode() !== '2p' && turn === 'O') return;
+  place(i);
+}
+
+function render() {
+  b.forEach((v, i) => {
+    sqs[i].className = 'sq' + (v ? ' ' + v.toLowerCase() : '');
+    sqs[i].innerHTML = v ? `<span>${v === 'X' ? '✕' : '◯'}</span>` : '';
+  });
+}
+function renderScore() {
+  document.getElementById('sx').textContent = score.X;
+  document.getElementById('so').textContent = score.O;
+  document.getElementById('sd').textContent = score.D;
+}
+
+function newGame() {
+  gameId++;
+  b = Array(9).fill(null);
+  over = false;
+  turn = starter;
+  starter = starter === 'X' ? 'O' : 'X';
+  render();
+  msg.textContent = mode() === '2p' ? `${turn} to move` : turn === 'X' ? 'Your move' : 'CPU starts…';
+  if (mode() !== '2p' && turn === 'O') { const id = gameId; setTimeout(() => { if (id === gameId) cpuMove(); }, 450); }
+}
+
+score = Store.get('ttt-score', score);
+renderScore();
+document.getElementById('new').onclick = newGame;
+document.getElementById('mode').onchange = () => { starter = 'X'; newGame(); };
+document.addEventListener('keydown', e => {
+  const n = +e.key;
+  if (n >= 1 && n <= 9) humanMove(n - 1);
+  if (e.key === 'Enter' && over) newGame();
+});
+newGame();
+</script>
+</body>
+</html>

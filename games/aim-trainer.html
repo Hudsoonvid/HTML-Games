@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aim Trainer</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🎯 Aim Trainer</h1>
+  <div class="stats">Targets <b id="left">30</b> Accuracy <b id="acc">—</b> Best <b id="best">—</b></div>
+</header>
+<div class="controls">
+  <select id="mode">
+    <option value="static">Classic · 30 targets</option>
+    <option value="shrink">Shrinking targets</option>
+    <option value="moving">Moving targets</option>
+  </select>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="800" height="480" style="cursor:crosshair"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Click each target as fast as possible. Misses lower your accuracy. Your score is the average time per target (lower is better), with a penalty for misses.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, TOTAL = 30;
+let target, hits, shots, startT, lastHit, state = 'ready', last = 0, mode, marks = [], splits = [];
+
+function bestKey() { return 'aim-best-' + document.getElementById('mode').value; }
+function showBest() { const b = Store.get(bestKey(), null); document.getElementById('best').textContent = b ? b + ' ms' : '—'; }
+showBest();
+
+function newTarget() {
+  const r = mode === 'shrink' ? 34 : 26;
+  target = { x: rand(r + 10, W - r - 10), y: rand(r + 10, H - r - 10), r, born: performance.now(), vx: 0, vy: 0 };
+  if (mode === 'moving') { const a = rand(0, 7), sp = rand(1.5, 3.5); target.vx = Math.cos(a) * sp; target.vy = Math.sin(a) * sp; }
+}
+
+function start() {
+  mode = document.getElementById('mode').value;
+  hits = 0; shots = 0; marks = []; splits = [];
+  newTarget();
+  startT = lastHit = performance.now();
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('left').textContent = TOTAL - hits;
+  document.getElementById('acc').textContent = shots ? Math.round(hits / shots * 100) + '%' : '—';
+}
+
+function finish() {
+  state = 'over';
+  const total = performance.now() - startT;
+  const acc = hits / shots;
+  const avg = Math.round(total / TOTAL);
+  const score = Math.round(avg / Math.max(acc, 0.3));
+  const best = recordBest(bestKey(), score, true);
+  showBest();
+  overlay(ov, `<h2>${score} ms</h2><p>Average ${avg} ms per target · Accuracy ${Math.round(acc * 100)}%</p><p>Fastest ${Math.min(...splits)} ms · Best score ${best} ms</p><button class="btn" onclick="start()">Again</button>`);
+}
+
+function shoot(e) {
+  if (state !== 'play') return;
+  const p = canvasPoint(cv, e);
+  shots++;
+  const now = performance.now();
+  if (Math.hypot(p.x - target.x, p.y - target.y) <= target.r) {
+    hits++;
+    splits.push(Math.round(now - lastHit));
+    lastHit = now;
+    marks.push({ x: target.x, y: target.y, t: 300, hit: true });
+    Sound.beep(900, 0.04, 'square', 0.03);
+    if (hits >= TOTAL) { hud(); return finish(); }
+    newTarget();
+  } else {
+    marks.push({ x: p.x, y: p.y, t: 400, hit: false });
+    Sound.beep(200, 0.05, 'square', 0.03);
+  }
+  hud();
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  if (mode === 'moving') {
+    target.x += target.vx * f; target.y += target.vy * f;
+    if (target.x < target.r || target.x > W - target.r) target.vx *= -1;
+    if (target.y < target.r || target.y > H - target.r) target.vy *= -1;
+  }
+  if (mode === 'shrink') {
+    const age = performance.now() - target.born;
+    target.r = 34 * (1 - age / 1600);
+    if (target.r <= 3) { shots++; marks.push({ x: target.x, y: target.y, t: 400, hit: false }); newTarget(); hud(); }
+  }
+  marks.forEach(m => { m.t -= dt; });
+  marks = marks.filter(m => m.t > 0);
+}
+
+function draw() {
+  ctx.fillStyle = '#0b1020';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#141a33';
+  for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  if (state === 'play' && target) {
+    const { x, y, r } = target;
+    [['#ef4444', 1], ['#fff', 0.7], ['#ef4444', 0.42], ['#fff', 0.16]].forEach(([c, k]) => {
+      ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, Math.max(0, r * k), 0, 7); ctx.fill();
+    });
+  }
+  marks.forEach(m => {
+    ctx.globalAlpha = m.t / 400;
+    if (m.hit) { ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(m.x, m.y, 30 + (300 - m.t) / 6, 0, 7); ctx.stroke(); }
+    else { ctx.strokeStyle = '#f87171'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(m.x - 6, m.y - 6); ctx.lineTo(m.x + 6, m.y + 6); ctx.moveTo(m.x + 6, m.y - 6); ctx.lineTo(m.x - 6, m.y + 6); ctx.stroke(); }
+  });
+  ctx.globalAlpha = 1;
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', e => { e.preventDefault(); shoot(e); });
+document.getElementById('mode').onchange = () => { showBest(); state = 'ready'; overlay(ov, '<h2>Aim Trainer</h2><button class="btn" onclick="start()">Start</button>'); };
+document.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') start(); });
+
+overlay(ov, '<h2>Aim Trainer</h2><p>Hit 30 targets as quickly and accurately as you can.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

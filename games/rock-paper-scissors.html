@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rock Paper Scissors</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .arena { display: flex; gap: 40px; align-items: center; justify-content: center; margin: 20px 0; }
+  .hand { font-size: 96px; width: 140px; height: 140px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--panel); border: 3px solid var(--line); }
+  .hand.win { border-color: var(--good); box-shadow: 0 0 24px rgba(34,197,94,.5); }
+  .hand.lose { border-color: var(--bad); opacity: .7; }
+  .hand.shake { animation: shake .5s ease-in-out; }
+  @keyframes shake { 25%, 75% { transform: translateY(-16px); } 50% { transform: translateY(6px); } }
+  .vs { font-size: 26px; color: var(--muted); font-weight: 800; }
+  .choices { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .choices button { font-size: 44px; width: 86px; height: 86px; border-radius: 18px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; }
+  .choices button:hover { transform: translateY(-3px); background: #2c3060; }
+  .choices small { display: block; font-size: 11px; color: var(--muted); }
+  .lbl { text-align: center; color: var(--muted); font-size: 13px; }
+  #rules { color: var(--muted); font-size: 13px; text-align: center; max-width: 560px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>✊ Rock Paper Scissors</h1>
+  <div class="stats">You <b id="you">0</b> CPU <b id="cpu">0</b> Ties <b id="ties">0</b></div>
+</header>
+<div class="controls">
+  <select id="mode"><option value="3">Classic</option><option value="5">+ Lizard &amp; Spock</option></select>
+  <button class="btn alt" id="reset">Reset score</button>
+</div>
+<div class="arena">
+  <div><div class="hand" id="ph">❔</div><div class="lbl">You</div></div>
+  <div class="vs">VS</div>
+  <div><div class="hand" id="ch">❔</div><div class="lbl">CPU</div></div>
+</div>
+<div class="msg" id="msg">Choose your move!</div>
+<div class="choices" id="choices"></div>
+<p id="rules"></p>
+<p class="help">The CPU learns: it watches the patterns in your choices and tries to predict your next move. Can you stay unpredictable? Keys <kbd>1</kbd>–<kbd>5</kbd>.</p>
+<script src="shared.js"></script>
+<script>
+const MOVES = [
+  { n: 'Rock', e: '✊', beats: { 2: 'crushes', 3: 'crushes' } },
+  { n: 'Paper', e: '✋', beats: { 0: 'covers', 4: 'disproves' } },
+  { n: 'Scissors', e: '✌️', beats: { 1: 'cut', 3: 'decapitate' } },
+  { n: 'Lizard', e: '🦎', beats: { 4: 'poisons', 1: 'eats' } },
+  { n: 'Spock', e: '🖖', beats: { 2: 'smashes', 0: 'vaporizes' } }
+];
+let K, history = [], score = { you: 0, cpu: 0, ties: 0 }, busy = false;
+
+function setup() {
+  K = +document.getElementById('mode').value;
+  history = [];
+  const el = document.getElementById('choices');
+  el.innerHTML = '';
+  for (let i = 0; i < K; i++) {
+    const b = document.createElement('button');
+    b.innerHTML = `${MOVES[i].e}<small>${MOVES[i].n}</small>`;
+    b.onclick = () => play(i);
+    el.appendChild(b);
+  }
+  const rules = [];
+  for (let a = 0; a < K; a++) for (const [b, verb] of Object.entries(MOVES[a].beats)) if (+b < K) rules.push(`${MOVES[a].n} ${verb} ${MOVES[b].n}`);
+  document.getElementById('rules').textContent = rules.join(' · ');
+  render();
+}
+
+const beats = (a, b) => MOVES[a].beats[b] != null;
+
+// Predict the player's next move from what followed their last two moves before.
+function predict() {
+  const counts = Array(K).fill(1);
+  const n = history.length;
+  if (n >= 2) {
+    for (let i = 2; i < n; i++) if (history[i - 2] === history[n - 2] && history[i - 1] === history[n - 1]) counts[history[i]] += 3;
+  }
+  if (n >= 1) for (let i = 1; i < n; i++) if (history[i - 1] === history[n - 1]) counts[history[i]] += 1;
+  history.forEach(m => { counts[m] += 0.2; });
+  let total = counts.reduce((a, b) => a + b, 0), r = Math.random() * total;
+  for (let i = 0; i < K; i++) { r -= counts[i]; if (r <= 0) return i; }
+  return K - 1;
+}
+
+function counter(m) {
+  const options = [];
+  for (let i = 0; i < K; i++) if (beats(i, m)) options.push(i);
+  return pick(options);
+}
+
+function play(i) {
+  if (busy) return;
+  busy = true;
+  const guess = history.length >= 3 ? predict() : randInt(0, K - 1);
+  const c = counter(guess);
+  history.push(i);
+  const ph = document.getElementById('ph'), ch = document.getElementById('ch');
+  ph.className = 'hand shake'; ch.className = 'hand shake';
+  ph.textContent = '✊'; ch.textContent = '✊';
+  document.getElementById('msg').textContent = 'Rock… paper… scissors…';
+  setTimeout(() => {
+    ph.className = 'hand'; ch.className = 'hand';
+    ph.textContent = MOVES[i].e; ch.textContent = MOVES[c].e;
+    let text;
+    if (i === c) { score.ties++; text = 'Tie!'; Sound.beep(440, 0.1, 'triangle'); }
+    else if (beats(i, c)) { score.you++; text = `You win — ${MOVES[i].n} ${MOVES[i].beats[c]} ${MOVES[c].n}!`; ph.classList.add('win'); ch.classList.add('lose'); Sound.beep(880, 0.15, 'triangle'); }
+    else { score.cpu++; text = `CPU wins — ${MOVES[c].n} ${MOVES[c].beats[i]} ${MOVES[i].n}.`; ch.classList.add('win'); ph.classList.add('lose'); Sound.beep(200, 0.15, 'sawtooth'); }
+    document.getElementById('msg').textContent = text;
+    Store.set('rps-score', score);
+    render();
+    busy = false;
+  }, 520);
+}
+
+function render() {
+  document.getElementById('you').textContent = score.you;
+  document.getElementById('cpu').textContent = score.cpu;
+  document.getElementById('ties').textContent = score.ties;
+}
+
+score = Store.get('rps-score', score);
+document.getElementById('mode').onchange = setup;
+document.getElementById('reset').onclick = () => { score = { you: 0, cpu: 0, ties: 0 }; Store.set('rps-score', score); history = []; render(); };
+document.addEventListener('keydown', e => { const n = +e.key; if (n >= 1 && n <= K) play(n - 1); });
+setup();
+</script>
+</body>
+</html>

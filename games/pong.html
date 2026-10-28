@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pong</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏓 Pong</h1>
+  <div class="stats">First to <b>7</b></div>
+</header>
+<div class="controls">
+  <select id="mode">
+    <option value="easy">1 player · Easy</option>
+    <option value="normal" selected>1 player · Normal</option>
+    <option value="hard">1 player · Hard</option>
+    <option value="2p">2 players</option>
+  </select>
+  <button class="btn" id="go">New match</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="720" height="440"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Left paddle: <kbd>W</kbd>/<kbd>S</kbd>, mouse or touch. Right paddle (2 players): <kbd>↑</kbd>/<kbd>↓</kbd>. <kbd>Space</kbd> serves / pauses.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, PH = 80, PW = 12, WIN = 7;
+let L, R, ball, state = 'ready', keys = {}, last = 0, mode = 'normal', serveDir = 1, aiError = 0, aiTimer = 0;
+const AI = { easy: { speed: 4, react: 0.35, err: 60 }, normal: { speed: 6, react: 0.2, err: 35 }, hard: { speed: 8.5, react: 0.08, err: 12 } };
+
+function resetBall() {
+  ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, r: 8, wait: 700 };
+}
+
+function newMatch() {
+  mode = document.getElementById('mode').value;
+  L = { y: H / 2, score: 0 };
+  R = { y: H / 2, score: 0 };
+  serveDir = Math.random() < 0.5 ? -1 : 1;
+  resetBall();
+  state = 'play';
+  overlay(ov, null);
+}
+
+function serve() {
+  const a = rand(-0.5, 0.5);
+  ball.vx = Math.cos(a) * 6 * serveDir;
+  ball.vy = Math.sin(a) * 6;
+}
+
+function paddleHit(p, x, dir) {
+  if (Math.abs(ball.y - p.y) < PH / 2 + ball.r && Math.abs(ball.x - x) < PW / 2 + ball.r && Math.sign(ball.vx) !== dir) {
+    const off = (ball.y - p.y) / (PH / 2);
+    const sp = Math.min(Math.hypot(ball.vx, ball.vy) + 0.4, 15);
+    const a = off * 0.9;
+    ball.vx = Math.cos(a) * sp * dir;
+    ball.vy = Math.sin(a) * sp;
+    ball.x = x + dir * (PW / 2 + ball.r);
+    Sound.beep(dir > 0 ? 440 : 520, 0.04);
+  }
+}
+
+function point(side) {
+  side.score++;
+  Sound.beep(200, 0.2, 'triangle');
+  serveDir = side === L ? 1 : -1;
+  if (side.score >= WIN) {
+    state = 'over';
+    const who = mode === '2p' ? (side === L ? 'Left player wins!' : 'Right player wins!') : (side === L ? 'You win! 🎉' : 'The computer wins');
+    overlay(ov, `<h2>${who}</h2><p>${L.score} – ${R.score}</p><button class="btn" onclick="newMatch()">Play again</button>`);
+  }
+  resetBall();
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  const sp = 7 * f;
+  if (keys.w || keys.W) L.y -= sp;
+  if (keys.s || keys.S) L.y += sp;
+  if (mode === '2p') {
+    if (keys.ArrowUp) R.y -= sp;
+    if (keys.ArrowDown) R.y += sp;
+  } else {
+    const ai = AI[mode];
+    aiTimer -= dt;
+    if (aiTimer <= 0) { aiTimer = ai.react * 1000; aiError = rand(-ai.err, ai.err); }
+    let target = H / 2;
+    if (ball.vx > 0) {
+      // predict where the ball will reach the paddle, including wall bounces
+      const t = (W - 30 - ball.x) / ball.vx;
+      let py = ball.y + ball.vy * t;
+      const span = H - 2 * ball.r;
+      py = ((py - ball.r) % (2 * span) + 2 * span) % (2 * span);
+      py = py > span ? 2 * span - py : py;
+      target = py + ball.r + aiError;
+    }
+    const d = target - R.y;
+    R.y += clamp(d, -ai.speed * f, ai.speed * f);
+  }
+  L.y = clamp(L.y, PH / 2, H - PH / 2);
+  R.y = clamp(R.y, PH / 2, H - PH / 2);
+
+  if (ball.wait > 0) {
+    ball.wait -= dt;
+    if (ball.wait <= 0) serve();
+    return;
+  }
+  const steps = 3;
+  for (let i = 0; i < steps; i++) {
+    ball.x += ball.vx * f / steps;
+    ball.y += ball.vy * f / steps;
+    if (ball.y < ball.r) { ball.y = ball.r; ball.vy = Math.abs(ball.vy); }
+    if (ball.y > H - ball.r) { ball.y = H - ball.r; ball.vy = -Math.abs(ball.vy); }
+    paddleHit(L, 30, 1);
+    paddleHit(R, W - 30, -1);
+  }
+  if (ball.x < -20) point(R);
+  else if (ball.x > W + 20) point(L);
+}
+
+function draw() {
+  ctx.fillStyle = '#05060d';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#23264a';
+  for (let y = 10; y < H; y += 30) ctx.fillRect(W / 2 - 2, y, 4, 16);
+  ctx.font = 'bold 56px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#2e3260';
+  ctx.fillText(L.score, W / 2 - 80, 70);
+  ctx.fillText(R.score, W / 2 + 80, 70);
+  ctx.fillStyle = '#8b5cf6';
+  ctx.fillRect(30 - PW / 2, L.y - PH / 2, PW, PH);
+  ctx.fillStyle = '#22d3ee';
+  ctx.fillRect(W - 30 - PW / 2, R.y - PH / 2, PW, PH);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function pointerMove(e) {
+  if (state !== 'play') return;
+  const p = canvasPoint(cv, e);
+  if (mode === '2p' && p.x > W / 2) R.y = p.y;
+  else L.y = p.y;
+}
+cv.addEventListener('pointermove', pointerMove);
+cv.addEventListener('pointerdown', pointerMove);
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === ' ') {
+    if (state === 'play') { state = 'paused'; overlay(ov, '<h2>Paused</h2><p>Space to resume</p>'); }
+    else if (state === 'paused') { state = 'play'; overlay(ov, null); }
+    else newMatch();
+  }
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+document.getElementById('go').onclick = newMatch;
+document.getElementById('mode').onchange = newMatch;
+
+L = { y: H / 2, score: 0 };
+R = { y: H / 2, score: 0 };
+resetBall();
+overlay(ov, '<h2>Pong</h2><p>Pick a mode above, then start.</p><button class="btn" onclick="newMatch()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

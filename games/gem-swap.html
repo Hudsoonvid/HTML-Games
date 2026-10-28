@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gem Swap</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>💠 Gem Swap</h1>
+  <div class="stats">Score <b id="score">0</b> Moves <b id="moves">30</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="512" height="512"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Swap two neighbouring gems (click one then the other, or drag) to line up 3 or more of a kind. Chain reactions multiply your points. You have 30 moves — make them count!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const N = 8, S = cv.width / N, TYPES = 6, MOVES = 30;
+const COLORS = ['#ef4444', '#f59e0b', '#facc15', '#22c55e', '#3b82f6', '#a855f7'];
+let board, phase = 'idle', sel = null, pending, clearT, cascade, score, movesLeft, last = 0, idleT = 0, hint = null, popups = [], started = false;
+let best = Store.get('gemswap-best', 0);
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('moves').textContent = movesLeft;
+  document.getElementById('best').textContent = best;
+}
+
+const gem = (t, r, c) => ({ t, x: c, y: r, vy: 0, scale: 1, dying: false });
+
+function fill() {
+  board = Array.from({ length: N }, () => Array(N).fill(null));
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    let t;
+    do { t = randInt(0, TYPES - 1); } while ((c >= 2 && board[r][c - 1].t === t && board[r][c - 2].t === t) || (r >= 2 && board[r - 1][c].t === t && board[r - 2][c].t === t));
+    board[r][c] = gem(t, r - N, c);
+  }
+  if (!hasMoves()) fill();
+}
+
+function findMatches(b = board) {
+  const out = new Set();
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    const t = b[r][c] && b[r][c].t;
+    if (t == null) continue;
+    if (c <= N - 3 && b[r][c + 1] && b[r][c + 2] && b[r][c + 1].t === t && b[r][c + 2].t === t) { let k = c; while (k < N && b[r][k] && b[r][k].t === t) out.add(r * N + k++); }
+    if (r <= N - 3 && b[r + 1][c] && b[r + 2][c] && b[r + 1][c].t === t && b[r + 2][c].t === t) { let k = r; while (k < N && b[k][c] && b[k][c].t === t) out.add(k++ * N + c); }
+  }
+  return out;
+}
+
+function swapCells(a, b) { const t = board[a[0]][a[1]]; board[a[0]][a[1]] = board[b[0]][b[1]]; board[b[0]][b[1]] = t; }
+
+function hasMoves() {
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) for (const [dr, dc] of [[0, 1], [1, 0]]) {
+    const r2 = r + dr, c2 = c + dc;
+    if (r2 >= N || c2 >= N) continue;
+    swapCells([r, c], [r2, c2]);
+    const ok = findMatches().size > 0;
+    swapCells([r, c], [r2, c2]);
+    if (ok) return [[r, c], [r2, c2]];
+  }
+  return null;
+}
+
+function start() {
+  score = 0; movesLeft = MOVES; started = true;
+  fill();
+  phase = 'falling';
+  overlay(ov, null);
+  hud();
+}
+
+function trySwap(a, b) {
+  if (phase !== 'idle' || movesLeft <= 0) return;
+  swapCells(a, b);
+  pending = [a, b];
+  phase = 'swapping';
+  hint = null;
+  idleT = 0;
+  Sound.beep(400, 0.04, 'triangle', 0.03);
+}
+
+function startClear(m) {
+  const pts = m.size * 10 * cascade + (m.size >= 4 ? (m.size - 3) * 30 : 0);
+  score += pts;
+  let sx = 0, sy = 0;
+  m.forEach(k => { const g = board[Math.floor(k / N)][k % N]; g.dying = true; sx += k % N; sy += Math.floor(k / N); });
+  popups.push({ x: (sx / m.size + 0.5) * S, y: (sy / m.size + 0.5) * S, text: (cascade > 1 ? `×${cascade} ` : '') + '+' + pts, t: 800 });
+  Sound.beep(500 + cascade * 120, 0.12, 'triangle', 0.05);
+  clearT = 220;
+  phase = 'clearing';
+  hud();
+}
+
+function collapse() {
+  for (let c = 0; c < N; c++) {
+    const col = [];
+    for (let r = N - 1; r >= 0; r--) if (!board[r][c].dying) col.push(board[r][c]);
+    let spawnY = -1;
+    for (let r = N - 1; r >= 0; r--) {
+      const g = col[N - 1 - r];
+      board[r][c] = g || gem(randInt(0, TYPES - 1), spawnY--, c);
+    }
+  }
+}
+
+function settled() {
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) { const g = board[r][c]; if (g.x !== c || g.y !== r) return false; }
+  return true;
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    const g = board[r][c];
+    if (g.x !== c) g.x = g.x < c ? Math.min(c, g.x + 8 * s) : Math.max(c, g.x - 8 * s);
+    if (g.y < r) { g.vy += 45 * s; g.y = Math.min(r, g.y + Math.max(g.vy, 8) * s); if (g.y === r) g.vy = 0; }
+    else if (g.y > r) g.y = Math.max(r, g.y - 8 * s);
+  }
+  popups.forEach(p => { p.t -= dt; p.y -= 30 * s; });
+  popups = popups.filter(p => p.t > 0);
+  if (phase === 'swapping' && settled()) {
+    const m = findMatches();
+    if (m.size) { movesLeft--; cascade = 1; startClear(m); }
+    else { swapCells(...pending); phase = 'unswap'; Sound.beep(180, 0.08, 'square', 0.03); }
+  } else if (phase === 'unswap' && settled()) phase = 'idle';
+  else if (phase === 'clearing') {
+    clearT -= dt;
+    for (const row of board) for (const g of row) if (g.dying) g.scale = Math.max(0, clearT / 220);
+    if (clearT <= 0) { collapse(); phase = 'falling'; }
+  } else if (phase === 'falling' && settled()) {
+    const m = findMatches();
+    if (m.size) { cascade++; startClear(m); }
+    else {
+      phase = 'idle';
+      if (movesLeft <= 0) return gameOver();
+      if (!hasMoves()) {
+        popups.push({ x: cv.width / 2, y: cv.height / 2, text: 'No moves — shuffling!', t: 1200 });
+        const types = shuffle(board.flat().map(g => g.t));
+        let tries = 0;
+        do { shuffle(types); board.forEach((row, r) => row.forEach((g, c) => { g.t = types[r * N + c]; })); } while ((findMatches().size || !hasMoves()) && ++tries < 200);
+        if (findMatches().size) phase = 'falling';
+      }
+    }
+  }
+  if (phase === 'idle') {
+    idleT += dt;
+    if (idleT > 6000 && !hint) hint = hasMoves();
+  }
+}
+
+function gameOver() {
+  phase = 'over';
+  best = recordBest('gemswap-best', score);
+  hud();
+  overlay(ov, `<h2>Out of moves!</h2><p>Final score ${score} · Best ${best}</p><button class="btn" onclick="start()">Play again</button>`);
+}
+
+function drawGem(g) {
+  const cx = (g.x + 0.5) * S, cy = (g.y + 0.5) * S, r = S * 0.36 * g.scale;
+  if (r <= 0 || cy < -S) return;
+  ctx.fillStyle = COLORS[g.t];
+  ctx.beginPath();
+  switch (g.t) {
+    case 0: ctx.arc(cx, cy, r, 0, 7); break;
+    case 1: ctx.roundRect(cx - r * 0.85, cy - r * 0.85, r * 1.7, r * 1.7, r * 0.25); break;
+    case 2: ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); break;
+    case 3: ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy + r * 0.8); ctx.lineTo(cx - r, cy + r * 0.8); break;
+    case 4: for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3 + Math.PI / 6; ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r); } break;
+    case 5: for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5 - Math.PI / 2, rr = i % 2 ? r * 0.45 : r; ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr); } break;
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.45)';
+  ctx.beginPath(); ctx.ellipse(cx - r * 0.25, cy - r * 0.35, r * 0.28, r * 0.14, -0.5, 0, 7); ctx.fill();
+}
+
+function draw() {
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    ctx.fillStyle = (r + c) % 2 ? '#191b36' : '#20234a';
+    ctx.fillRect(c * S, r * S, S, S);
+  }
+  if (!board) return;
+  if (sel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.strokeRect(sel[1] * S + 3, sel[0] * S + 3, S - 6, S - 6); }
+  if (hint && Math.floor(performance.now() / 400) % 2) {
+    ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 3;
+    hint.forEach(([r, c]) => ctx.strokeRect(c * S + 5, r * S + 5, S - 10, S - 10));
+  }
+  for (const row of board) for (const g of row) drawGem(g);
+  ctx.font = 'bold 22px system-ui';
+  ctx.textAlign = 'center';
+  popups.forEach(p => { ctx.globalAlpha = Math.min(1, p.t / 400); ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 4; ctx.strokeText(p.text, p.x, p.y); ctx.fillText(p.text, p.x, p.y); });
+  ctx.globalAlpha = 1;
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (started && phase !== 'over') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+let down = null;
+cv.addEventListener('pointerdown', e => {
+  const p = canvasPoint(cv, e), cell = [Math.floor(p.y / S), Math.floor(p.x / S)];
+  if (phase !== 'idle') return;
+  down = { p, cell };
+  if (sel && Math.abs(sel[0] - cell[0]) + Math.abs(sel[1] - cell[1]) === 1) { trySwap(sel, cell); sel = null; down = null; return; }
+  sel = sel && sel[0] === cell[0] && sel[1] === cell[1] ? null : cell;
+});
+cv.addEventListener('pointermove', e => {
+  if (!down) return;
+  const p = canvasPoint(cv, e), dx = p.x - down.p.x, dy = p.y - down.p.y;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < S * 0.4) return;
+  const [r, c] = down.cell;
+  const t = Math.abs(dx) > Math.abs(dy) ? [r, c + Math.sign(dx)] : [r + Math.sign(dy), c];
+  down = null;
+  if (t[0] < 0 || t[1] < 0 || t[0] >= N || t[1] >= N) return;
+  sel = null;
+  trySwap([r, c], t);
+});
+window.addEventListener('pointerup', () => { down = null; });
+
+score = 0;
+movesLeft = MOVES;
+hud();
+overlay(ov, '<h2>Gem Swap</h2><p>Match three or more. 30 moves.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

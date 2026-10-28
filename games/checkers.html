@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkers</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⛀ Checkers</h1>
+  <div class="stats">You <b id="w">0</b> CPU <b id="l">0</b></div>
+</header>
+<div class="controls">
+  <select id="diff"><option value="2">Easy</option><option value="4" selected>Medium</option><option value="8">Hard</option></select>
+  <button class="btn" id="new">New game</button>
+  <button class="btn alt" id="undo">↶ Undo</button>
+</div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="560" height="560"></canvas>
+</div>
+<p class="help">You play red and move first. Click a piece, then a highlighted square. Captures are compulsory and multi-jumps are made in one go. Reach the far row to crown a king, which moves both ways.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const S = cv.width / 8;
+// 1 red man, 2 red king (player, moves up); -1 black man, -2 black king (CPU, moves down)
+let board, turn, sel = null, legal = [], over, history = [], anim = null, quiet = 0, lastMove = null;
+let rec = Store.get('checkers-record', { w: 0, l: 0 }), gameId = 0;
+
+function newGame() {
+  board = Array(64).fill(0);
+  for (let i = 0; i < 64; i++) {
+    const r = i >> 3, c = i & 7;
+    if ((r + c) % 2 === 1) { if (r < 3) board[i] = -1; else if (r > 4) board[i] = 1; }
+  }
+  gameId++;
+  turn = 1; sel = null; over = false; history = []; anim = null; quiet = 0; lastMove = null;
+  legal = movesFor(board, 1);
+  msg.textContent = 'Your move';
+  showRecord();
+}
+
+function showRecord() {
+  document.getElementById('w').textContent = rec.w;
+  document.getElementById('l').textContent = rec.l;
+}
+
+function dirsFor(p) {
+  if (Math.abs(p) === 2) return [[-1, -1], [-1, 1], [1, -1], [1, 1]];
+  return p > 0 ? [[-1, -1], [-1, 1]] : [[1, -1], [1, 1]];
+}
+const inB = (r, c) => r >= 0 && r < 8 && c >= 0 && c < 8;
+
+function jumps(b, from, r, c, p, path, caps, out) {
+  let more = false;
+  for (const [dr, dc] of dirsFor(p)) {
+    const mr = r + dr, mc = c + dc, tr = r + 2 * dr, tc = c + 2 * dc;
+    if (!inB(tr, tc)) continue;
+    const m = mr * 8 + mc, t = tr * 8 + tc;
+    if (b[m] * p >= 0 || caps.includes(m) || b[t] !== 0) continue;
+    more = true;
+    const np = [...path, t], nc = [...caps, m];
+    const crowned = Math.abs(p) === 1 && (p > 0 ? tr === 0 : tr === 7);
+    if (crowned) out.push({ from, path: np, caps: nc });
+    else jumps(b, from, tr, tc, p, np, nc, out);
+  }
+  if (!more && path.length) out.push({ from, path, caps });
+}
+
+function movesFor(b, side) {
+  const js = [], steps = [];
+  for (let i = 0; i < 64; i++) {
+    const p = b[i];
+    if (p * side <= 0) continue;
+    const r = i >> 3, c = i & 7;
+    b[i] = 0;
+    jumps(b, i, r, c, p, [], [], js);
+    b[i] = p;
+    if (js.length) continue;
+    for (const [dr, dc] of dirsFor(p)) {
+      const nr = r + dr, nc = c + dc;
+      if (inB(nr, nc) && b[nr * 8 + nc] === 0) steps.push({ from: i, path: [nr * 8 + nc], caps: [] });
+    }
+  }
+  return js.length ? js : steps;
+}
+
+function apply(b, m) {
+  const nb = b.slice(), p = nb[m.from];
+  nb[m.from] = 0;
+  m.caps.forEach(k => { nb[k] = 0; });
+  const to = m.path[m.path.length - 1];
+  nb[to] = Math.abs(p) === 1 && (p > 0 ? to < 8 : to >= 56) ? p * 2 : p;
+  return nb;
+}
+
+// positive = good for black (CPU)
+function evaluate(b) {
+  let s = 0;
+  for (let i = 0; i < 64; i++) {
+    const p = b[i];
+    if (!p) continue;
+    const r = i >> 3, c = i & 7;
+    let v = Math.abs(p) === 2 ? 175 : 100 + (p > 0 ? 7 - r : r) * 4;
+    if (c >= 2 && c <= 5 && r >= 2 && r <= 5) v += 6;
+    if (Math.abs(p) === 1 && (p > 0 ? r === 7 : r === 0)) v += 8; // back-row guard
+    s += p < 0 ? v : -v;
+  }
+  return s;
+}
+
+function search(b, d, alpha, beta, side) {
+  const ms = movesFor(b, side);
+  if (!ms.length) return side === -1 ? -100000 - d : 100000 + d;
+  if (d === 0) return evaluate(b);
+  if (side === -1) {
+    let best = -Infinity;
+    for (const m of ms) {
+      best = Math.max(best, search(apply(b, m), d - 1, alpha, beta, 1));
+      alpha = Math.max(alpha, best);
+      if (alpha >= beta) break;
+    }
+    return best;
+  }
+  let best = Infinity;
+  for (const m of ms) {
+    best = Math.min(best, search(apply(b, m), d - 1, alpha, beta, -1));
+    beta = Math.min(beta, best);
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+function cpuMove() {
+  const d = +document.getElementById('diff').value;
+  const ms = shuffle(movesFor(board, -1));
+  let best = ms[0], bv = -Infinity;
+  for (const m of ms) {
+    const v = search(apply(board, m), d - 1, -Infinity, Infinity, 1) + (d === 2 ? rand(-30, 30) : 0);
+    if (v > bv) { bv = v; best = m; }
+  }
+  doMove(best);
+}
+
+function doMove(m) {
+  if (turn === 1) history.push({ board: board.slice(), quiet });
+  const p = board[m.from];
+  anim = { m, p, step: 0, t: 0, pts: [m.from, ...m.path] };
+  board[m.from] = 0;
+  sel = null;
+  legal = [];
+}
+
+function finishMove() {
+  const { m, p } = anim;
+  const prev = board.slice();
+  prev[m.from] = p;
+  board = apply(prev, m);
+  lastMove = m;
+  anim = null;
+  quiet = m.caps.length || Math.abs(p) === 1 ? 0 : quiet + 1;
+  Sound.beep(m.caps.length ? 260 : 420, 0.06, 'triangle', 0.05);
+  turn = -turn;
+  legal = movesFor(board, turn);
+  if (!legal.length) {
+    over = true;
+    const youWin = turn === -1;
+    if (youWin) rec.w++; else rec.l++;
+    Store.set('checkers-record', rec);
+    showRecord();
+    msg.textContent = youWin ? 'You win! 🎉' : 'The CPU wins.';
+    Sound.beep(youWin ? 880 : 150, 0.4, 'triangle');
+    return;
+  }
+  if (quiet >= 60) { over = true; msg.textContent = 'Draw — 30 moves each with no progress.'; return; }
+  if (turn === -1) { msg.textContent = 'CPU is thinking…'; const id = gameId; setTimeout(() => { if (id === gameId && turn === -1 && !over) cpuMove(); }, 250); }
+  else msg.textContent = legal[0].caps.length ? 'Your move — you must capture!' : 'Your move';
+}
+
+function center(i) { return [(i & 7) * S + S / 2, (i >> 3) * S + S / 2]; }
+
+function drawPiece(x, y, p) {
+  ctx.fillStyle = 'rgba(0,0,0,.4)';
+  ctx.beginPath(); ctx.arc(x + 2, y + 4, S * 0.38, 0, 7); ctx.fill();
+  ctx.fillStyle = p > 0 ? '#dc2626' : '#1f2937';
+  ctx.beginPath(); ctx.arc(x, y, S * 0.38, 0, 7); ctx.fill();
+  ctx.strokeStyle = p > 0 ? '#fca5a5' : '#6b7280';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y, S * 0.28, 0, 7); ctx.stroke();
+  if (Math.abs(p) === 2) { ctx.font = `${S * 0.4}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#facc15'; ctx.fillText('♛', x, y + 2); }
+}
+
+function draw() {
+  for (let i = 0; i < 64; i++) {
+    const r = i >> 3, c = i & 7;
+    ctx.fillStyle = (r + c) % 2 ? '#7c4a1e' : '#f3d9b1';
+    ctx.fillRect(c * S, r * S, S, S);
+  }
+  if (lastMove) {
+    ctx.fillStyle = 'rgba(250,204,21,.25)';
+    [lastMove.from, lastMove.path[lastMove.path.length - 1]].forEach(i => ctx.fillRect((i & 7) * S, (i >> 3) * S, S, S));
+  }
+  if (!over && turn === 1 && !anim) {
+    // show which pieces can move
+    const movable = new Set(legal.map(m => m.from));
+    ctx.strokeStyle = 'rgba(34,211,238,.6)';
+    ctx.lineWidth = 3;
+    movable.forEach(i => { if (!sel || sel !== i) ctx.strokeRect((i & 7) * S + 2, (i >> 3) * S + 2, S - 4, S - 4); });
+  }
+  if (sel !== null) {
+    ctx.fillStyle = 'rgba(139,92,246,.5)';
+    ctx.fillRect((sel & 7) * S, (sel >> 3) * S, S, S);
+    legal.filter(m => m.from === sel).forEach(m => {
+      const [x, y] = center(m.path[m.path.length - 1]);
+      ctx.fillStyle = 'rgba(34,197,94,.7)';
+      ctx.beginPath(); ctx.arc(x, y, S * 0.16, 0, 7); ctx.fill();
+    });
+  }
+  for (let i = 0; i < 64; i++) if (board[i]) drawPiece(...center(i), board[i]);
+  if (anim) {
+    anim.t += 16;
+    const seg = 140;
+    while (anim && anim.t >= seg) {
+      anim.t -= seg;
+      anim.step++;
+      if (anim.step >= anim.pts.length - 1) { finishMove(); break; }
+    }
+    if (anim) {
+      const [x1, y1] = center(anim.pts[anim.step]), [x2, y2] = center(anim.pts[anim.step + 1]), k = anim.t / seg;
+      drawPiece(x1 + (x2 - x1) * k, y1 + (y2 - y1) * k - Math.sin(k * Math.PI) * 12, anim.p);
+    }
+  }
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (over || turn !== 1 || anim) return;
+  const p = canvasPoint(cv, e), i = Math.floor(p.y / S) * 8 + Math.floor(p.x / S);
+  if (board[i] > 0) { sel = legal.some(m => m.from === i) ? i : null; if (sel === null) Sound.beep(180, 0.05, 'square', 0.02); return; }
+  if (sel === null) return;
+  const m = legal.find(m => m.from === sel && m.path[m.path.length - 1] === i);
+  if (m) doMove(m);
+});
+document.getElementById('new').onclick = newGame;
+document.getElementById('undo').onclick = () => {
+  if (anim || turn !== 1 && !over) return;
+  const h = history.pop();
+  if (!h) return;
+  board = h.board; quiet = h.quiet; turn = 1; over = false; sel = null; lastMove = null;
+  legal = movesFor(board, 1);
+  msg.textContent = 'Your move';
+};
+newGame();
+draw();
+</script>
+</body>
+</html>

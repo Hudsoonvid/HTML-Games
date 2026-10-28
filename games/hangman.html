@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hangman</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .wrap { display: flex; gap: 24px; flex-wrap: wrap; justify-content: center; align-items: center; width: min(820px, calc(100vw - 24px)); }
+  svg { width: 220px; height: 240px; }
+  svg .part { stroke: #f8fafc; stroke-width: 5; stroke-linecap: round; fill: none; opacity: 0; transition: opacity .25s; }
+  svg .part.on { opacity: 1; }
+  svg .gallows { stroke: #a16207; stroke-width: 7; stroke-linecap: round; fill: none; }
+  #word { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; max-width: 520px; }
+  #word span { width: 32px; border-bottom: 3px solid var(--muted); text-align: center; font-size: 30px; font-weight: 800; text-transform: uppercase; min-height: 44px; }
+  #word span.gap { border: 0; width: 14px; }
+  #word span.miss { color: var(--bad); }
+  #letters { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; max-width: 560px; margin: 14px auto; }
+  #letters button { width: 40px; height: 44px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); font-size: 18px; font-weight: 700; text-transform: uppercase; cursor: pointer; }
+  #letters button.hit { background: #166534; border-color: #166534; }
+  #letters button.miss { background: #450a0a; color: #7f1d1d; border-color: #450a0a; }
+  .cat { color: var(--accent-2); font-weight: 700; text-align: center; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🪢 Hangman</h1>
+  <div class="stats">Wins <b id="wins">0</b> Losses <b id="losses">0</b> Streak <b id="streak">0</b></div>
+</header>
+<div class="controls">
+  <select id="cat"></select>
+  <button class="btn" id="new">New word</button>
+</div>
+<div class="wrap">
+  <svg viewBox="0 0 220 240">
+    <path class="gallows" d="M20 230 H140 M50 230 V20 H150 V45 M50 60 L85 20"/>
+    <circle class="part" cx="150" cy="70" r="24"/>
+    <path class="part" d="M150 94 V160"/>
+    <path class="part" d="M150 110 L120 140"/>
+    <path class="part" d="M150 110 L180 140"/>
+    <path class="part" d="M150 160 L125 200"/>
+    <path class="part" d="M150 160 L175 200"/>
+  </svg>
+  <div>
+    <div class="cat" id="catname"></div>
+    <div id="word"></div>
+    <div class="msg" id="msg"></div>
+  </div>
+</div>
+<div id="letters"></div>
+<p class="help">Guess the word one letter at a time (click or type). Six wrong guesses and it's game over.</p>
+<script src="shared.js"></script>
+<script>
+const CATS = {
+  Animals: 'elephant giraffe kangaroo dolphin penguin octopus cheetah squirrel hedgehog flamingo crocodile butterfly chameleon porcupine raccoon walrus jaguar gorilla hamster lobster',
+  Countries: 'argentina australia brazil canada denmark egypt finland germany iceland indonesia jamaica kenya mexico morocco norway portugal sweden thailand vietnam zimbabwe',
+  Food: 'spaghetti pancake avocado broccoli burrito cinnamon croissant dumpling lasagna pineapple pretzel sandwich strawberry tortilla waffle blueberry cheesecake guacamole meatball popcorn',
+  Space: 'asteroid astronaut comet constellation eclipse galaxy gravity jupiter meteor nebula neptune orbit planet rocket saturn satellite supernova telescope universe venus',
+  Sports: 'badminton baseball basketball cricket cycling fencing football gymnastics hockey javelin karate marathon rowing skateboard snowboard surfing swimming tennis volleyball wrestling',
+  Movies: 'adventure blockbuster cinema comedy director documentary fantasy hero horror musical mystery popcorn premiere romance screenplay sequel spotlight thriller trailer villain',
+  Phrases: 'piece of cake|break a leg|once in a blue moon|hit the road|under the weather|spill the beans|the ball is in your court|cost an arm and a leg|on cloud nine|call it a day'
+};
+let word, guessed, wrong, over;
+let rec = Store.get('hangman-record', { wins: 0, losses: 0, streak: 0 });
+
+const catEl = document.getElementById('cat');
+['Random', ...Object.keys(CATS)].forEach(c => catEl.insertAdjacentHTML('beforeend', `<option>${c}</option>`));
+const lettersEl = document.getElementById('letters');
+'abcdefghijklmnopqrstuvwxyz'.split('').forEach(ch => {
+  const b = document.createElement('button');
+  b.textContent = ch;
+  b.dataset.ch = ch;
+  b.onclick = () => guess(ch);
+  lettersEl.appendChild(b);
+});
+
+function newGame() {
+  let cat = catEl.value;
+  if (cat === 'Random') cat = pick(Object.keys(CATS));
+  const list = CATS[cat].includes('|') ? CATS[cat].split('|') : CATS[cat].split(' ');
+  word = pick(list);
+  guessed = new Set();
+  wrong = 0;
+  over = false;
+  document.getElementById('catname').textContent = 'Category: ' + cat;
+  document.getElementById('msg').textContent = '';
+  lettersEl.querySelectorAll('button').forEach(b => { b.className = ''; b.disabled = false; });
+  render();
+}
+
+function render() {
+  document.getElementById('word').innerHTML = [...word].map(ch => {
+    if (ch === ' ') return '<span class="gap"></span>';
+    const shown = guessed.has(ch);
+    return `<span class="${!shown && over ? 'miss' : ''}">${shown || over ? ch : ''}</span>`;
+  }).join('');
+  document.querySelectorAll('svg .part').forEach((p, i) => p.classList.toggle('on', i < wrong));
+  document.getElementById('wins').textContent = rec.wins;
+  document.getElementById('losses').textContent = rec.losses;
+  document.getElementById('streak').textContent = rec.streak;
+}
+
+function guess(ch) {
+  if (over || guessed.has(ch)) return;
+  guessed.add(ch);
+  const btn = lettersEl.querySelector(`[data-ch="${ch}"]`);
+  btn.disabled = true;
+  if (word.includes(ch)) { btn.classList.add('hit'); Sound.beep(700, 0.05, 'triangle'); }
+  else { btn.classList.add('miss'); wrong++; Sound.beep(180, 0.12, 'sawtooth', 0.03); }
+  const solved = [...word].every(c => c === ' ' || guessed.has(c));
+  if (solved || wrong >= 6) {
+    over = true;
+    if (solved) { rec.wins++; rec.streak++; } else { rec.losses++; rec.streak = 0; }
+    Store.set('hangman-record', rec);
+    document.getElementById('msg').innerHTML = solved ? '🎉 You got it! Press Enter for another.' : `💀 The answer was "<b>${word}</b>". Press Enter to try again.`;
+    Sound.beep(solved ? 880 : 120, 0.35, solved ? 'triangle' : 'sawtooth');
+  }
+  render();
+}
+
+document.addEventListener('keydown', e => {
+  if (/^[a-z]$/i.test(e.key) && !e.ctrlKey && !e.metaKey) guess(e.key.toLowerCase());
+  if (e.key === 'Enter' && over) newGame();
+});
+document.getElementById('new').onclick = newGame;
+catEl.onchange = newGame;
+newGame();
+</script>
+</body>
+</html>

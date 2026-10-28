@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Color Match</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .game-area { width: min(480px, calc(100vw - 24px)); display: flex; flex-direction: column; gap: 14px; align-items: center; position: relative; padding: 16px 0; }
+  .card { width: 100%; background: #f8fafc; color: #000; border-radius: 14px; padding: 24px; text-align: center; font-size: clamp(36px, 10vw, 56px); font-weight: 900; letter-spacing: 2px; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  .label { color: var(--muted); font-size: 14px; margin-bottom: -8px; }
+  .answers { display: flex; gap: 14px; width: 100%; }
+  .answers button { flex: 1; font-size: 22px; padding: 16px; border-radius: 12px; border: 0; cursor: pointer; font-weight: 800; color: #fff; }
+  #no { background: #dc2626; }
+  #yes { background: #16a34a; }
+  .feedback { height: 6px; width: 100%; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+  .feedback div { height: 100%; width: 100%; }
+  .flash-good .card { outline: 4px solid var(--good); }
+  .flash-bad .card { outline: 4px solid var(--bad); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🎨 Color Match</h1>
+  <div class="stats">Score <b id="score">0</b> Time <b id="time">45</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <div class="game-area" id="area">
+    <div class="label">MEANING</div>
+    <div class="card" id="top">RED</div>
+    <div class="label">INK COLOUR</div>
+    <div class="card" id="bottom">BLUE</div>
+    <div class="feedback"><div id="bar"></div></div>
+    <div class="answers"><button id="no">✗ No</button><button id="yes">✓ Yes</button></div>
+  </div>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Does the <b>meaning</b> of the top word match the <b>ink colour</b> of the bottom word? Answer with the buttons or <kbd>←</kbd> No / <kbd>→</kbd> Yes. Streaks multiply your points. 45 seconds.</p>
+<script src="shared.js"></script>
+<script>
+const COLORS = { RED: '#dc2626', BLUE: '#2563eb', GREEN: '#16a34a', BLACK: '#111827', YELLOW: '#ca8a04', PURPLE: '#9333ea' };
+const NAMES = Object.keys(COLORS);
+const ROUND = 45000, ov = document.getElementById('ov'), area = document.getElementById('area');
+let answer, score, streak, correct, total, timeLeft, state = 'ready', last = 0, flashTimer;
+let best = Store.get('colormatch-best', 0);
+document.getElementById('best').textContent = best;
+
+function next() {
+  const match = Math.random() < 0.5;
+  const meaning = pick(NAMES);
+  const ink = match ? meaning : pick(NAMES.filter(n => n !== meaning));
+  const topEl = document.getElementById('top'), botEl = document.getElementById('bottom');
+  topEl.textContent = meaning;
+  topEl.style.color = '#111827';
+  botEl.textContent = pick(NAMES);
+  botEl.style.color = COLORS[ink];
+  answer = match;
+}
+
+function start() {
+  score = 0; streak = 0; correct = 0; total = 0; timeLeft = ROUND;
+  state = 'play';
+  next();
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('time').textContent = Math.ceil(timeLeft / 1000);
+  const mult = Math.min(1 + Math.floor(streak / 5), 5);
+  const bar = document.getElementById('bar');
+  bar.style.width = ((streak % 5) / 5 * 100 || (streak ? 100 : 0)) + '%';
+  bar.style.background = ['#64748b', '#22c55e', '#22d3ee', '#a855f7', '#f59e0b'][mult - 1];
+}
+
+function respond(yes) {
+  if (state !== 'play') return;
+  total++;
+  clearTimeout(flashTimer);
+  area.classList.remove('flash-good', 'flash-bad');
+  if (yes === answer) {
+    correct++;
+    streak++;
+    score += 10 * Math.min(1 + Math.floor((streak - 1) / 5), 5);
+    area.classList.add('flash-good');
+    Sound.beep(760, 0.05, 'triangle');
+  } else {
+    streak = 0;
+    area.classList.add('flash-bad');
+    Sound.beep(160, 0.15, 'sawtooth');
+  }
+  flashTimer = setTimeout(() => area.classList.remove('flash-good', 'flash-bad'), 180);
+  next();
+  hud();
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') {
+    timeLeft -= dt;
+    if (timeLeft <= 0) {
+      timeLeft = 0;
+      state = 'over';
+      best = recordBest('colormatch-best', score);
+      document.getElementById('best').textContent = best;
+      const acc = total ? Math.round(correct / total * 100) : 0;
+      overlay(ov, `<h2>Time's up!</h2><p>Score ${score} · ${correct}/${total} correct (${acc}%)</p><p>Best ${best}</p><button class="btn" onclick="start()">Play again</button>`);
+    }
+    hud();
+  }
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('yes').onclick = () => respond(true);
+document.getElementById('no').onclick = () => respond(false);
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') respond(true);
+  if (e.key === 'ArrowLeft') respond(false);
+  if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') start();
+});
+
+overlay(ov, '<h2>Color Match</h2><p>Train your focus: ignore what the bottom word says, look at its colour.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

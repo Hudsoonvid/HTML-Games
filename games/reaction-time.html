@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reaction Time</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #pad {
+    width: min(760px, calc(100vw - 24px));
+    height: min(420px, 60vh);
+    border-radius: 16px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    text-align: center; cursor: pointer; user-select: none; -webkit-user-select: none;
+    transition: background .05s; padding: 20px; touch-action: manipulation;
+  }
+  #pad h2 { font-size: clamp(28px, 6vw, 48px); margin: 0; }
+  #pad p { margin: 0; font-size: 18px; opacity: .85; }
+  .idle { background: #2563eb; }
+  .wait { background: #b91c1c; }
+  .go { background: #16a34a; }
+  .early { background: #9a3412; }
+  .result { background: #1e293b; }
+  #history { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin: 12px; }
+  #history span { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⚡ Reaction Time</h1>
+  <div class="stats">Best average <b id="best">—</b></div>
+</header>
+<div id="pad" class="idle"><h2>Reaction Time Test</h2><p>When the red box turns green, click as fast as you can.</p><p>Click anywhere (or press Space) to begin. 5 attempts.</p></div>
+<div id="history"></div>
+<p class="help">Clicking while it's still red counts as a false start and the attempt restarts. Average human reaction time is around 250 ms.</p>
+<script src="shared.js"></script>
+<script>
+const pad = document.getElementById('pad'), hist = document.getElementById('history');
+let state = 'idle', timer = null, t0 = 0, times = [];
+let best = Store.get('reaction-best', null);
+const showBest = () => { document.getElementById('best').textContent = best ? best + ' ms' : '—'; };
+showBest();
+
+function set(cls, html) { pad.className = cls; pad.innerHTML = html; }
+
+function arm() {
+  state = 'wait';
+  set('wait', `<h2>Wait for green…</h2><p>Attempt ${times.length + 1} of 5</p>`);
+  timer = setTimeout(() => {
+    state = 'go';
+    t0 = performance.now();
+    set('go', '<h2>CLICK!</h2>');
+  }, rand(1200, 4000));
+}
+
+function renderHistory() {
+  hist.innerHTML = times.map((t, i) => `<span>#${i + 1}: <b>${t}</b> ms</span>`).join('');
+}
+
+function act() {
+  if (state === 'idle' || state === 'result' || state === 'early') {
+    if (state === 'result' || state === 'idle') { times = []; renderHistory(); }
+    return arm();
+  }
+  if (state === 'wait') {
+    clearTimeout(timer);
+    state = 'early';
+    Sound.beep(150, 0.2, 'sawtooth');
+    set('early', '<h2>Too soon!</h2><p>Click to try that attempt again.</p>');
+    return;
+  }
+  if (state === 'go') {
+    const ms = Math.round(performance.now() - t0);
+    times.push(ms);
+    renderHistory();
+    Sound.beep(880, 0.06, 'triangle');
+    if (times.length >= 5) {
+      const avg = Math.round(times.reduce((a, b) => a + b, 0) / times.length);
+      best = recordBest('reaction-best', avg, true);
+      showBest();
+      const verdict = avg < 200 ? 'Lightning fast! ⚡' : avg < 250 ? 'Great reflexes!' : avg < 320 ? 'Pretty average.' : 'Keep practicing!';
+      state = 'result';
+      set('result', `<h2>Average: ${avg} ms</h2><p>${verdict}</p><p>Fastest ${Math.min(...times)} ms · Slowest ${Math.max(...times)} ms</p><p>Click to go again.</p>`);
+    } else {
+      state = 'between';
+      set('result', `<h2>${ms} ms</h2><p>Get ready for the next one…</p>`);
+      setTimeout(arm, 900);
+    }
+  }
+}
+
+pad.addEventListener('pointerdown', e => { e.preventDefault(); act(); });
+document.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) act(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SameGame</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🟪 SameGame</h1>
+  <div class="stats">Score <b id="score">0</b> Left <b id="left">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="controls">
+  <select id="colors"><option value="3">3 colours (easy)</option><option value="4" selected>4 colours</option><option value="5">5 colours (hard)</option></select>
+  <button class="btn" id="new">New game</button>
+  <button class="btn alt" id="undo">↶ Undo</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="600" height="400"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Click a group of two or more touching blocks of the same colour to remove it. Blocks fall down and columns slide left. Big groups score much more: (n − 2)². Clear the whole board for a 1000-point bonus.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const COLS = 15, ROWS = 10, S = 40;
+const COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#facc15', '#a855f7'];
+let grid, score, hover = [], history = [];
+let best = Store.get('samegame-best', 0);
+
+function newGame() {
+  const k = +document.getElementById('colors').value;
+  grid = Array.from({ length: COLS }, () => Array.from({ length: ROWS }, () => randInt(0, k - 1))); // grid[x][y], y=0 bottom
+  score = 0;
+  history = [];
+  hover = [];
+  overlay(ov, null);
+  render();
+}
+
+function groupAt(x, y) {
+  const col = grid[x] && grid[x][y];
+  if (col == null) return [];
+  const seen = new Set([x + ',' + y]), out = [[x, y]], q = [[x, y]];
+  while (q.length) {
+    const [cx, cy] = q.pop();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = cx + dx, ny = cy + dy, k = nx + ',' + ny;
+      if (grid[nx] && grid[nx][ny] === col && !seen.has(k)) { seen.add(k); out.push([nx, ny]); q.push([nx, ny]); }
+    }
+  }
+  return out;
+}
+
+function remaining() { return grid.reduce((s, c) => s + c.filter(v => v != null).length, 0); }
+
+function anyMoves() {
+  for (let x = 0; x < grid.length; x++) for (let y = 0; y < grid[x].length; y++) {
+    const v = grid[x][y];
+    if (v == null) continue;
+    if ((grid[x + 1] && grid[x + 1][y] === v) || grid[x][y + 1] === v) return true;
+  }
+  return false;
+}
+
+function click(x, y) {
+  const g = groupAt(x, y);
+  if (g.length < 2) return;
+  history.push({ grid: grid.map(c => c.slice()), score });
+  g.forEach(([gx, gy]) => { grid[gx][gy] = null; });
+  grid = grid.map(c => c.filter(v => v != null)).filter(c => c.length);
+  score += (g.length - 2) ** 2;
+  Sound.beep(300 + Math.min(g.length, 20) * 30, 0.08, 'triangle', 0.04);
+  hover = [];
+  if (!anyMoves()) {
+    const left = remaining();
+    if (left === 0) score += 1000;
+    best = recordBest('samegame-best', score);
+    render();
+    overlay(ov, `<h2>${left === 0 ? 'Board cleared! +1000 🎉' : 'No more moves'}</h2><p>Score ${score} · ${left} blocks left</p><button class="btn" onclick="newGame()">New game</button><button class="btn alt" onclick="undo()">Undo</button>`);
+    return;
+  }
+  render();
+}
+
+function undo() {
+  const h = history.pop();
+  if (!h) return;
+  grid = h.grid;
+  score = h.score;
+  overlay(ov, null);
+  render();
+}
+
+function render() {
+  ctx.fillStyle = '#0b0c18';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  const hs = new Set(hover.map(([x, y]) => x + ',' + y));
+  grid.forEach((col, x) => col.forEach((v, y) => {
+    if (v == null) return;
+    const px = x * S, py = (ROWS - 1 - y) * S;
+    ctx.fillStyle = COLORS[v];
+    ctx.globalAlpha = hover.length && !hs.has(x + ',' + y) ? 0.55 : 1;
+    ctx.beginPath(); ctx.roundRect(px + 2, py + 2, S - 4, S - 4, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.3)';
+    ctx.fillRect(px + 7, py + 6, S - 18, 5);
+  }));
+  ctx.globalAlpha = 1;
+  if (hover.length >= 2) {
+    const [x, y] = hover[0];
+    const pts = (hover.length - 2) ** 2;
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 15px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${hover.length} → +${pts}`, clamp(x * S + S / 2, 40, cv.width - 40), clamp((ROWS - 1 - y) * S - 6, 16, cv.height));
+  }
+  document.getElementById('score').textContent = score;
+  document.getElementById('left').textContent = remaining();
+  document.getElementById('best').textContent = best;
+}
+
+const cellOf = e => { const p = canvasPoint(cv, e); return [Math.floor(p.x / S), ROWS - 1 - Math.floor(p.y / S)]; };
+cv.addEventListener('pointermove', e => {
+  if (e.pointerType !== 'mouse') return;
+  const g = groupAt(...cellOf(e));
+  hover = g.length >= 2 ? g : [];
+  render();
+});
+cv.addEventListener('pointerleave', () => { hover = []; render(); });
+cv.addEventListener('click', e => click(...cellOf(e)));
+document.getElementById('new').onclick = newGame;
+document.getElementById('colors').onchange = newGame;
+document.getElementById('undo').onclick = undo;
+document.addEventListener('keydown', e => { if (e.key === 'z' || e.key === 'u') undo(); });
+newGame();
+</script>
+</body>
+</html>

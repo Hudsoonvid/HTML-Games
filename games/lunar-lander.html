@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lunar Lander</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🌙 Lunar Lander</h1>
+  <div class="stats">Score <b id="score">0</b> Level <b id="level">1</b> Lives <b id="lives">3</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="760" height="500"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="tL">⟲</button><button id="tT">🔥</button><button id="tR">⟳</button></div>
+<p class="help"><kbd>←</kbd><kbd>→</kbd> rotate · <kbd>↑</kbd>/<kbd>Space</kbd> thrust. Touch down gently and upright on a flat pad — smaller pads pay more. Watch your fuel.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, G = 26, THRUST = 62, STEP = 16;
+let terrain, pads, lander, score, level, lives, state = 'ready', last = 0, keys = {}, parts = [], stars;
+let best = Store.get('lander-best', 0);
+stars = Array.from({ length: 80 }, () => [rand(0, W), rand(0, H * 0.7), Math.random()]);
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('level').textContent = level;
+  document.getElementById('lives').textContent = lives;
+  document.getElementById('best').textContent = best;
+}
+
+function buildTerrain() {
+  const n = Math.ceil(W / STEP) + 1;
+  terrain = [];
+  let h = rand(H * 0.6, H * 0.8);
+  for (let i = 0; i < n; i++) {
+    h = clamp(h + rand(-28, 28) * (1 + level * 0.08), H * 0.45, H - 25);
+    terrain.push(h);
+  }
+  pads = [];
+  const specs = [{ w: 6, mult: 2 }, { w: 4, mult: 3 }, { w: Math.max(2, 3 - Math.floor(level / 3)), mult: 5 }];
+  shuffle(specs);
+  const slots = shuffle([2, 13, 24, 35]).slice(0, 3);
+  specs.forEach((s, k) => {
+    const i0 = slots[k] + randInt(0, 4), y = terrain[i0];
+    for (let i = i0; i <= i0 + s.w && i < n; i++) terrain[i] = y;
+    pads.push({ x0: i0 * STEP, x1: Math.min(i0 + s.w, n - 1) * STEP, y, mult: s.mult });
+  });
+}
+
+const groundAt = x => {
+  const i = clamp(Math.floor(x / STEP), 0, terrain.length - 2), t = x / STEP - i;
+  return terrain[i] + (terrain[i + 1] - terrain[i]) * t;
+};
+
+function newLander() {
+  lander = { x: rand(80, W - 80), y: 50, vx: rand(-30, 30), vy: 0, a: 0, fuel: Math.max(450, 1000 - (level - 1) * 60), thrust: false };
+}
+
+function startLevel() {
+  buildTerrain();
+  newLander();
+  parts = [];
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function start() {
+  score = 0; level = 1; lives = 3;
+  startLevel();
+}
+
+function feet() {
+  const c = Math.cos(lander.a), s = Math.sin(lander.a);
+  return [[-12, 14], [12, 14]].map(([fx, fy]) => ({ x: lander.x + fx * c - fy * s, y: lander.y + fx * s + fy * c }));
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  if (keys.ArrowLeft || keys.a) lander.a -= 2.4 * s;
+  if (keys.ArrowRight || keys.d) lander.a += 2.4 * s;
+  lander.a = clamp(lander.a, -Math.PI / 2, Math.PI / 2);
+  lander.thrust = !!(keys.ArrowUp || keys.w || keys[' ']) && lander.fuel > 0;
+  lander.vy += G * s;
+  if (lander.thrust) {
+    lander.vx += Math.sin(lander.a) * THRUST * s;
+    lander.vy -= Math.cos(lander.a) * THRUST * s;
+    lander.fuel = Math.max(0, lander.fuel - 90 * s);
+    for (let i = 0; i < 2; i++) parts.push({ x: lander.x - Math.sin(lander.a) * 14, y: lander.y + Math.cos(lander.a) * 14, vx: -Math.sin(lander.a) * 120 + rand(-30, 30), vy: Math.cos(lander.a) * 120 + rand(-30, 30), life: rand(200, 400) });
+  }
+  lander.x += lander.vx * s;
+  lander.y += lander.vy * s;
+  if (lander.x < 0) lander.x += W;
+  if (lander.x > W) lander.x -= W;
+  if (lander.y < -100) lander.vy = Math.max(lander.vy, 0);
+  parts.forEach(p => { p.x += p.vx * s; p.y += p.vy * s; p.life -= dt; });
+  parts = parts.filter(p => p.life > 0);
+  const ft = feet();
+  const touching = ft.some(f => f.y >= groundAt(f.x)) || lander.y - 8 >= groundAt(lander.x);
+  if (touching) land(ft);
+}
+
+function land(ft) {
+  const pad = pads.find(p => ft.every(f => f.x >= p.x0 - 2 && f.x <= p.x1 + 2));
+  const soft = lander.vy < 40 && Math.abs(lander.vx) < 25 && Math.abs(lander.a) < 0.22;
+  if (pad && soft) {
+    const pts = pad.mult * 50 + Math.floor(lander.fuel / 4) + (lander.vy < 15 ? 50 : 0);
+    score += pts;
+    lander.y = pad.y - 14;
+    lander.a = 0;
+    Sound.beep(880, 0.25, 'triangle');
+    state = 'landed';
+    hud();
+    overlay(ov, `<h2>The Eagle has landed!</h2><p>×${pad.mult} pad · +${pts} points</p><button class="btn" onclick="nextLevel()">Next level</button>`);
+  } else {
+    lives--;
+    state = 'crashed';
+    for (let i = 0; i < 60; i++) { const a = rand(0, 7), sp = rand(30, 160); parts.push({ x: lander.x, y: lander.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60, life: rand(400, 1100) }); }
+    Sound.beep(80, 0.6, 'sawtooth', 0.06);
+    const why = !pad ? 'You missed the landing pad.' : Math.abs(lander.a) >= 0.22 ? 'Not upright enough.' : 'Too fast!';
+    hud();
+    if (lives <= 0) {
+      best = recordBest('lander-best', score);
+      hud();
+      overlay(ov, `<h2>Mission over</h2><p>${why}</p><p>Final score ${score}</p><button class="btn" onclick="start()">Play again</button>`);
+      state = 'over';
+    } else {
+      overlay(ov, `<h2>Crashed!</h2><p>${why}</p><button class="btn" onclick="retry()">Try again</button>`);
+    }
+  }
+}
+
+function nextLevel() { level++; startLevel(); }
+function retry() { newLander(); parts = []; state = 'play'; overlay(ov, null); }
+
+function draw() {
+  ctx.fillStyle = '#02030a';
+  ctx.fillRect(0, 0, W, H);
+  stars.forEach(([x, y, b]) => { ctx.fillStyle = `rgba(255,255,255,${0.3 + b * 0.6})`; ctx.fillRect(x, y, 1.5, 1.5); });
+  if (!terrain) return;
+  ctx.fillStyle = '#334155';
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  terrain.forEach((h, i) => ctx.lineTo(i * STEP, h));
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  terrain.forEach((h, i) => (i ? ctx.lineTo(i * STEP, h) : ctx.moveTo(0, h)));
+  ctx.stroke();
+  pads.forEach(p => {
+    ctx.fillStyle = '#22c55e';
+    ctx.fillRect(p.x0, p.y - 2, p.x1 - p.x0, 4);
+    ctx.fillStyle = '#86efac';
+    ctx.font = 'bold 13px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('×' + p.mult, (p.x0 + p.x1) / 2, p.y + 18);
+  });
+  parts.forEach(p => { ctx.fillStyle = `rgba(253,186,116,${p.life / 500})`; ctx.fillRect(p.x, p.y, 2.5, 2.5); });
+  if (state !== 'crashed' && state !== 'over') {
+    ctx.save();
+    ctx.translate(lander.x, lander.y);
+    ctx.rotate(lander.a);
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1.6;
+    ctx.fillStyle = '#94a3b8';
+    ctx.beginPath(); ctx.arc(0, -4, 9, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#facc15';
+    ctx.fillRect(-10, 4, 20, 6);
+    ctx.beginPath();
+    ctx.moveTo(-8, 10); ctx.lineTo(-12, 14); ctx.moveTo(8, 10); ctx.lineTo(12, 14);
+    ctx.moveTo(-15, 14); ctx.lineTo(-9, 14); ctx.moveTo(9, 14); ctx.lineTo(15, 14);
+    ctx.stroke();
+    if (lander.thrust) {
+      ctx.fillStyle = '#f97316';
+      ctx.beginPath(); ctx.moveTo(-4, 10); ctx.lineTo(0, 18 + Math.random() * 10); ctx.lineTo(4, 10); ctx.fill();
+    }
+    ctx.restore();
+  }
+  // instruments
+  const alt = Math.max(0, Math.round(groundAt(lander.x) - lander.y - 14));
+  const rows = [
+    ['FUEL', Math.round(lander.fuel), lander.fuel > 150],
+    ['ALTITUDE', alt, true],
+    ['H-SPEED', Math.round(lander.vx), Math.abs(lander.vx) < 25],
+    ['V-SPEED', Math.round(lander.vy), lander.vy < 40],
+    ['ANGLE', Math.round(lander.a * 180 / Math.PI) + '°', Math.abs(lander.a) < 0.22]
+  ];
+  ctx.font = '13px ui-monospace, monospace';
+  ctx.textAlign = 'left';
+  rows.forEach(([k, v, ok], i) => {
+    ctx.fillStyle = '#9097b8';
+    ctx.fillText(k, 12, 22 + i * 18);
+    ctx.fillStyle = ok ? '#86efac' : '#fca5a5';
+    ctx.fillText(String(v), 100, 22 + i * 18);
+  });
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  else if (state === 'crashed' || state === 'over' || state === 'landed') {
+    parts.forEach(p => { p.x += p.vx * dt / 1000; p.y += p.vy * dt / 1000; p.vy += 60 * dt / 1000; p.life -= dt; });
+    parts = parts.filter(p => p.life > 0);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === 'Enter') {
+    if (state === 'ready' || state === 'over') start();
+    else if (state === 'landed') nextLevel();
+    else if (state === 'crashed') retry();
+  }
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+holdButton(document.getElementById('tL'), v => { keys.ArrowLeft = v; });
+holdButton(document.getElementById('tR'), v => { keys.ArrowRight = v; });
+holdButton(document.getElementById('tT'), v => { keys.ArrowUp = v; });
+
+score = 0; level = 1; lives = 3;
+buildTerrain();
+newLander();
+hud();
+overlay(ov, '<h2>Lunar Lander</h2><p>Land softly on a pad. Green readouts mean safe.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alien Invasion</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>👾 Alien Invasion</h1>
+  <div class="stats">Score <b id="score">0</b> Lives <b id="lives">3</b> Wave <b id="wave">1</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="520" height="600"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="tL">◀</button><button id="tF">🔥</button><button id="tR">▶</button></div>
+<p class="help"><kbd>←</kbd><kbd>→</kbd> move · <kbd>Space</kbd> fire · <kbd>P</kbd> pause. Hide behind the bunkers and shoot the mystery ship for bonus points.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height;
+const SPRITES = {
+  squid: [[
+    '   XX   ', '  XXXX  ', ' XXXXXX ', 'XX XX XX', 'XXXXXXXX', '  X  X  ', ' X XX X ', 'X X  X X'
+  ], [
+    '   XX   ', '  XXXX  ', ' XXXXXX ', 'XX XX XX', 'XXXXXXXX', ' X XX X ', 'X      X', ' X    X '
+  ]],
+  crab: [[
+    '  X     X  ', '   X   X   ', '  XXXXXXX  ', ' XX XXX XX ', 'XXXXXXXXXXX', 'X XXXXXXX X', 'X X     X X', '   XX XX   '
+  ], [
+    '  X     X  ', 'X  X   X  X', 'X XXXXXXX X', 'XXX XXX XXX', 'XXXXXXXXXXX', ' XXXXXXXXX ', '  X     X  ', ' X       X '
+  ]],
+  octo: [[
+    '    XXXX    ', ' XXXXXXXXXX ', 'XXXXXXXXXXXX', 'XXX  XX  XXX', 'XXXXXXXXXXXX', '   XX  XX   ', '  XX XX XX  ', 'XX        XX'
+  ], [
+    '    XXXX    ', ' XXXXXXXXXX ', 'XXXXXXXXXXXX', 'XXX  XX  XXX', 'XXXXXXXXXXXX', '  XXX  XXX  ', ' XX  XX  XX ', '  XX    XX  '
+  ]],
+  ship: [['      X      ', '     XXX     ', '     XXX     ', ' XXXXXXXXXXX ', 'XXXXXXXXXXXXX', 'XXXXXXXXXXXXX', 'XXXXXXXXXXXXX']],
+  ufo: [['     XXXXXX     ', '   XXXXXXXXXX   ', '  XXXXXXXXXXXX  ', ' XX XX XX XX XX ', 'XXXXXXXXXXXXXXXX', '  XXX  XX  XXX  ', '   X        X   ']]
+};
+const SCALE = 3;
+function render(rows, color) {
+  const c = document.createElement('canvas');
+  c.width = rows[0].length * SCALE;
+  c.height = rows.length * SCALE;
+  const g = c.getContext('2d');
+  g.fillStyle = color;
+  rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === 'X') g.fillRect(x * SCALE, y * SCALE, SCALE, SCALE); }));
+  return c;
+}
+const IMG = {
+  squid: SPRITES.squid.map(f => render(f, '#f472b6')),
+  crab: SPRITES.crab.map(f => render(f, '#22d3ee')),
+  octo: SPRITES.octo.map(f => render(f, '#a3e635')),
+  ship: render(SPRITES.ship[0], '#8b5cf6'),
+  ufo: render(SPRITES.ufo[0], '#ef4444')
+};
+const ROW_TYPES = ['squid', 'crab', 'crab', 'octo', 'octo'];
+const POINTS = { squid: 30, crab: 20, octo: 10 };
+
+let player, shots, bombs, aliens, bunkers, ufo, score, lives, wave, dirX, stepT, frame, state = 'ready', keys = {}, last = 0, fireCd = 0, particles;
+let best = Store.get('invaders-best', 0);
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('lives').textContent = lives;
+  document.getElementById('wave').textContent = wave;
+  document.getElementById('best').textContent = best;
+}
+
+function buildWave() {
+  aliens = [];
+  const top = 70 + Math.min(wave - 1, 5) * 14;
+  for (let r = 0; r < 5; r++) for (let c = 0; c < 11; c++) {
+    aliens.push({ type: ROW_TYPES[r], x: 40 + c * 38, y: top + r * 34, alive: true });
+  }
+  dirX = 1;
+  stepT = 0;
+  frame = 0;
+  shots = [];
+  bombs = [];
+  ufo = null;
+}
+
+function buildBunkers() {
+  bunkers = [];
+  const shape = ['  XXXXXXXX  ', ' XXXXXXXXXX ', 'XXXXXXXXXXXX', 'XXXXXXXXXXXX', 'XXXXXXXXXXXX', 'XXX      XXX', 'XX        XX'];
+  for (let i = 0; i < 4; i++) {
+    const bx = 60 + i * 120;
+    shape.forEach((row, y) => [...row].forEach((ch, x) => {
+      if (ch === 'X') for (let sy = 0; sy < 2; sy++) for (let sx = 0; sx < 2; sx++) bunkers.push({ x: bx + x * 4 + sx * 2, y: 480 + y * 4 + sy * 2, alive: true });
+    }));
+  }
+}
+
+function start() {
+  score = 0; lives = 3; wave = 1;
+  player = { x: W / 2, y: 560, dead: 0 };
+  particles = [];
+  buildWave();
+  buildBunkers();
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function burst(x, y, color, n = 12) {
+  for (let i = 0; i < n; i++) particles.push({ x, y, vx: rand(-3, 3), vy: rand(-3, 3), life: rand(300, 600), color });
+}
+
+function hitBunker(x, y, r = 5) {
+  let hit = false;
+  for (const b of bunkers) {
+    if (b.alive && Math.abs(b.x - x) <= 2 && Math.abs(b.y - y) <= 3) { hit = true; break; }
+  }
+  if (!hit) return false;
+  for (const b of bunkers) if (b.alive && Math.hypot(b.x - x, b.y - y) < r + Math.random() * 3) b.alive = false;
+  return true;
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  const live = aliens.filter(a => a.alive);
+  // player
+  if (player.dead > 0) {
+    player.dead -= dt;
+    if (player.dead <= 0) { player.x = W / 2; bombs = []; }
+  } else {
+    if (keys.ArrowLeft || keys.a) player.x -= 4 * f;
+    if (keys.ArrowRight || keys.d) player.x += 4 * f;
+    player.x = clamp(player.x, 24, W - 24);
+    fireCd -= dt;
+    if ((keys[' '] || keys.fire) && fireCd <= 0 && shots.length < 1 + (wave > 3 ? 1 : 0)) {
+      shots.push({ x: player.x, y: player.y - 14 });
+      fireCd = 300;
+      Sound.beep(880, 0.05);
+    }
+  }
+  // alien march: the fewer remain, the faster they go
+  const interval = Math.max(40, 30 + live.length * 13 - wave * 25);
+  stepT += dt;
+  if (stepT >= interval) {
+    stepT = 0;
+    frame ^= 1;
+    const minX = Math.min(...live.map(a => a.x)), maxX = Math.max(...live.map(a => a.x + 36));
+    if ((dirX > 0 && maxX + 8 > W - 8) || (dirX < 0 && minX - 8 < 8)) {
+      dirX = -dirX;
+      live.forEach(a => { a.y += 16; });
+    } else {
+      live.forEach(a => { a.x += 8 * dirX; });
+    }
+    Sound.beep(frame ? 70 : 60, 0.06, 'square', 0.03);
+  }
+  // alien bombs from the lowest alien in a random column
+  if (Math.random() < (0.012 + wave * 0.004) * f && bombs.length < 3 + wave) {
+    const shooter = pick(live);
+    if (shooter) {
+      const col = live.filter(a => Math.abs(a.x - shooter.x) < 10);
+      const low = col.reduce((m, a) => (a.y > m.y ? a : m), col[0]);
+      bombs.push({ x: low.x + 16, y: low.y + 24, t: 0 });
+    }
+  }
+  // UFO
+  if (!ufo && Math.random() < 0.0015 * f) ufo = { x: Math.random() < 0.5 ? -50 : W + 50, y: 40 };
+  if (ufo) {
+    ufo.vx = ufo.vx || (ufo.x < 0 ? 2 : -2);
+    ufo.x += ufo.vx * f;
+    if (ufo.x < -60 || ufo.x > W + 60) ufo = null;
+  }
+  // player shots
+  for (const s of shots) {
+    s.y -= 9 * f;
+    if (s.y < 0) s.dead = true;
+    if (hitBunker(s.x, s.y)) s.dead = true;
+    for (const a of live) {
+      const img = IMG[a.type][0];
+      if (!s.dead && s.x > a.x && s.x < a.x + img.width && s.y > a.y && s.y < a.y + img.height) {
+        a.alive = false;
+        s.dead = true;
+        score += POINTS[a.type];
+        burst(a.x + img.width / 2, a.y + 12, '#fde047');
+        Sound.beep(300, 0.08, 'sawtooth');
+      }
+    }
+    if (ufo && !s.dead && Math.abs(s.x - (ufo.x + 24)) < 26 && Math.abs(s.y - (ufo.y + 10)) < 14) {
+      const pts = pick([50, 100, 150, 300]);
+      score += pts;
+      burst(ufo.x + 24, ufo.y + 10, '#ef4444', 24);
+      ufo = null;
+      s.dead = true;
+    }
+  }
+  shots = shots.filter(s => !s.dead);
+  // bombs
+  for (const b of bombs) {
+    b.y += (3 + wave * 0.3) * f;
+    b.t += dt;
+    if (b.y > H) b.dead = true;
+    if (hitBunker(b.x, b.y, 6)) b.dead = true;
+    if (!b.dead && player.dead <= 0 && Math.abs(b.x - player.x) < 20 && b.y > player.y - 10 && b.y < player.y + 12) {
+      b.dead = true;
+      killPlayer();
+    }
+  }
+  bombs = bombs.filter(b => !b.dead);
+  // aliens hitting bunkers or reaching the player
+  for (const a of live) {
+    if (a.y + 24 >= 480) for (const b of bunkers) if (b.alive && b.x > a.x && b.x < a.x + 36 && b.y > a.y && b.y < a.y + 24) b.alive = false;
+    if (a.y + 24 >= player.y - 10) { lives = 0; killPlayer(); return; }
+  }
+  particles.forEach(p => { p.x += p.vx * f; p.y += p.vy * f; p.life -= dt; });
+  particles = particles.filter(p => p.life > 0);
+  if (!aliens.some(a => a.alive)) {
+    wave++;
+    score += 100;
+    buildWave();
+    if (wave % 3 === 1) buildBunkers();
+  }
+  hud();
+}
+
+function killPlayer() {
+  burst(player.x, player.y, '#8b5cf6', 30);
+  Sound.beep(120, 0.4, 'sawtooth');
+  lives = Math.max(0, lives - 1);
+  player.dead = 1500;
+  hud();
+  if (lives <= 0) {
+    state = 'over';
+    best = recordBest('invaders-best', score);
+    hud();
+    overlay(ov, `<h2>Earth has fallen</h2><p>Score ${score} · Wave ${wave}</p><button class="btn" onclick="start()">Play again</button>`);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#05060d';
+  ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 60; i++) {
+    ctx.fillStyle = 'rgba(255,255,255,' + ((i * 37) % 10) / 20 + ')';
+    ctx.fillRect((i * 97) % W, (i * 53) % H, 1, 1);
+  }
+  aliens.forEach(a => { if (a.alive) ctx.drawImage(IMG[a.type][frame], a.x, a.y); });
+  if (ufo) ctx.drawImage(IMG.ufo, ufo.x, ufo.y);
+  ctx.fillStyle = '#22c55e';
+  bunkers.forEach(b => { if (b.alive) ctx.fillRect(b.x, b.y, 2, 2); });
+  if (player && player.dead <= 0) ctx.drawImage(IMG.ship, player.x - IMG.ship.width / 2, player.y - 10);
+  ctx.fillStyle = '#fff';
+  shots.forEach(s => ctx.fillRect(s.x - 1, s.y - 8, 3, 10));
+  ctx.fillStyle = '#fde047';
+  bombs.forEach(b => {
+    const z = Math.floor(b.t / 80) % 2 ? 2 : -2;
+    ctx.fillRect(b.x - 1 + z, b.y - 8, 3, 4);
+    ctx.fillRect(b.x - 1 - z, b.y - 4, 3, 4);
+    ctx.fillRect(b.x - 1 + z, b.y, 3, 4);
+  });
+  particles.forEach(p => { ctx.fillStyle = p.color; ctx.globalAlpha = Math.min(1, p.life / 300); ctx.fillRect(p.x, p.y, 3, 3); });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#22c55e';
+  ctx.fillRect(0, 585, W, 2);
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if ((state === 'ready' || state === 'over') && (e.key === 'Enter' || e.key === ' ')) start();
+  if (e.key === 'p' || e.key === 'P') {
+    if (state === 'play') { state = 'paused'; overlay(ov, '<h2>Paused</h2>'); }
+    else if (state === 'paused') { state = 'play'; overlay(ov, null); }
+  }
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+holdButton(document.getElementById('tL'), v => { keys.ArrowLeft = v; });
+holdButton(document.getElementById('tR'), v => { keys.ArrowRight = v; });
+holdButton(document.getElementById('tF'), v => { keys.fire = v; });
+
+score = 0; lives = 3; wave = 1; particles = [];
+player = { x: W / 2, y: 560, dead: 0 };
+buildWave();
+buildBunkers();
+hud();
+overlay(ov, '<h2>Alien Invasion</h2><p>Defend Earth from the descending fleet.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

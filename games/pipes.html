@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipes</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔌 Pipes</h1>
+  <div class="stats">Moves <b id="moves">0</b> Connected <b id="conn">0%</b> Time <b id="time">0</b>s</div>
+</header>
+<div class="controls">
+  <select id="size"><option value="5">5 × 5</option><option value="7" selected>7 × 7</option><option value="9">9 × 9</option><option value="11">11 × 11</option></select>
+  <button class="btn" id="new">New puzzle</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="560" height="560"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Rotate the tiles so every pipe connects back to the power source in the middle and every 🖥️ lights up. Click to rotate clockwise, right-click (or <kbd>Shift</kbd>-click) for anticlockwise. There are no loops and no loose ends in the solution.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+// bits: 1 up, 2 right, 4 down, 8 left
+const DIRS = [[1, 0, -1, 4], [2, 1, 0, 8], [4, 0, 1, 1], [8, -1, 0, 2]];
+let N, S, tiles, src, powered, moves, t0, timerId, done, anim = {};
+
+const rotCW = m => ((m << 1) | (m >> 3)) & 15;
+const rotCCW = m => ((m >> 1) | ((m & 1) << 3)) & 15;
+
+function generate() {
+  N = +document.getElementById('size').value;
+  S = cv.width / N;
+  const sol = Array(N * N).fill(0);
+  src = Math.floor(N / 2) * N + Math.floor(N / 2);
+  // randomized Prim: grow a spanning tree from the source, limiting junction size for nicer puzzles
+  const inTree = new Set([src]), frontier = [];
+  const addEdges = k => DIRS.forEach(([b, dx, dy, ob]) => {
+    const x = k % N + dx, y = Math.floor(k / N) + dy;
+    if (x >= 0 && y >= 0 && x < N && y < N) frontier.push([k, y * N + x, b, ob]);
+  });
+  addEdges(src);
+  while (frontier.length) {
+    const i = randInt(0, frontier.length - 1);
+    const [a, b, bit, obit] = frontier.splice(i, 1)[0];
+    if (inTree.has(b)) continue;
+    const deg = m => [1, 2, 4, 8].filter(x => m & x).length;
+    if (deg(sol[a]) >= 3 && Math.random() < 0.85 && frontier.some(f => !inTree.has(f[1]))) { frontier.push([a, b, bit, obit]); continue; }
+    sol[a] |= bit;
+    sol[b] |= obit;
+    inTree.add(b);
+    addEdges(b);
+  }
+  tiles = sol.map(m => { let r = m; for (let k = randInt(0, 3); k > 0; k--) r = rotCW(r); return r; });
+  moves = 0;
+  done = false;
+  anim = {};
+  computePower();
+  if (powered.size === N * N) return generate();
+  clearInterval(timerId);
+  t0 = Date.now();
+  timerId = setInterval(() => { document.getElementById('time').textContent = Math.floor((Date.now() - t0) / 1000); }, 500);
+  overlay(ov, null);
+  hud();
+}
+
+function computePower() {
+  powered = new Set([src]);
+  const q = [src];
+  while (q.length) {
+    const k = q.pop(), x = k % N, y = Math.floor(k / N);
+    for (const [b, dx, dy, ob] of DIRS) {
+      if (!(tiles[k] & b)) continue;
+      const nx = x + dx, ny = y + dy, nk = ny * N + nx;
+      if (nx < 0 || ny < 0 || nx >= N || ny >= N || powered.has(nk) || !(tiles[nk] & ob)) continue;
+      powered.add(nk);
+      q.push(nk);
+    }
+  }
+}
+
+function hud() {
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('conn').textContent = Math.round(powered.size / (N * N) * 100) + '%';
+}
+
+function rotate(k, ccw) {
+  if (done) return;
+  tiles[k] = ccw ? rotCCW(tiles[k]) : rotCW(tiles[k]);
+  anim[k] = { a: ccw ? Math.PI / 2 : -Math.PI / 2 };
+  moves++;
+  computePower();
+  Sound.beep(powered.has(k) ? 620 : 420, 0.03, 'triangle', 0.03);
+  hud();
+  if (powered.size === N * N) {
+    done = true;
+    clearInterval(timerId);
+    const secs = Math.floor((Date.now() - t0) / 1000);
+    const best = recordBest('pipes-best-' + N, secs, true);
+    Sound.beep(880, 0.3, 'triangle');
+    setTimeout(() => overlay(ov, `<h2>All connected! ⚡</h2><p>${moves} rotations · ${secs}s (best ${best}s)</p><button class="btn" onclick="generate()">Next puzzle</button>`), 400);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#0b0c18';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let k = 0; k < N * N; k++) {
+    const x = (k % N) * S, y = Math.floor(k / N) * S, on = powered.has(k);
+    ctx.fillStyle = (k % N + Math.floor(k / N)) % 2 ? '#171a33' : '#1b1e3b';
+    ctx.fillRect(x, y, S, S);
+    ctx.save();
+    ctx.translate(x + S / 2, y + S / 2);
+    if (anim[k]) { ctx.rotate(anim[k].a); anim[k].a *= 0.7; if (Math.abs(anim[k].a) < 0.01) delete anim[k]; }
+    ctx.strokeStyle = on ? '#22d3ee' : '#4b5280';
+    ctx.lineWidth = S * 0.2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (const [b, dx, dy] of DIRS) if (tiles[k] & b) { ctx.moveTo(0, 0); ctx.lineTo(dx * S / 2, dy * S / 2); }
+    ctx.stroke();
+    const deg = [1, 2, 4, 8].filter(b => tiles[k] & b).length;
+    if (k === src) {
+      ctx.fillStyle = '#facc15';
+      ctx.beginPath(); ctx.arc(0, 0, S * 0.3, 0, 7); ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.font = `${S * 0.34}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⚡', 0, 1);
+    } else if (deg === 1) {
+      ctx.fillStyle = on ? '#22d3ee' : '#334155';
+      ctx.beginPath(); ctx.roundRect(-S * 0.24, -S * 0.2, S * 0.48, S * 0.36, 4); ctx.fill();
+      ctx.fillStyle = on ? '#cffafe' : '#0f172a';
+      ctx.fillRect(-S * 0.18, -S * 0.14, S * 0.36, S * 0.24);
+    } else {
+      ctx.fillStyle = on ? '#22d3ee' : '#4b5280';
+      ctx.beginPath(); ctx.arc(0, 0, S * 0.12, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+  }
+  ctx.strokeStyle = '#0b0c18';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= N; i++) {
+    ctx.beginPath(); ctx.moveTo(i * S, 0); ctx.lineTo(i * S, cv.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * S); ctx.lineTo(cv.width, i * S); ctx.stroke();
+  }
+  requestAnimationFrame(draw);
+}
+
+const cellAt = e => { const p = canvasPoint(cv, e); return clamp(Math.floor(p.y / S), 0, N - 1) * N + clamp(Math.floor(p.x / S), 0, N - 1); };
+cv.addEventListener('contextmenu', e => { e.preventDefault(); rotate(cellAt(e), true); });
+cv.addEventListener('click', e => rotate(cellAt(e), e.shiftKey));
+document.getElementById('new').onclick = generate;
+document.getElementById('size').onchange = generate;
+generate();
+draw();
+</script>
+</body>
+</html>

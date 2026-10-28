@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fruit Catcher</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🧺 Fruit Catcher</h1>
+  <div class="stats">Score <b id="score">0</b> Lives <b id="lives">❤️❤️❤️</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="480" height="600"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Move the basket with the mouse, touch, or <kbd>←</kbd><kbd>→</kbd>. Catch fruit, dodge bombs 💣. Missing a fruit costs a life. Golden stars ⭐ are worth 50.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height;
+const FRUITS = ['🍎', '🍌', '🍇', '🍊', '🍓', '🍉', '🍐', '🍒', '🍍', '🥝'];
+let basket, items, pops, score, lives, spawnT, elapsed, state = 'ready', last = 0, keys = {};
+let best = Store.get('catcher-best', 0);
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('lives').textContent = '❤️'.repeat(Math.max(0, lives)) || '—';
+  document.getElementById('best').textContent = best;
+}
+
+function start() {
+  basket = { x: W / 2, w: 90 };
+  items = []; pops = [];
+  score = 0; lives = 3; spawnT = 0; elapsed = 0;
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function spawn() {
+  const r = Math.random();
+  const kind = r < 0.16 + Math.min(0.14, elapsed / 300000) ? 'bomb' : r < 0.2 + Math.min(0.14, elapsed / 300000) ? 'star' : 'fruit';
+  items.push({
+    kind,
+    ch: kind === 'bomb' ? '💣' : kind === 'star' ? '⭐' : pick(FRUITS),
+    x: rand(24, W - 24), y: -30,
+    vy: rand(2, 3) + elapsed / 30000,
+    vx: rand(-0.6, 0.6),
+    rot: rand(-0.05, 0.05), a: 0
+  });
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  elapsed += dt;
+  if (keys.ArrowLeft || keys.a) basket.x -= 8 * f;
+  if (keys.ArrowRight || keys.d) basket.x += 8 * f;
+  basket.x = clamp(basket.x, basket.w / 2, W - basket.w / 2);
+  spawnT -= dt;
+  if (spawnT <= 0) { spawn(); spawnT = Math.max(280, 1000 - elapsed / 90); }
+  for (const it of items) {
+    it.y += it.vy * f;
+    it.x += it.vx * f;
+    if (it.x < 20 || it.x > W - 20) it.vx *= -1;
+    it.a += it.rot * f;
+    if (it.y > H - 70 && it.y < H - 40 && Math.abs(it.x - basket.x) < basket.w / 2) {
+      it.done = true;
+      if (it.kind === 'bomb') {
+        lives--;
+        pops.push({ x: it.x, y: it.y, text: '💥', t: 600 });
+        Sound.beep(100, 0.3, 'sawtooth');
+      } else {
+        const pts = it.kind === 'star' ? 50 : 10;
+        score += pts;
+        pops.push({ x: it.x, y: it.y - 20, text: '+' + pts, t: 600 });
+        Sound.beep(it.kind === 'star' ? 1200 : 700, 0.06, 'triangle');
+      }
+    } else if (it.y > H + 30) {
+      it.done = true;
+      if (it.kind === 'fruit') { lives--; Sound.beep(200, 0.15, 'square', 0.03); }
+    }
+  }
+  items = items.filter(it => !it.done);
+  pops.forEach(p => { p.t -= dt; p.y -= 0.6 * f; });
+  pops = pops.filter(p => p.t > 0);
+  hud();
+  if (lives <= 0) {
+    state = 'over';
+    best = recordBest('catcher-best', score);
+    hud();
+    overlay(ov, `<h2>Game over</h2><p>Score ${score} · Best ${best}</p><button class="btn" onclick="start()">Play again</button>`);
+  }
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#7dd3fc'); g.addColorStop(1, '#fef9c3');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#65a30d';
+  ctx.fillRect(0, H - 30, W, 30);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '34px system-ui, "Apple Color Emoji", "Segoe UI Emoji"';
+  if (items) for (const it of items) {
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    ctx.rotate(it.a);
+    ctx.fillText(it.ch, 0, 0);
+    ctx.restore();
+  }
+  if (basket) {
+    const x = basket.x - basket.w / 2, y = H - 64;
+    ctx.fillStyle = '#92400e';
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + basket.w, y); ctx.lineTo(x + basket.w - 12, y + 34); ctx.lineTo(x + 12, y + 34); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#b45309';
+    ctx.lineWidth = 2;
+    for (let i = 1; i < 3; i++) { ctx.beginPath(); ctx.moveTo(x + 4 + i, y + i * 11); ctx.lineTo(x + basket.w - 4 - i, y + i * 11); ctx.stroke(); }
+    for (let i = 1; i < 6; i++) { ctx.beginPath(); ctx.moveTo(x + i * basket.w / 6, y); ctx.lineTo(x + 12 + i * (basket.w - 24) / 6, y + 34); ctx.stroke(); }
+  }
+  ctx.font = 'bold 22px system-ui';
+  if (pops) pops.forEach(p => { ctx.globalAlpha = p.t / 600; ctx.fillStyle = '#7c2d12'; ctx.fillText(p.text, p.x, p.y); });
+  ctx.globalAlpha = 1;
+  ctx.textBaseline = 'alphabetic';
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+const move = e => { if (basket) basket.x = canvasPoint(cv, e).x; };
+cv.addEventListener('pointermove', move);
+cv.addEventListener('pointerdown', move);
+document.addEventListener('keydown', e => { keys[e.key] = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') start(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+score = 0; lives = 3;
+hud();
+overlay(ov, '<h2>Fruit Catcher</h2><p>Catch the fruit, avoid the bombs.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

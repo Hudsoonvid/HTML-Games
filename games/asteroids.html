@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asteroids</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>☄️ Asteroids</h1>
+  <div class="stats">Score <b id="score">0</b> Lives <b id="lives">3</b> Wave <b id="wave">1</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="720" height="520"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="tL">⟲</button><button id="tR">⟳</button><button id="tT">▲</button><button id="tF">🔥</button></div>
+<p class="help"><kbd>←</kbd><kbd>→</kbd> rotate · <kbd>↑</kbd> thrust · <kbd>Space</kbd> fire · <kbd>↓</kbd> hyperspace · <kbd>P</kbd> pause</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height;
+let ship, rocks, bullets, parts, score, lives, wave, state = 'ready', keys = {}, last = 0, fireCd = 0, extraAt;
+let best = Store.get('asteroids-best', 0);
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('lives').textContent = lives;
+  document.getElementById('wave').textContent = wave;
+  document.getElementById('best').textContent = best;
+}
+
+function wrap(o) {
+  if (o.x < 0) o.x += W; if (o.x > W) o.x -= W;
+  if (o.y < 0) o.y += H; if (o.y > H) o.y -= H;
+}
+
+function makeRock(x, y, size) {
+  const n = randInt(9, 13), pts = [];
+  for (let i = 0; i < n; i++) pts.push(rand(0.7, 1.15));
+  const r = [0, 14, 28, 50][size];
+  const a = rand(0, Math.PI * 2), sp = rand(0.6, 1.4) * (4 - size) * 0.55 + wave * 0.08;
+  return { x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, size, r, pts, rot: 0, spin: rand(-0.02, 0.02) };
+}
+
+function spawnWave() {
+  rocks = [];
+  for (let i = 0; i < 3 + wave; i++) {
+    let x, y;
+    do { x = rand(0, W); y = rand(0, H); } while (Math.hypot(x - W / 2, y - H / 2) < 160);
+    rocks.push(makeRock(x, y, 3));
+  }
+}
+
+function resetShip() {
+  ship = { x: W / 2, y: H / 2, vx: 0, vy: 0, a: -Math.PI / 2, inv: 2500, dead: 0, thrust: false };
+}
+
+function start() {
+  score = 0; lives = 3; wave = 1; extraAt = 10000;
+  bullets = []; parts = [];
+  resetShip();
+  spawnWave();
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function explode(x, y, n, color = '#e6e7f2') {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, Math.PI * 2), s = rand(0.5, 3.5);
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(400, 900), color });
+  }
+}
+
+function breakRock(r, i) {
+  rocks.splice(i, 1);
+  score += [0, 100, 50, 20][r.size];
+  explode(r.x, r.y, r.size * 6);
+  Sound.beep(90 + r.size * 30, 0.15, 'sawtooth', 0.05);
+  if (r.size > 1) for (let k = 0; k < 2; k++) rocks.push(makeRock(r.x, r.y, r.size - 1));
+  if (score >= extraAt) { lives++; extraAt += 10000; Sound.beep(1200, 0.2, 'triangle'); }
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  if (ship.dead > 0) {
+    ship.dead -= dt;
+    if (ship.dead <= 0) {
+      if (lives <= 0) return gameOver();
+      resetShip();
+    }
+  } else {
+    if (keys.ArrowLeft || keys.a) ship.a -= 0.075 * f;
+    if (keys.ArrowRight || keys.d) ship.a += 0.075 * f;
+    ship.thrust = !!(keys.ArrowUp || keys.w);
+    if (ship.thrust) {
+      ship.vx += Math.cos(ship.a) * 0.16 * f;
+      ship.vy += Math.sin(ship.a) * 0.16 * f;
+    }
+    ship.vx *= Math.pow(0.992, f);
+    ship.vy *= Math.pow(0.992, f);
+    const sp = Math.hypot(ship.vx, ship.vy);
+    if (sp > 7) { ship.vx *= 7 / sp; ship.vy *= 7 / sp; }
+    ship.x += ship.vx * f;
+    ship.y += ship.vy * f;
+    wrap(ship);
+    ship.inv = Math.max(0, ship.inv - dt);
+    fireCd -= dt;
+    if ((keys[' '] || keys.fire) && fireCd <= 0 && bullets.length < 6) {
+      bullets.push({ x: ship.x + Math.cos(ship.a) * 14, y: ship.y + Math.sin(ship.a) * 14, vx: ship.vx + Math.cos(ship.a) * 9, vy: ship.vy + Math.sin(ship.a) * 9, life: 900 });
+      fireCd = 180;
+      Sound.beep(1100, 0.04, 'square', 0.025);
+    }
+  }
+  for (const b of bullets) { b.x += b.vx * f; b.y += b.vy * f; b.life -= dt; wrap(b); }
+  bullets = bullets.filter(b => b.life > 0);
+  for (const r of rocks) { r.x += r.vx * f; r.y += r.vy * f; r.rot += r.spin * f; wrap(r); }
+  for (let i = rocks.length - 1; i >= 0; i--) {
+    const r = rocks[i];
+    const b = bullets.find(b => Math.hypot(b.x - r.x, b.y - r.y) < r.r);
+    if (b) { b.life = 0; breakRock(r, i); continue; }
+    if (ship.dead <= 0 && ship.inv <= 0 && Math.hypot(ship.x - r.x, ship.y - r.y) < r.r + 10) {
+      breakRock(r, i);
+      explode(ship.x, ship.y, 40, '#8b5cf6');
+      Sound.beep(70, 0.5, 'sawtooth', 0.06);
+      lives--;
+      ship.dead = 1800;
+    }
+  }
+  bullets = bullets.filter(b => b.life > 0);
+  parts.forEach(p => { p.x += p.vx * f; p.y += p.vy * f; p.life -= dt; });
+  parts = parts.filter(p => p.life > 0);
+  if (!rocks.length) { wave++; spawnWave(); ship.inv = 2000; }
+  hud();
+}
+
+function hyperspace() {
+  if (state !== 'play' || ship.dead > 0) return;
+  ship.x = rand(40, W - 40);
+  ship.y = rand(40, H - 40);
+  ship.vx = ship.vy = 0;
+  if (Math.random() < 0.08) { explode(ship.x, ship.y, 40, '#8b5cf6'); lives--; ship.dead = 1800; }
+}
+
+function gameOver() {
+  state = 'over';
+  best = recordBest('asteroids-best', score);
+  hud();
+  overlay(ov, `<h2>Game over</h2><p>Score ${score} · Wave ${wave}</p><button class="btn" onclick="start()">Play again</button>`);
+}
+
+function draw() {
+  ctx.fillStyle = '#05060d';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#e6e7f2';
+  ctx.lineWidth = 1.6;
+  for (const r of rocks) {
+    ctx.beginPath();
+    r.pts.forEach((m, i) => {
+      const a = r.rot + (i / r.pts.length) * Math.PI * 2;
+      const x = r.x + Math.cos(a) * r.r * m, y = r.y + Math.sin(a) * r.r * m;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+  }
+  if (ship && ship.dead <= 0 && !(ship.inv > 0 && Math.floor(ship.inv / 120) % 2)) {
+    ctx.save();
+    ctx.translate(ship.x, ship.y);
+    ctx.rotate(ship.a);
+    ctx.strokeStyle = '#c4b5fd';
+    ctx.beginPath();
+    ctx.moveTo(14, 0); ctx.lineTo(-10, -9); ctx.lineTo(-6, 0); ctx.lineTo(-10, 9); ctx.closePath();
+    ctx.stroke();
+    if (ship.thrust && Math.random() < 0.8) {
+      ctx.strokeStyle = '#f59e0b';
+      ctx.beginPath();
+      ctx.moveTo(-7, -4); ctx.lineTo(-16 - Math.random() * 6, 0); ctx.lineTo(-7, 4);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  ctx.fillStyle = '#fff';
+  bullets.forEach(b => ctx.fillRect(b.x - 1.5, b.y - 1.5, 3, 3));
+  parts.forEach(p => { ctx.globalAlpha = Math.min(1, p.life / 400); ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, 2, 2); });
+  ctx.globalAlpha = 1;
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === 'ArrowDown' || e.key === 's') hyperspace();
+  if ((state === 'ready' || state === 'over') && (e.key === 'Enter' || e.key === ' ')) start();
+  if (e.key === 'p' || e.key === 'P') {
+    if (state === 'play') { state = 'paused'; overlay(ov, '<h2>Paused</h2>'); }
+    else if (state === 'paused') { state = 'play'; overlay(ov, null); }
+  }
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+holdButton(document.getElementById('tL'), v => { keys.ArrowLeft = v; });
+holdButton(document.getElementById('tR'), v => { keys.ArrowRight = v; });
+holdButton(document.getElementById('tT'), v => { keys.ArrowUp = v; });
+holdButton(document.getElementById('tF'), v => { keys.fire = v; });
+
+score = 0; lives = 3; wave = 1; bullets = []; parts = [];
+spawnWave();
+hud();
+overlay(ov, '<h2>Asteroids</h2><p>Blast rocks, avoid collisions. Extra life every 10,000 points.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

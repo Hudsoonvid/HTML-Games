@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Match</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #board { display: grid; gap: 10px; width: min(560px, calc(100vw - 24px)); perspective: 800px; }
+  .card { aspect-ratio: 1; position: relative; cursor: pointer; transform-style: preserve-3d; transition: transform .35s; border: 0; padding: 0; background: none; }
+  .card.up, .card.done { transform: rotateY(180deg); }
+  .card .face { position: absolute; inset: 0; border-radius: 12px; display: flex; align-items: center; justify-content: center; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+  .card .back { background: linear-gradient(135deg, #8b5cf6, #22d3ee); box-shadow: inset 0 0 0 4px rgba(255,255,255,.15); }
+  .card .back::after { content: '?'; font-size: 28px; font-weight: 800; color: rgba(255,255,255,.6); }
+  .card .front { background: #f1f5f9; transform: rotateY(180deg); font-size: min(44px, 9vw); }
+  .card.done .front { background: #bbf7d0; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🃏 Memory Match</h1>
+  <div class="stats">Moves <b id="moves">0</b> Pairs <b id="pairs">0</b> Time <b id="time">0</b>s Best <b id="best">—</b></div>
+</header>
+<div class="controls">
+  <select id="size"><option value="4">4 × 4 (8 pairs)</option><option value="5" selected>5 × 4 (10 pairs)</option><option value="6">6 × 6 (18 pairs)</option></select>
+  <select id="theme"><option value="animals">Animals</option><option value="food">Food</option><option value="space">Space & travel</option></select>
+  <button class="btn" id="new">New game</button>
+</div>
+<div class="stage">
+  <div id="board"></div>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Flip two cards at a time. Find all the matching pairs in as few moves as possible.</p>
+<script src="shared.js"></script>
+<script>
+const THEMES = {
+  animals: '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🦄 🐙 🦋'.split(' '),
+  food: '🍎 🍕 🍔 🌮 🍩 🍪 🍓 🍉 🍇 🍒 🥑 🥕 🌽 🍿 🧁 🍦 🥨 🍣 🥐 🍋'.split(' '),
+  space: '🚀 🛸 🌍 🌙 ⭐ ☄️ 🪐 🌞 🚗 ✈️ 🚂 🚲 ⛵ 🚁 🏎️ 🛶 🚜 🛵 🗽 🗼'.split(' ')
+};
+const boardEl = document.getElementById('board'), ov = document.getElementById('ov');
+let open = [], moves, pairs, total, lock, t0, timerId, started;
+
+const key = () => 'memory-best-' + document.getElementById('size').value;
+function showBest() { const b = Store.get(key(), null); document.getElementById('best').textContent = b ?? '—'; }
+
+function newGame() {
+  const s = +document.getElementById('size').value;
+  const cols = s === 5 ? 5 : s, rows = s === 5 ? 4 : s;
+  total = cols * rows / 2;
+  const icons = shuffle(THEMES[document.getElementById('theme').value].slice()).slice(0, total);
+  const deck = shuffle([...icons, ...icons]);
+  boardEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  boardEl.style.width = cols === 6 ? 'min(560px, calc(100vw - 24px))' : 'min(480px, calc(100vw - 24px))';
+  boardEl.innerHTML = '';
+  deck.forEach(icon => {
+    const b = document.createElement('button');
+    b.className = 'card';
+    b.dataset.icon = icon;
+    b.innerHTML = `<div class="face back"></div><div class="face front">${icon}</div>`;
+    b.onclick = () => flip(b);
+    boardEl.appendChild(b);
+  });
+  open = []; moves = 0; pairs = 0; lock = false; started = false;
+  clearInterval(timerId);
+  document.getElementById('time').textContent = 0;
+  overlay(ov, null);
+  showBest();
+  hud();
+}
+
+function hud() {
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('pairs').textContent = `${pairs}/${total}`;
+}
+
+function flip(card) {
+  if (lock || card.classList.contains('up') || card.classList.contains('done')) return;
+  if (!started) {
+    started = true;
+    t0 = Date.now();
+    timerId = setInterval(() => { document.getElementById('time').textContent = Math.floor((Date.now() - t0) / 1000); }, 500);
+  }
+  card.classList.add('up');
+  open.push(card);
+  Sound.beep(520, 0.03, 'triangle', 0.03);
+  if (open.length < 2) return;
+  moves++;
+  const [a, b] = open;
+  if (a.dataset.icon === b.dataset.icon) {
+    open = [];
+    pairs++;
+    setTimeout(() => { a.classList.add('done'); b.classList.add('done'); Sound.beep(880, 0.1, 'triangle'); }, 300);
+    if (pairs === total) {
+      clearInterval(timerId);
+      const secs = Math.floor((Date.now() - t0) / 1000);
+      const best = recordBest(key(), moves, true);
+      setTimeout(() => { showBest(); overlay(ov, `<h2>All pairs found! 🎉</h2><p>${moves} moves in ${secs}s · Best ${best} moves</p><button class="btn" onclick="newGame()">Play again</button>`); }, 700);
+    }
+  } else {
+    lock = true;
+    setTimeout(() => { a.classList.remove('up'); b.classList.remove('up'); open = []; lock = false; }, 850);
+  }
+  hud();
+}
+
+document.getElementById('new').onclick = newGame;
+document.getElementById('size').onchange = newGame;
+document.getElementById('theme').onchange = newGame;
+newGame();
+</script>
+</body>
+</html>

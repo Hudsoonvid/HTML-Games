@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Road Hopper</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐸 Road Hopper</h1>
+  <div class="stats">Score <b id="score">0</b> Lives <b id="lives">3</b> Level <b id="level">1</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="520" height="600"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="tL">◀</button><button id="tU">▲</button><button id="tD">▼</button><button id="tR">▶</button></div>
+<p class="help">Hop with <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd> or swipe. Cross the road, ride logs and turtles over the river, and fill all five lily-pad homes before time runs out.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const C = 40, COLS = 13, SPAN = 19, HOMES = [2, 4, 6, 8, 10], TIME = 30000;
+const LANES = [
+  { row: 12, type: 'car', len: 1, dir: -1, sp: 1.2, xs: [0, 5, 10, 15], color: '#facc15' },
+  { row: 11, type: 'car', len: 1, dir: 1, sp: 1.0, xs: [2, 8, 14], color: '#f472b6' },
+  { row: 10, type: 'car', len: 1, dir: -1, sp: 2.0, xs: [1, 7, 13], color: '#60a5fa' },
+  { row: 9, type: 'car', len: 1, dir: 1, sp: 3.2, xs: [4, 14], color: '#f87171' },
+  { row: 8, type: 'truck', len: 2, dir: -1, sp: 1.4, xs: [0, 7, 13], color: '#e5e7eb' },
+  { row: 6, type: 'turtle', len: 3, dir: -1, sp: 1.2, xs: [0, 5, 10, 15], dive: 1 },
+  { row: 5, type: 'log', len: 3, dir: 1, sp: 0.9, xs: [0, 6, 12] },
+  { row: 4, type: 'log', len: 5, dir: 1, sp: 1.8, xs: [0, 9] },
+  { row: 3, type: 'turtle', len: 2, dir: -1, sp: 1.4, xs: [0, 4, 8, 12, 16], dive: 2 },
+  { row: 2, type: 'log', len: 4, dir: 1, sp: 1.3, xs: [0, 6, 13] }
+];
+let lanes, frog, homes, score, lives, level, timeLeft, maxRow, state = 'ready', last = 0, clock = 0, deathT = 0;
+let best = Store.get('hopper-best', 0);
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('lives').textContent = lives;
+  document.getElementById('level').textContent = level;
+  document.getElementById('best').textContent = best;
+}
+
+function buildLanes() {
+  lanes = LANES.map(l => ({ ...l, items: l.xs.map((x, i) => ({ x, diver: l.dive === i + 1 })) }));
+}
+
+function resetFrog() {
+  frog = { x: 6, y: 13 };
+  maxRow = 13;
+  timeLeft = TIME;
+}
+
+function start() {
+  score = 0; lives = 3; level = 1;
+  homes = HOMES.map(() => false);
+  buildLanes();
+  resetFrog();
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+// Diving turtles cycle: 0..4s visible, 4..5s sinking, 5..6.5s under water
+function turtleState(item) {
+  if (!item.diver) return 'up';
+  const t = (clock / 1000) % 6.5;
+  return t < 4 ? 'up' : t < 5 ? 'sinking' : 'under';
+}
+
+function die(reason) {
+  if (state !== 'play') return;
+  lives--;
+  Sound.beep(130, 0.35, 'sawtooth');
+  state = 'dying';
+  deathT = 900;
+  frog.dead = reason;
+  hud();
+}
+
+function hop(dx, dy) {
+  if (state === 'ready' || state === 'over') return start();
+  if (state !== 'play') return;
+  const nx = frog.x + dx, ny = frog.y + dy;
+  if (nx < -0.4 || nx > COLS - 0.6 || ny > 13) return;
+  frog.x = nx;
+  frog.y = ny;
+  if (frog.y >= 7) frog.x = clamp(Math.round(frog.x), 0, COLS - 1);
+  Sound.beep(500, 0.03, 'triangle');
+  if (frog.y < maxRow) { maxRow = frog.y; score += 10; }
+  if (frog.y === 1) {
+    const i = HOMES.findIndex(h => Math.abs(h - frog.x) < 0.5);
+    if (i < 0 || homes[i]) return die('hedge');
+    homes[i] = true;
+    score += 50 + Math.floor(timeLeft / 1000) * 2;
+    Sound.beep(880, 0.15, 'triangle');
+    if (homes.every(Boolean)) {
+      level++;
+      score += 1000;
+      homes = HOMES.map(() => false);
+    }
+    resetFrog();
+  }
+  hud();
+}
+
+function update(dt) {
+  clock += dt;
+  const mult = 1 + (level - 1) * 0.18;
+  for (const l of lanes) for (const it of l.items) {
+    it.x += l.dir * l.sp * mult * dt / 1000;
+    if (l.dir > 0 && it.x > COLS) it.x -= SPAN;
+    if (l.dir < 0 && it.x + l.len < 0) it.x += SPAN;
+  }
+  if (state === 'dying') {
+    deathT -= dt;
+    if (deathT <= 0) {
+      if (lives <= 0) {
+        state = 'over';
+        best = recordBest('hopper-best', score);
+        hud();
+        overlay(ov, `<h2>Game over</h2><p>Score ${score} · Level ${level}</p><button class="btn" onclick="start()">Play again</button>`);
+      } else {
+        resetFrog();
+        state = 'play';
+      }
+    }
+    return;
+  }
+  timeLeft -= dt;
+  if (timeLeft <= 0) return die('time');
+  const lane = lanes.find(l => l.row === frog.y);
+  if (!lane) return;
+  if (lane.type === 'car' || lane.type === 'truck') {
+    for (const it of lane.items) if (frog.x + 0.8 > it.x && frog.x + 0.2 < it.x + lane.len) return die('car');
+  } else {
+    const cx = frog.x + 0.5;
+    const ride = lane.items.find(it => cx > it.x && cx < it.x + lane.len && (lane.type !== 'turtle' || turtleState(it) !== 'under'));
+    if (!ride) return die('water');
+    frog.x += lane.dir * lane.sp * mult * dt / 1000;
+    if (frog.x < -0.5 || frog.x > COLS - 0.5) die('water');
+  }
+}
+
+function drawFrog() {
+  const x = frog.x * C + C / 2, y = frog.y * C + C / 2;
+  if (frog.dead && state === 'dying') {
+    ctx.font = '28px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(frog.dead === 'water' ? '💦' : '💥', x, y + 10);
+    return;
+  }
+  ctx.fillStyle = '#4ade80';
+  ctx.beginPath(); ctx.ellipse(x, y + 2, 13, 15, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#16a34a';
+  [[-13, -8], [13, -8], [-14, 12], [14, 12]].forEach(([dx, dy]) => { ctx.beginPath(); ctx.arc(x + dx, y + dy, 5, 0, 7); ctx.fill(); });
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x - 6, y - 10, 5, 0, 7); ctx.arc(x + 6, y - 10, 5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(x - 6, y - 11, 2.4, 0, 7); ctx.arc(x + 6, y - 11, 2.4, 0, 7); ctx.fill();
+}
+
+function draw() {
+  // background bands
+  ctx.fillStyle = '#1e3a8a';
+  ctx.fillRect(0, 0, cv.width, 7 * C);
+  ctx.fillStyle = '#14532d';
+  ctx.fillRect(0, 0, cv.width, 2 * C);
+  HOMES.forEach((h, i) => {
+    ctx.fillStyle = '#1e3a8a';
+    ctx.fillRect(h * C - 4, C, C + 8, C);
+    if (homes && homes[i]) { ctx.font = '26px system-ui'; ctx.textAlign = 'center'; ctx.fillText('🐸', h * C + C / 2, C + 30); }
+    else { ctx.fillStyle = '#16a34a'; ctx.beginPath(); ctx.arc(h * C + C / 2, C + C / 2 + 4, 10, 0.3, Math.PI * 2 - 0.3); ctx.lineTo(h * C + C / 2, C + C / 2 + 4); ctx.fill(); }
+  });
+  ctx.fillStyle = '#6d28d9';
+  ctx.fillRect(0, 7 * C, cv.width, C);
+  ctx.fillRect(0, 13 * C, cv.width, C);
+  ctx.fillStyle = '#1f2937';
+  ctx.fillRect(0, 8 * C, cv.width, 5 * C);
+  ctx.strokeStyle = '#facc15';
+  ctx.setLineDash([16, 14]);
+  for (let r = 9; r < 13; r++) { ctx.beginPath(); ctx.moveTo(0, r * C); ctx.lineTo(cv.width, r * C); ctx.stroke(); }
+  ctx.setLineDash([]);
+  for (const l of lanes) for (const it of l.items) {
+    const x = it.x * C, y = l.row * C;
+    if (l.type === 'log') {
+      ctx.fillStyle = '#92400e';
+      ctx.beginPath(); ctx.roundRect(x + 2, y + 6, l.len * C - 4, C - 12, 12); ctx.fill();
+      ctx.fillStyle = '#b45309';
+      ctx.fillRect(x + 10, y + 12, l.len * C - 30, 3);
+      ctx.fillRect(x + 20, y + 24, l.len * C - 40, 3);
+    } else if (l.type === 'turtle') {
+      const st = turtleState(it);
+      if (st === 'under') continue;
+      ctx.globalAlpha = st === 'sinking' ? 0.45 : 1;
+      for (let k = 0; k < l.len; k++) {
+        const cx = x + k * C + C / 2, cy = y + C / 2;
+        ctx.fillStyle = '#065f46';
+        ctx.beginPath(); ctx.arc(cx + 15 * l.dir, cy, 6, 0, 7); ctx.fill();
+        ctx.fillStyle = '#dc2626';
+        ctx.beginPath(); ctx.arc(cx, cy, 14, 0, 7); ctx.fill();
+        ctx.fillStyle = '#f87171';
+        ctx.beginPath(); ctx.arc(cx, cy, 8, 0, 7); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    } else {
+      const w = l.len * C - 8;
+      ctx.fillStyle = l.color;
+      ctx.beginPath(); ctx.roundRect(x + 4, y + 7, w, C - 14, 6); ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,.45)';
+      const wx = l.dir > 0 ? x + w - 10 : x + 8;
+      ctx.fillRect(wx, y + 10, 6, C - 20);
+      ctx.fillStyle = '#111';
+      ctx.fillRect(x + 8, y + 4, 8, 4); ctx.fillRect(x + w - 8, y + 4, 8, 4);
+      ctx.fillRect(x + 8, y + C - 8, 8, 4); ctx.fillRect(x + w - 8, y + C - 8, 8, 4);
+    }
+  }
+  if (frog && state !== 'ready') drawFrog();
+  // timer bar
+  ctx.fillStyle = '#05060d';
+  ctx.fillRect(0, 14 * C, cv.width, C);
+  if (frog) {
+    const frac = clamp(timeLeft / TIME, 0, 1);
+    ctx.fillStyle = frac < 0.25 ? '#ef4444' : '#22c55e';
+    ctx.fillRect(80, 14 * C + 14, (cv.width - 100) * frac, 12);
+    ctx.fillStyle = '#9097b8';
+    ctx.font = '14px system-ui';
+    ctx.textAlign = 'left';
+    ctx.fillText('TIME', 20, 14 * C + 25);
+  }
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play' || state === 'dying') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+const DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1], a: [-1, 0], d: [1, 0], w: [0, -1], s: [0, 1] };
+document.addEventListener('keydown', e => {
+  if (DIRS[e.key] && !e.repeat) hop(...DIRS[e.key]);
+  else if ((e.key === ' ' || e.key === 'Enter') && (state === 'ready' || state === 'over')) start();
+});
+onSwipe(cv, d => hop(...{ left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[d]));
+[['tL', [-1, 0]], ['tR', [1, 0]], ['tU', [0, -1]], ['tD', [0, 1]]].forEach(([id, d]) =>
+  document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); hop(...d); }));
+
+score = 0; lives = 3; level = 1;
+homes = HOMES.map(() => false);
+buildLanes();
+hud();
+overlay(ov, '<h2>Road Hopper</h2><p>Get the frog home safely.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

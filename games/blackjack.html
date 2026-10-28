@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blackjack</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #table { width: min(760px, calc(100vw - 16px)); min-height: 440px; background: radial-gradient(ellipse at top, #15803d, #14532d 75%); border-radius: 18px; padding: 18px; display: flex; flex-direction: column; gap: 18px; box-shadow: inset 0 0 0 6px #713f12; }
+  .area h3 { margin: 0 0 6px; font-size: 14px; color: #bbf7d0; font-weight: 600; display: flex; gap: 10px; align-items: center; }
+  .hands { display: flex; gap: 26px; flex-wrap: wrap; }
+  .hand { display: flex; flex-direction: column; gap: 6px; padding: 6px; border-radius: 10px; }
+  .hand.active { background: rgba(250,204,21,.15); outline: 2px solid #facc15; }
+  .cards { display: flex; min-height: 104px; }
+  .card { width: 72px; height: 100px; border-radius: 8px; background: #fff; color: #111827; box-shadow: 0 2px 6px rgba(0,0,0,.45); margin-right: -34px; position: relative; font-weight: 800; animation: deal .25s ease-out; }
+  .card.red { color: #dc2626; }
+  .card .tl { position: absolute; left: 6px; top: 4px; font-size: 16px; line-height: 1; text-align: center; }
+  .card .mid { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 34px; }
+  .card.back { background: repeating-linear-gradient(45deg, #b91c1c 0 6px, #dc2626 6px 12px); border: 3px solid #fff; }
+  .card.back > * { display: none; }
+  @keyframes deal { from { transform: translate(120px, -80px) rotate(10deg); opacity: 0; } }
+  .val { background: rgba(0,0,0,.35); padding: 1px 8px; border-radius: 10px; font-size: 13px; color: #fff; }
+  .tag { font-size: 13px; font-weight: 800; padding: 1px 8px; border-radius: 10px; }
+  .tag.win { background: #16a34a; } .tag.lose { background: #b91c1c; } .tag.push { background: #6b7280; } .tag.bj { background: #ca8a04; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; align-items: center; }
+  .chip { width: 54px; height: 54px; border-radius: 50%; border: 4px dashed rgba(255,255,255,.7); font-weight: 800; color: #fff; cursor: pointer; font-size: 14px; }
+  .bank { font-size: 18px; text-align: center; }
+  .bank b { color: #fde68a; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>♠️ Blackjack</h1>
+  <div class="stats">Hands won <b id="won">0</b> Peak <b id="peak">1000</b></div>
+</header>
+<div id="table">
+  <div class="area"><h3>Dealer <span class="val" id="dval"></span></h3><div class="cards" id="dealer"></div></div>
+  <div class="area"><h3>You</h3><div class="hands" id="hands"></div></div>
+  <div class="msg" id="msg"></div>
+</div>
+<div class="bank" style="margin-top:10px">Bankroll: <b id="bank">$1000</b> · Bet: <b id="bet">$0</b></div>
+<div class="controls" id="betting">
+  <div class="chips">
+    <button class="chip" style="background:#2563eb" data-v="10">10</button>
+    <button class="chip" style="background:#16a34a" data-v="25">25</button>
+    <button class="chip" style="background:#111827" data-v="100">100</button>
+    <button class="chip" style="background:#9333ea" data-v="500">500</button>
+  </div>
+  <button class="btn alt" id="clearBet">Clear</button>
+  <button class="btn" id="deal">Deal</button>
+</div>
+<div class="controls" id="actions" style="display:none">
+  <button class="btn" id="hit">Hit (H)</button>
+  <button class="btn" id="stand">Stand (S)</button>
+  <button class="btn alt" id="double">Double (D)</button>
+  <button class="btn alt" id="split">Split (P)</button>
+</div>
+<p class="help">Get closer to 21 than the dealer without going over. Blackjack pays 3:2, the dealer stands on soft 17, you may double on any two cards and split a pair once. Six-deck shoe. Your bankroll is saved between visits.</p>
+<script src="shared.js"></script>
+<script>
+const SUITS = ['♠', '♥', '♦', '♣'], RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+let shoe = [], dealer, hands, active, bet = 0, phase = 'bet', hideHole = true;
+let bank = Store.get('bj-bank', 1000), stats = Store.get('bj-stats', { won: 0, peak: 1000 });
+const $ = id => document.getElementById(id);
+
+function buildShoe() {
+  shoe = [];
+  for (let d = 0; d < 6; d++) for (let s = 0; s < 4; s++) for (let r = 0; r < 13; r++) shoe.push({ s, r });
+  shuffle(shoe);
+}
+function draw() { if (shoe.length < 15) buildShoe(); return shoe.pop(); }
+
+const cardVal = c => (c.r === 0 ? 11 : Math.min(10, c.r + 1));
+function total(cards) {
+  let t = 0, aces = 0;
+  cards.forEach(c => { t += cardVal(c); if (c.r === 0) aces++; });
+  while (t > 21 && aces) { t -= 10; aces--; }
+  return { t, soft: aces > 0 };
+}
+const isBJ = cards => cards.length === 2 && total(cards).t === 21;
+
+function cardHTML(c, hidden) {
+  if (hidden) return '<div class="card back"><span></span></div>';
+  const redC = c.s === 1 || c.s === 2;
+  return `<div class="card${redC ? ' red' : ''}"><div class="tl">${RANKS[c.r]}<br>${SUITS[c.s]}</div><div class="mid">${SUITS[c.s]}</div></div>`;
+}
+
+function render() {
+  $('dealer').innerHTML = dealer ? dealer.map((c, i) => cardHTML(c, i === 1 && hideHole)).join('') : '';
+  $('dval').textContent = dealer && dealer.length ? (hideHole ? cardVal(dealer[0]) : total(dealer).t) : '';
+  $('hands').innerHTML = (hands || []).map((h, i) => {
+    const t = total(h.cards);
+    const tag = h.result ? `<span class="tag ${h.result.cls}">${h.result.text}</span>` : '';
+    return `<div class="hand${phase === 'player' && i === active && hands.length > 1 ? ' active' : ''}"><div class="cards">${h.cards.map(c => cardHTML(c)).join('')}</div><h3 style="margin:0"><span class="val">${t.soft && t.t <= 21 ? 'soft ' : ''}${t.t}</span><span>$${h.bet}</span>${tag}</h3></div>`;
+  }).join('');
+  $('bank').textContent = '$' + bank;
+  $('bet').textContent = '$' + bet;
+  $('won').textContent = stats.won;
+  $('peak').textContent = '$' + stats.peak;
+  $('betting').style.display = phase === 'bet' ? '' : 'none';
+  $('actions').style.display = phase === 'player' ? '' : 'none';
+  if (phase === 'player') {
+    const h = hands[active];
+    $('double').disabled = h.cards.length !== 2 || bank < h.bet;
+    $('split').disabled = !(h.cards.length === 2 && hands.length === 1 && cardVal(h.cards[0]) === cardVal(h.cards[1]) && bank >= h.bet);
+  }
+}
+
+function addChip(v) {
+  if (phase !== 'bet') return;
+  if (bet + v > bank) { $('msg').textContent = 'Not enough money for that chip.'; return; }
+  bet += v;
+  $('msg').textContent = '';
+  Sound.beep(700, 0.03, 'triangle', 0.03);
+  render();
+}
+
+function deal() {
+  if (phase !== 'bet') return;
+  if (!bet) { $('msg').textContent = 'Place a bet first.'; return; }
+  bank -= bet;
+  dealer = [draw(), draw()];
+  hands = [{ cards: [draw(), draw()], bet, done: false }];
+  active = 0;
+  hideHole = true;
+  phase = 'player';
+  $('msg').textContent = '';
+  render();
+  if (isBJ(hands[0].cards) || isBJ(dealer)) return finishRound();
+}
+
+function nextHand() {
+  while (active < hands.length && hands[active].done) active++;
+  if (active >= hands.length) return dealerPlay();
+  const h = hands[active];
+  if (h.cards.length === 1) { h.cards.push(draw()); if (h.cards[0].r === 0) h.done = true; }
+  if (total(h.cards).t >= 21) h.done = true;
+  render();
+  if (h.done) nextHand();
+}
+
+function hit() {
+  if (phase !== 'player') return;
+  const h = hands[active];
+  h.cards.push(draw());
+  Sound.beep(500, 0.03, 'triangle', 0.03);
+  if (total(h.cards).t >= 21) h.done = true;
+  render();
+  if (h.done) nextHand();
+}
+function stand() { if (phase !== 'player') return; hands[active].done = true; nextHand(); }
+function double() {
+  if (phase !== 'player' || $('double').disabled) return;
+  const h = hands[active];
+  bank -= h.bet;
+  h.bet *= 2;
+  h.cards.push(draw());
+  h.done = true;
+  render();
+  nextHand();
+}
+function split() {
+  if (phase !== 'player' || $('split').disabled) return;
+  const h = hands[0];
+  bank -= h.bet;
+  hands = [{ cards: [h.cards[0]], bet: h.bet, done: false, split: true }, { cards: [h.cards[1]], bet: h.bet, done: false, split: true }];
+  active = 0;
+  nextHand();
+}
+
+function dealerPlay() {
+  phase = 'dealer';
+  hideHole = false;
+  render();
+  const allBust = hands.every(h => total(h.cards).t > 21);
+  const step = () => {
+    const t = total(dealer);
+    if (!allBust && t.t < 17) {
+      dealer.push(draw());
+      render();
+      setTimeout(step, 550);
+    } else finishRound();
+  };
+  setTimeout(step, 500);
+}
+
+function finishRound() {
+  hideHole = false;
+  const d = total(dealer).t, dbj = isBJ(dealer);
+  let net = 0;
+  hands.forEach(h => {
+    const p = total(h.cards).t, pbj = isBJ(h.cards) && !h.split;
+    let pay = 0, res;
+    if (pbj && !dbj) { pay = h.bet * 2.5; res = { cls: 'bj', text: 'Blackjack!' }; }
+    else if (p > 21) res = { cls: 'lose', text: 'Bust' };
+    else if (dbj && !pbj) res = { cls: 'lose', text: 'Dealer blackjack' };
+    else if (d > 21 || p > d) { pay = h.bet * 2; res = { cls: 'win', text: 'Win' }; }
+    else if (p === d) { pay = h.bet; res = { cls: 'push', text: 'Push' }; }
+    else res = { cls: 'lose', text: 'Lose' };
+    h.result = res;
+    bank += pay;
+    net += pay - h.bet;
+    if (pay > h.bet) stats.won++;
+  });
+  stats.peak = Math.max(stats.peak, bank);
+  Store.set('bj-bank', bank);
+  Store.set('bj-stats', stats);
+  phase = 'bet';
+  if (bet > bank) bet = 0;
+  $('msg').textContent = (net > 0 ? `You won $${net}! ` : net < 0 ? `You lost $${-net}. ` : 'Push. ') + (d > 21 ? 'Dealer busts.' : `Dealer has ${d}.`);
+  Sound.beep(net > 0 ? 880 : net < 0 ? 180 : 440, 0.25, 'triangle');
+  if (bank < 10 && bet === 0) {
+    $('msg').innerHTML += ' You\'re out of chips — <button class="btn" id="refill">Start over with $1000</button>';
+    $('refill').onclick = () => { bank = 1000; Store.set('bj-bank', bank); $('msg').textContent = ''; render(); };
+  }
+  render();
+}
+
+document.querySelectorAll('.chip').forEach(c => c.onclick = () => addChip(+c.dataset.v));
+$('clearBet').onclick = () => { if (phase === 'bet') { bet = 0; render(); } };
+$('deal').onclick = deal;
+$('hit').onclick = hit;
+$('stand').onclick = stand;
+$('double').onclick = double;
+$('split').onclick = split;
+document.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'h') hit();
+  else if (k === 's') stand();
+  else if (k === 'd') double();
+  else if (k === 'p') split();
+  else if (k === 'enter' || k === ' ') deal();
+});
+buildShoe();
+render();
+</script>
+</body>
+</html>

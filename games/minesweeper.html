@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minesweeper</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .wrap { max-width: calc(100vw - 16px); overflow-x: auto; padding: 4px; }
+  #board { display: grid; gap: 2px; background: #2e3260; padding: 6px; border-radius: 10px; user-select: none; -webkit-user-select: none; touch-action: manipulation; width: max-content; margin: 0 auto; }
+  .cell {
+    width: var(--s); height: var(--s); border: 0; border-radius: 4px; padding: 0;
+    background: linear-gradient(#5b5f97, #474b80); color: #fff; font-weight: 800; font-size: calc(var(--s) * .55);
+    display: flex; align-items: center; justify-content: center; cursor: pointer; line-height: 1;
+  }
+  .cell:hover:not(.open) { filter: brightness(1.15); }
+  .cell.open { background: #1a1c33; cursor: default; }
+  .cell.boom { background: #b91c1c; }
+  .cell.wrong { background: #7c2d12; }
+  .n1 { color: #60a5fa; } .n2 { color: #4ade80; } .n3 { color: #f87171; } .n4 { color: #c084fc; }
+  .n5 { color: #fb923c; } .n6 { color: #22d3ee; } .n7 { color: #f472b6; } .n8 { color: #e5e7eb; }
+  .bar { display: flex; gap: 12px; align-items: center; justify-content: center; margin: 6px 0; font-variant-numeric: tabular-nums; }
+  .bar .lcd { background: #05060d; color: #f87171; font-family: ui-monospace, monospace; font-size: 22px; padding: 2px 10px; border-radius: 6px; min-width: 64px; text-align: center; }
+  #face { font-size: 26px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; width: 46px; height: 42px; cursor: pointer; }
+  #flagmode.on { background: var(--warn); color: #000; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🚩 Minesweeper</h1>
+  <div class="stats">Best <b id="best">—</b></div>
+</header>
+<div class="controls">
+  <select id="level">
+    <option value="9,9,10">Beginner · 9×9</option>
+    <option value="16,16,40" selected>Intermediate · 16×16</option>
+    <option value="30,16,99">Expert · 30×16</option>
+  </select>
+  <button class="btn alt" id="flagmode">🚩 Flag mode: off</button>
+</div>
+<div class="bar"><div class="lcd" id="mines">000</div><button id="face">🙂</button><div class="lcd" id="timer">000</div></div>
+<div class="wrap"><div id="board"></div></div>
+<p class="help">Left-click reveals, right-click (or long-press, or flag mode) plants a flag. Click a number whose flags are all placed to clear its neighbours. Your first click is always safe.</p>
+<script src="shared.js"></script>
+<script>
+const boardEl = document.getElementById('board');
+let W, H, M, cells, started, over, flags, revealed, t0, timerId, flagMode = false;
+
+const key = () => 'mines-best-' + document.getElementById('level').value;
+function showBest() { const b = Store.get(key(), null); document.getElementById('best').textContent = b ? b + 's' : '—'; }
+
+function newGame() {
+  [W, H, M] = document.getElementById('level').value.split(',').map(Number);
+  const s = Math.max(22, Math.min(34, Math.floor((Math.min(window.innerWidth, 1000) - 40) / W)));
+  boardEl.style.setProperty('--s', s + 'px');
+  boardEl.style.gridTemplateColumns = `repeat(${W}, var(--s))`;
+  boardEl.innerHTML = '';
+  cells = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const el = document.createElement('button');
+    el.className = 'cell';
+    const c = { x, y, mine: false, open: false, flag: false, n: 0, el };
+    bindCell(c);
+    cells.push(c);
+    boardEl.appendChild(el);
+  }
+  started = false; over = false; flags = 0; revealed = 0;
+  clearInterval(timerId);
+  document.getElementById('timer').textContent = '000';
+  document.getElementById('face').textContent = '🙂';
+  updateMines();
+  showBest();
+}
+
+const get = (x, y) => (x < 0 || y < 0 || x >= W || y >= H) ? null : cells[y * W + x];
+function around(c) {
+  const out = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    if (!dx && !dy) continue;
+    const n = get(c.x + dx, c.y + dy);
+    if (n) out.push(n);
+  }
+  return out;
+}
+
+function plant(safe) {
+  const forbidden = new Set([safe, ...around(safe)]);
+  const pool = shuffle(cells.filter(c => !forbidden.has(c)));
+  pool.slice(0, M).forEach(c => { c.mine = true; });
+  cells.forEach(c => { c.n = around(c).filter(n => n.mine).length; });
+  started = true;
+  t0 = Date.now();
+  timerId = setInterval(() => {
+    document.getElementById('timer').textContent = String(Math.min(999, Math.floor((Date.now() - t0) / 1000))).padStart(3, '0');
+  }, 250);
+}
+
+function updateMines() {
+  const v = M - flags;
+  document.getElementById('mines').textContent = (v < 0 ? '-' : '') + String(Math.abs(v)).padStart(3, '0');
+}
+
+function reveal(c) {
+  if (over || c.open || c.flag) return;
+  if (!started) plant(c);
+  if (c.mine) return lose(c);
+  const stack = [c];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (cur.open || cur.flag) continue;
+    cur.open = true;
+    revealed++;
+    cur.el.classList.add('open');
+    if (cur.n) { cur.el.textContent = cur.n; cur.el.classList.add('n' + cur.n); }
+    else around(cur).forEach(n => { if (!n.open && !n.mine) stack.push(n); });
+  }
+  if (revealed === W * H - M) win();
+}
+
+function chord(c) {
+  if (!c.open || !c.n) return;
+  const ns = around(c);
+  if (ns.filter(n => n.flag).length !== c.n) return;
+  ns.forEach(n => { if (!n.flag && !n.open) reveal(n); });
+}
+
+function toggleFlag(c) {
+  if (over || c.open) return;
+  c.flag = !c.flag;
+  c.el.textContent = c.flag ? '🚩' : '';
+  flags += c.flag ? 1 : -1;
+  updateMines();
+}
+
+function lose(hit) {
+  over = true;
+  clearInterval(timerId);
+  document.getElementById('face').textContent = '😵';
+  Sound.beep(90, 0.5, 'sawtooth', 0.06);
+  cells.forEach(c => {
+    if (c.mine && !c.flag) { c.el.textContent = '💣'; c.el.classList.add('open'); }
+    if (!c.mine && c.flag) c.el.classList.add('wrong');
+  });
+  hit.el.classList.add('boom');
+}
+
+function win() {
+  over = true;
+  clearInterval(timerId);
+  const secs = Math.max(1, Math.round((Date.now() - t0) / 1000));
+  document.getElementById('face').textContent = '😎';
+  cells.forEach(c => { if (c.mine && !c.flag) { c.flag = true; c.el.textContent = '🚩'; } });
+  flags = M;
+  updateMines();
+  recordBest(key(), secs, true);
+  showBest();
+  Sound.beep(880, 0.3, 'triangle');
+}
+
+function bindCell(c) {
+  let pressT = null, longPressed = false;
+  c.el.addEventListener('contextmenu', e => { e.preventDefault(); toggleFlag(c); });
+  c.el.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    longPressed = false;
+    if (e.pointerType !== 'mouse') pressT = setTimeout(() => { longPressed = true; toggleFlag(c); if (navigator.vibrate) navigator.vibrate(30); }, 380);
+    if (!over && !c.open) document.getElementById('face').textContent = '😮';
+  });
+  c.el.addEventListener('pointerup', () => { clearTimeout(pressT); if (!over) document.getElementById('face').textContent = '🙂'; });
+  c.el.addEventListener('pointerleave', () => clearTimeout(pressT));
+  c.el.addEventListener('click', () => {
+    if (longPressed) return;
+    if (c.open) return chord(c);
+    if (flagMode) toggleFlag(c);
+    else reveal(c);
+  });
+}
+
+document.getElementById('face').onclick = newGame;
+document.getElementById('level').onchange = newGame;
+document.getElementById('flagmode').onclick = e => {
+  flagMode = !flagMode;
+  e.currentTarget.classList.toggle('on', flagMode);
+  e.currentTarget.textContent = '🚩 Flag mode: ' + (flagMode ? 'on' : 'off');
+};
+newGame();
+</script>
+</body>
+</html>

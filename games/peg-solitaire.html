@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peg Solitaire</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #board { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; width: min(440px, calc(100vw - 24px)); padding: 18px; border-radius: 50%; background: radial-gradient(circle, #92400e, #78350f 70%, #451a03); box-shadow: 0 12px 40px rgba(0,0,0,.5); aspect-ratio: 1; }
+  .h { aspect-ratio: 1; border-radius: 50%; border: 0; padding: 0; background: radial-gradient(circle at 50% 40%, #1c0d02, #2b1505); cursor: pointer; position: relative; }
+  .h.off { visibility: hidden; }
+  .h.peg::after { content: ''; position: absolute; inset: 12%; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #fde68a, #f59e0b 55%, #b45309); box-shadow: 0 3px 4px rgba(0,0,0,.5); transition: transform .1s; }
+  .h.sel::after { transform: translateY(-4px) scale(1.08); background: radial-gradient(circle at 35% 30%, #e9d5ff, #a855f7 55%, #6b21a8); }
+  .h.target { box-shadow: 0 0 0 3px #22d3ee inset; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🟠 Peg Solitaire</h1>
+  <div class="stats">Pegs left <b id="pegs">32</b> Best <b id="best">—</b></div>
+</header>
+<div class="controls">
+  <button class="btn alt" id="undo">↶ Undo</button>
+  <button class="btn alt" id="reset">↺ Restart</button>
+</div>
+<div class="stage">
+  <div id="board"></div>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Jump a peg over a neighbouring peg into an empty hole (no diagonals); the jumped peg is removed. Finish with one peg — in the centre for a perfect game.</p>
+<script src="shared.js"></script>
+<script>
+const boardEl = document.getElementById('board'), ov = document.getElementById('ov');
+const valid = (r, c) => (r >= 2 && r <= 4) || (c >= 2 && c <= 4);
+let pegs, sel = null, history = [], els = [];
+let best = Store.get('peg-best', null);
+
+for (let r = 0; r < 7; r++) for (let c = 0; c < 7; c++) {
+  const b = document.createElement('button');
+  b.className = 'h' + (valid(r, c) ? '' : ' off');
+  b.onclick = () => click(r, c);
+  boardEl.appendChild(b);
+  els.push(b);
+}
+
+function reset() {
+  pegs = Array.from({ length: 7 }, (_, r) => Array.from({ length: 7 }, (_, c) => valid(r, c) && !(r === 3 && c === 3)));
+  sel = null;
+  history = [];
+  overlay(ov, null);
+  render();
+}
+
+function movesFrom(r, c) {
+  const out = [];
+  for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+    const mr = r + dr, mc = c + dc, tr = r + 2 * dr, tc = c + 2 * dc;
+    if (tr < 0 || tr > 6 || tc < 0 || tc > 6 || !valid(tr, tc)) continue;
+    if (pegs[mr][mc] && !pegs[tr][tc]) out.push([tr, tc, mr, mc]);
+  }
+  return out;
+}
+
+const count = () => pegs.flat().filter(Boolean).length;
+
+function render() {
+  const targets = sel ? movesFrom(...sel).map(m => m[0] * 7 + m[1]) : [];
+  for (let r = 0; r < 7; r++) for (let c = 0; c < 7; c++) {
+    const el = els[r * 7 + c];
+    el.classList.toggle('peg', !!pegs[r][c]);
+    el.classList.toggle('sel', !!sel && sel[0] === r && sel[1] === c);
+    el.classList.toggle('target', targets.includes(r * 7 + c));
+  }
+  document.getElementById('pegs').textContent = count();
+  document.getElementById('best').textContent = best ?? '—';
+}
+
+function click(r, c) {
+  if (!valid(r, c)) return;
+  if (pegs[r][c]) {
+    sel = sel && sel[0] === r && sel[1] === c ? null : (movesFrom(r, c).length ? [r, c] : null);
+    if (!sel) Sound.beep(200, 0.04, 'square', 0.02);
+    return render();
+  }
+  if (!sel) return;
+  const m = movesFrom(...sel).find(([tr, tc]) => tr === r && tc === c);
+  if (!m) return;
+  history.push(pegs.map(row => row.slice()));
+  pegs[sel[0]][sel[1]] = false;
+  pegs[m[2]][m[3]] = false;
+  pegs[r][c] = true;
+  sel = movesFrom(r, c).length ? [r, c] : null;
+  Sound.beep(500 + (32 - count()) * 12, 0.05, 'triangle', 0.04);
+  render();
+  checkEnd();
+}
+
+function checkEnd() {
+  for (let r = 0; r < 7; r++) for (let c = 0; c < 7; c++) if (pegs[r][c] && movesFrom(r, c).length) return;
+  const n = count();
+  best = recordBest('peg-best', n, true);
+  render();
+  const perfect = n === 1 && pegs[3][3];
+  const msg = perfect ? 'Perfect! One peg, dead centre. 🏆' : n === 1 ? 'Excellent — just one peg left!' : n <= 3 ? 'Very good!' : n <= 5 ? 'Not bad.' : 'Keep practising.';
+  overlay(ov, `<h2>No more moves</h2><p>${n} peg${n > 1 ? 's' : ''} left. ${msg}</p><button class="btn" onclick="reset()">Play again</button><button class="btn alt" onclick="undoMove()">Undo</button>`);
+}
+
+function undoMove() {
+  const h = history.pop();
+  if (!h) return;
+  pegs = h;
+  sel = null;
+  overlay(ov, null);
+  render();
+}
+
+document.getElementById('undo').onclick = undoMove;
+document.getElementById('reset').onclick = reset;
+document.addEventListener('keydown', e => { if (e.key === 'z' || e.key === 'u') undoMove(); });
+reset();
+</script>
+</body>
+</html>

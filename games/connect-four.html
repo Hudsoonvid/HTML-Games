@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Four</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔴 Connect Four 🟡</h1>
+  <div class="stats">You <b id="w">0</b> CPU <b id="l">0</b> Draws <b id="d">0</b></div>
+</header>
+<div class="controls">
+  <select id="mode">
+    <option value="2">vs CPU · Easy</option>
+    <option value="5" selected>vs CPU · Medium</option>
+    <option value="8">vs CPU · Hard</option>
+    <option value="0">2 players</option>
+  </select>
+  <button class="btn" id="new">New game</button>
+</div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="560" height="540"></canvas>
+</div>
+<p class="help">Drop discs into the columns (click, or keys <kbd>1</kbd>–<kbd>7</kbd>, or <kbd>←</kbd><kbd>→</kbd> + <kbd>Space</kbd>). Line up four of yours horizontally, vertically or diagonally.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const C = 7, R = 6, S = 80, TOP = 60;
+let gameId = 0, board, turn, over, winLine, hoverCol = 3, drop = null, rec = Store.get('c4-record', { w: 0, l: 0, d: 0 }), busy = false;
+const depth = () => +document.getElementById('mode').value;
+
+function newGame() {
+  gameId++;
+  board = Array.from({ length: R }, () => Array(C).fill(0));
+  turn = 1;
+  over = false;
+  winLine = null;
+  drop = null;
+  busy = false;
+  status();
+  record();
+}
+
+function record() {
+  document.getElementById('w').textContent = rec.w;
+  document.getElementById('l').textContent = rec.l;
+  document.getElementById('d').textContent = rec.d;
+}
+
+function status() {
+  if (over) return;
+  msg.textContent = depth() === 0 ? `${turn === 1 ? 'Red' : 'Yellow'} to move` : turn === 1 ? 'Your move (red)' : 'CPU is thinking…';
+}
+
+const rowFor = (b, c) => { for (let r = R - 1; r >= 0; r--) if (!b[r][c]) return r; return -1; };
+
+function findWin(b) {
+  const dirs = [[0, 1], [1, 0], [1, 1], [1, -1]];
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+    const p = b[r][c];
+    if (!p) continue;
+    for (const [dr, dc] of dirs) {
+      const line = [[r, c]];
+      for (let k = 1; k < 4; k++) {
+        const rr = r + dr * k, cc = c + dc * k;
+        if (rr < 0 || rr >= R || cc < 0 || cc >= C || b[rr][cc] !== p) break;
+        line.push([rr, cc]);
+      }
+      if (line.length === 4) return { p, line };
+    }
+  }
+  return null;
+}
+
+// heuristic: score every window of four
+function evaluate(b) {
+  let s = 0;
+  for (let r = 0; r < R; r++) if (b[r][3] === 2) s += 3; else if (b[r][3] === 1) s -= 3;
+  const win = (cells) => {
+    let a = 0, h = 0;
+    for (const v of cells) { if (v === 2) a++; else if (v === 1) h++; }
+    if (a && h) return 0;
+    if (a === 4) return 1000; if (h === 4) return -1000;
+    if (a === 3) return 5; if (a === 2) return 2;
+    if (h === 3) return -6; if (h === 2) return -2;
+    return 0;
+  };
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+    if (c + 3 < C) s += win([b[r][c], b[r][c + 1], b[r][c + 2], b[r][c + 3]]);
+    if (r + 3 < R) s += win([b[r][c], b[r + 1][c], b[r + 2][c], b[r + 3][c]]);
+    if (r + 3 < R && c + 3 < C) s += win([b[r][c], b[r + 1][c + 1], b[r + 2][c + 2], b[r + 3][c + 3]]);
+    if (r + 3 < R && c - 3 >= 0) s += win([b[r][c], b[r + 1][c - 1], b[r + 2][c - 2], b[r + 3][c - 3]]);
+  }
+  return s;
+}
+
+const ORDER = [3, 2, 4, 1, 5, 0, 6];
+// does the disc just placed at (r, c) complete four in a row?
+function winsAt(b, r, c, p) {
+  for (const [dr, dc] of [[0, 1], [1, 0], [1, 1], [1, -1]]) {
+    let n = 1;
+    for (const s of [1, -1]) {
+      for (let k = 1; k < 4; k++) {
+        const rr = r + dr * k * s, cc = c + dc * k * s;
+        if (rr < 0 || rr >= R || cc < 0 || cc >= C || b[rr][cc] !== p) break;
+        n++;
+      }
+    }
+    if (n >= 4) return true;
+  }
+  return false;
+}
+
+// negamax with alpha-beta; scores are from the point of view of `player`
+function negamax(b, d, alpha, beta, player) {
+  if (d === 0) return evaluate(b) * (player === 2 ? 1 : -1);
+  let any = false, best = -Infinity;
+  for (const c of ORDER) {
+    const r = rowFor(b, c);
+    if (r < 0) continue;
+    any = true;
+    b[r][c] = player;
+    const v = winsAt(b, r, c, player) ? 100000 + d : -negamax(b, d - 1, -beta, -alpha, 3 - player);
+    b[r][c] = 0;
+    if (v > best) best = v;
+    if (best > alpha) alpha = best;
+    if (alpha >= beta) break;
+  }
+  return any ? best : 0;
+}
+
+function cpuChoose() {
+  const d = depth();
+  let bestC = ORDER.find(c => rowFor(board, c) >= 0), bestV = -Infinity;
+  for (const c of ORDER) {
+    const r = rowFor(board, c);
+    if (r < 0) continue;
+    board[r][c] = 2;
+    let v = winsAt(board, r, c, 2) ? 1e6 : -negamax(board, d - 1, -Infinity, Infinity, 1);
+    board[r][c] = 0;
+    if (d <= 2) v += rand(-20, 20);
+    if (v > bestV) { bestV = v; bestC = c; }
+  }
+  return bestC;
+}
+
+function play(c) {
+  if (over || busy || drop) return;
+  const r = rowFor(board, c);
+  if (r < 0) return;
+  busy = true;
+  drop = { c, r, y: TOP - S / 2, vy: 0, p: turn };
+}
+
+function landed() {
+  const { c, r, p } = drop;
+  board[r][c] = p;
+  drop = null;
+  Sound.beep(p === 1 ? 300 : 360, 0.06, 'triangle', 0.05);
+  const w = findWin(board);
+  const full = board[0].every(Boolean);
+  if (w || full) {
+    over = true;
+    busy = false;
+    winLine = w && w.line;
+    const vs = depth() !== 0;
+    if (w) {
+      if (vs) { if (w.p === 1) rec.w++; else rec.l++; }
+      msg.textContent = vs ? (w.p === 1 ? 'You win! 🎉' : 'The CPU wins.') : `${w.p === 1 ? 'Red' : 'Yellow'} wins!`;
+      Sound.beep(w.p === 1 || !vs ? 880 : 180, 0.35, 'triangle');
+    } else { if (vs) rec.d++; msg.textContent = "It's a draw!"; }
+    Store.set('c4-record', rec);
+    record();
+    return;
+  }
+  turn = 3 - turn;
+  status();
+  if (depth() !== 0 && turn === 2) { const id = gameId; setTimeout(() => { if (id !== gameId) return; busy = false; play(cpuChoose()); }, 60); }
+  else busy = false;
+}
+
+function draw() {
+  ctx.fillStyle = '#0b0c18';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  const colorOf = p => (p === 1 ? '#ef4444' : '#facc15');
+  if (!over && !drop && (depth() === 0 || turn === 1)) {
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = colorOf(turn);
+    ctx.beginPath(); ctx.arc(hoverCol * S + S / 2, TOP / 2, S * 0.38, 0, 7); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  if (drop) {
+    drop.vy += 1.4;
+    drop.y += drop.vy;
+    const ty = TOP + drop.r * S + S / 2;
+    if (drop.y >= ty) { drop.y = ty; landed(); }
+  }
+  if (drop) { ctx.fillStyle = colorOf(drop.p); ctx.beginPath(); ctx.arc(drop.c * S + S / 2, drop.y, S * 0.38, 0, 7); ctx.fill(); }
+  // board with holes
+  ctx.fillStyle = '#1d4ed8';
+  ctx.beginPath();
+  ctx.roundRect(0, TOP, C * S, R * S, 14);
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) { ctx.moveTo(c * S + S / 2 + S * 0.38, TOP + r * S + S / 2); ctx.arc(c * S + S / 2, TOP + r * S + S / 2, S * 0.38, 0, 7, true); }
+  ctx.fill('evenodd');
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+    const p = board[r][c];
+    if (!p) continue;
+    ctx.fillStyle = colorOf(p);
+    ctx.beginPath(); ctx.arc(c * S + S / 2, TOP + r * S + S / 2, S * 0.38, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,.15)';
+    ctx.beginPath(); ctx.arc(c * S + S / 2, TOP + r * S + S / 2, S * 0.26, 0, 7); ctx.fill();
+  }
+  if (winLine) {
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    const [a, z] = [winLine[0], winLine[3]];
+    ctx.beginPath(); ctx.moveTo(a[1] * S + S / 2, TOP + a[0] * S + S / 2); ctx.lineTo(z[1] * S + S / 2, TOP + z[0] * S + S / 2); ctx.stroke();
+  }
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointermove', e => { hoverCol = clamp(Math.floor(canvasPoint(cv, e).x / S), 0, C - 1); });
+cv.addEventListener('pointerdown', e => {
+  hoverCol = clamp(Math.floor(canvasPoint(cv, e).x / S), 0, C - 1);
+  if (depth() === 0 || turn === 1) play(hoverCol);
+});
+document.addEventListener('keydown', e => {
+  const n = +e.key;
+  if (n >= 1 && n <= 7 && (depth() === 0 || turn === 1)) play(n - 1);
+  if (e.key === 'ArrowLeft') hoverCol = Math.max(0, hoverCol - 1);
+  if (e.key === 'ArrowRight') hoverCol = Math.min(C - 1, hoverCol + 1);
+  if ((e.key === ' ' || e.key === 'ArrowDown') && (depth() === 0 || turn === 1)) play(hoverCol);
+  if (e.key === 'Enter' && over) newGame();
+});
+document.getElementById('new').onclick = newGame;
+document.getElementById('mode').onchange = newGame;
+newGame();
+draw();
+</script>
+</body>
+</html>

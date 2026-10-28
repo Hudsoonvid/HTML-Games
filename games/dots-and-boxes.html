@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dots and Boxes</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔲 Dots &amp; Boxes</h1>
+  <div class="stats"><span style="color:#22d3ee">You <b id="s1">0</b></span> <span style="color:#f472b6"><span id="p2name">CPU</span> <b id="s2">0</b></span></div>
+</header>
+<div class="controls">
+  <select id="size"><option value="3">3 × 3 boxes</option><option value="5" selected>5 × 5 boxes</option><option value="7">7 × 7 boxes</option></select>
+  <select id="mode"><option value="cpu">vs CPU</option><option value="2p">2 players</option></select>
+  <button class="btn" id="new">New game</button>
+</div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="540" height="540"></canvas>
+</div>
+<p class="help">Take turns drawing a line between two neighbouring dots. Close the fourth side of a box to claim it — and you must go again. Most boxes wins. Avoid drawing the third side of a box!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const COL = ['', '#22d3ee', '#f472b6'];
+let N, G, M, lines, owner, turn, score, hover = null, over, gameId = 0;
+const vsCpu = () => document.getElementById('mode').value === 'cpu';
+
+// line ids: 'h,r,c' (r: 0..N, c: 0..N-1) and 'v,r,c' (r: 0..N-1, c: 0..N)
+function allLines() {
+  const out = [];
+  for (let r = 0; r <= N; r++) for (let c = 0; c < N; c++) out.push(`h,${r},${c}`);
+  for (let r = 0; r < N; r++) for (let c = 0; c <= N; c++) out.push(`v,${r},${c}`);
+  return out;
+}
+function boxesOf(id) {
+  const [t, r, c] = id.split(','), R = +r, C = +c, out = [];
+  if (t === 'h') { if (R > 0) out.push([R - 1, C]); if (R < N) out.push([R, C]); }
+  else { if (C > 0) out.push([R, C - 1]); if (C < N) out.push([R, C]); }
+  return out;
+}
+const sides = (set, r, c) => [`h,${r},${c}`, `h,${r + 1},${c}`, `v,${r},${c}`, `v,${r},${c + 1}`].filter(l => set.has(l)).length;
+
+function newGame() {
+  gameId++;
+  N = +document.getElementById('size').value;
+  M = 40;
+  G = (cv.width - 2 * M) / N;
+  lines = new Map();
+  owner = Array.from({ length: N }, () => Array(N).fill(0));
+  turn = 1;
+  score = [0, 0, 0];
+  over = false;
+  document.getElementById('p2name').textContent = vsCpu() ? 'CPU' : 'P2';
+  status();
+}
+
+function status() {
+  document.getElementById('s1').textContent = score[1];
+  document.getElementById('s2').textContent = score[2];
+  if (over) return;
+  msg.textContent = vsCpu() ? (turn === 1 ? 'Your turn' : 'CPU is thinking…') : `Player ${turn}'s turn`;
+}
+
+function drawLine(id) {
+  if (over || lines.has(id)) return;
+  lines.set(id, turn);
+  let made = 0;
+  for (const [r, c] of boxesOf(id)) if (sides(lines, r, c) === 4) { owner[r][c] = turn; made++; }
+  score[turn] += made;
+  Sound.beep(made ? 760 : 420, 0.05, 'triangle', 0.04);
+  if (lines.size === allLines().length) {
+    over = true;
+    status();
+    const [a, b2] = [score[1], score[2]];
+    msg.textContent = a === b2 ? `Tie game, ${a}–${b2}!` : vsCpu() ? (a > b2 ? `You win ${a}–${b2}! 🎉` : `CPU wins ${b2}–${a}`) : `Player ${a > b2 ? 1 : 2} wins ${Math.max(a, b2)}–${Math.min(a, b2)}!`;
+    if (vsCpu() && a > b2) recordBest('dots-best-margin-' + N, a - b2);
+    return;
+  }
+  if (!made) turn = 3 - turn;
+  status();
+  if (vsCpu() && turn === 2) { const id2 = gameId; setTimeout(() => { if (id2 === gameId) cpu(); }, 380); }
+}
+
+// how many boxes the opponent could grab in a row after we play `id`
+function giveaway(id) {
+  const set = new Set(lines.keys());
+  set.add(id);
+  let taken = 0, progress = true;
+  while (progress) {
+    progress = false;
+    for (const l of allLines()) {
+      if (set.has(l)) continue;
+      if (boxesOf(l).some(([r, c]) => sides(set, r, c) === 3)) {
+        set.add(l);
+        taken += boxesOf(l).filter(([r, c]) => sides(set, r, c) === 4).length;
+        progress = true;
+      }
+    }
+  }
+  return taken;
+}
+
+function cpu() {
+  if (over || turn !== 2) return;
+  const free = allLines().filter(l => !lines.has(l));
+  const take = free.find(l => boxesOf(l).some(([r, c]) => sides(lines, r, c) === 3));
+  if (take) return drawLine(take);
+  const safe = free.filter(l => boxesOf(l).every(([r, c]) => sides(lines, r, c) < 2));
+  if (safe.length) return drawLine(pick(safe));
+  let best = null, bv = Infinity;
+  for (const l of shuffle(free)) { const g = giveaway(l); if (g < bv) { bv = g; best = l; } }
+  drawLine(best);
+}
+
+function lineCoords(id) {
+  const [t, r, c] = id.split(',').map((v, i) => (i ? +v : v));
+  return t === 'h' ? [M + c * G, M + r * G, M + (c + 1) * G, M + r * G] : [M + c * G, M + r * G, M + c * G, M + (r + 1) * G];
+}
+
+function nearest(p) {
+  let best = null, bd = G * 0.35;
+  for (const l of allLines()) {
+    const [x1, y1, x2, y2] = lineCoords(l);
+    const d = Math.hypot(p.x - (x1 + x2) / 2, p.y - (y1 + y2) / 2);
+    if (d < bd) { bd = d; best = l; }
+  }
+  return best;
+}
+
+function draw() {
+  ctx.fillStyle = '#0b0c18';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (owner[r][c]) {
+    ctx.fillStyle = owner[r][c] === 1 ? 'rgba(34,211,238,.25)' : 'rgba(244,114,182,.25)';
+    ctx.fillRect(M + c * G + 3, M + r * G + 3, G - 6, G - 6);
+    ctx.fillStyle = COL[owner[r][c]];
+    ctx.font = `bold ${G * 0.35}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(owner[r][c] === 1 ? (vsCpu() ? 'You' : 'P1') : (vsCpu() ? 'CPU' : 'P2'), M + c * G + G / 2, M + r * G + G / 2);
+  }
+  ctx.lineCap = 'round';
+  if (hover && !lines.has(hover) && !over && (!vsCpu() || turn === 1)) {
+    const [x1, y1, x2, y2] = lineCoords(hover);
+    ctx.strokeStyle = 'rgba(255,255,255,.3)';
+    ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  lines.forEach((p, l) => {
+    const [x1, y1, x2, y2] = lineCoords(l);
+    ctx.strokeStyle = COL[p];
+    ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  });
+  ctx.fillStyle = '#e6e7f2';
+  for (let r = 0; r <= N; r++) for (let c = 0; c <= N; c++) { ctx.beginPath(); ctx.arc(M + c * G, M + r * G, 6, 0, 7); ctx.fill(); }
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointermove', e => { hover = nearest(canvasPoint(cv, e)); });
+cv.addEventListener('pointerdown', e => {
+  if (vsCpu() && turn !== 1) return;
+  const l = nearest(canvasPoint(cv, e));
+  if (l) drawLine(l);
+});
+document.getElementById('new').onclick = newGame;
+document.getElementById('size').onchange = newGame;
+document.getElementById('mode').onchange = newGame;
+newGame();
+draw();
+</script>
+</body>
+</html>

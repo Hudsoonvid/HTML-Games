@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cave Flyer</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🚁 Cave Flyer</h1>
+  <div class="stats">Distance <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="760" height="420"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Hold <kbd>Space</kbd>, the mouse button, or your finger to climb. Let go to drop. The cave narrows the further you fly.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, SEG = 20;
+let segs, blocks, heli, smoke, dist, speed, center, gap, state = 'ready', last = 0, holding = false, offset = 0;
+let best = Store.get('cave-best', 0);
+document.getElementById('best').textContent = best;
+
+function addSeg() {
+  center = clamp(center + rand(-18, 18), gap / 2 + 20, H - gap / 2 - 20);
+  gap = Math.max(130, gap - 0.35);
+  segs.push({ top: center - gap / 2, bot: center + gap / 2 });
+}
+
+function reset() {
+  segs = []; blocks = []; smoke = [];
+  center = H / 2; gap = 300; dist = 0; speed = 4; offset = 0;
+  for (let i = 0; i < W / SEG + 3; i++) {
+    segs.push({ top: center - gap / 2, bot: center + gap / 2 });
+  }
+  heli = { x: 160, y: H / 2, vy: 0 };
+}
+
+function wallsAt(x) {
+  const fx = (x + offset) / SEG, i = Math.floor(fx), t = fx - i;
+  const a = segs[i], b = segs[i + 1] || a;
+  return { top: a.top + (b.top - a.top) * t, bot: a.bot + (b.bot - a.bot) * t };
+}
+
+function crash() {
+  state = 'over';
+  Sound.beep(110, 0.4, 'sawtooth');
+  const d = Math.floor(dist / 10);
+  best = recordBest('cave-best', d);
+  document.getElementById('best').textContent = best;
+  overlay(ov, `<h2>Crashed!</h2><p>Distance ${d} · Best ${best}</p><button class="btn" onclick="begin()">Fly again</button>`);
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  speed = Math.min(9, 4 + dist / 4000);
+  dist += speed * f;
+  offset += speed * f;
+  while (offset >= SEG) {
+    offset -= SEG;
+    segs.shift();
+    addSeg();
+    blocks.forEach(b => { b.x -= SEG; });
+    if (dist > 800 && Math.random() < 0.06) {
+      const s = segs[segs.length - 1], h = rand(50, Math.min(110, (s.bot - s.top) * 0.45));
+      blocks.push({ x: (segs.length - 1) * SEG, y: rand(s.top + 10, s.bot - h - 10), w: 24, h });
+    }
+  }
+  blocks = blocks.filter(b => b.x - offset > -40);
+  heli.vy += (holding ? -0.38 : 0.36) * f;
+  heli.vy = clamp(heli.vy, -6.5, 6.5);
+  heli.y += heli.vy * f;
+  if (Math.random() < 0.5) smoke.push({ x: heli.x - 20, y: heli.y + 2, r: 4, life: 600 });
+  smoke.forEach(p => { p.x -= speed * f; p.r += 0.12 * f; p.life -= dt; });
+  smoke = smoke.filter(p => p.life > 0);
+  const w = wallsAt(heli.x);
+  if (heli.y - 10 < w.top || heli.y + 10 > w.bot) return crash();
+  for (const b of blocks) {
+    const bx = b.x - offset;
+    if (heli.x + 18 > bx && heli.x - 22 < bx + b.w && heli.y + 9 > b.y && heli.y - 9 < b.y + b.h) return crash();
+  }
+  document.getElementById('score').textContent = Math.floor(dist / 10);
+}
+
+function draw() {
+  ctx.fillStyle = '#0b1120';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#16a34a';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  segs.forEach((s, i) => ctx.lineTo(i * SEG - offset, s.top));
+  ctx.lineTo(W + SEG * 2, 0);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  segs.forEach((s, i) => ctx.lineTo(i * SEG - offset, s.bot));
+  ctx.lineTo(W + SEG * 2, H);
+  ctx.fill();
+  ctx.fillStyle = '#22c55e';
+  blocks.forEach(b => ctx.fillRect(b.x - offset, b.y, b.w, b.h));
+  smoke.forEach(p => { ctx.fillStyle = `rgba(200,200,220,${p.life / 1500})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); });
+  // helicopter
+  ctx.save();
+  ctx.translate(heli.x, heli.y);
+  ctx.rotate(heli.vy * 0.04);
+  ctx.fillStyle = '#f59e0b';
+  ctx.beginPath(); ctx.ellipse(0, 0, 16, 9, 0, 0, 7); ctx.fill();
+  ctx.fillRect(-30, -3, 18, 4);
+  ctx.fillStyle = '#7dd3fc';
+  ctx.beginPath(); ctx.ellipse(6, -2, 7, 5, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#e6e7f2';
+  const blade = Math.abs(Math.sin(performance.now() / 30)) * 22 + 4;
+  ctx.fillRect(-blade, -13, blade * 2, 2);
+  ctx.fillRect(-2, -12, 3, 4);
+  ctx.fillRect(-10, 10, 22, 2);
+  ctx.restore();
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function begin() {
+  reset();
+  state = 'play';
+  holding = false;
+  overlay(ov, null);
+}
+
+function press(v) {
+  if (v && (state === 'ready')) begin();
+  holding = v;
+}
+document.addEventListener('keydown', e => {
+  if (e.key === ' ' || e.key === 'ArrowUp') {
+    if (state === 'over' && !e.repeat) { begin(); return; }
+    press(true);
+  }
+});
+document.addEventListener('keyup', e => { if (e.key === ' ' || e.key === 'ArrowUp') press(false); });
+cv.addEventListener('pointerdown', e => { e.preventDefault(); press(true); });
+window.addEventListener('pointerup', () => press(false));
+ov.addEventListener('pointerdown', e => { if (state === 'ready') { e.preventDefault(); press(true); } });
+
+reset();
+overlay(ov, '<h2>Cave Flyer</h2><p>Hold to climb, release to fall.</p><p>Press Space or tap to launch</p>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

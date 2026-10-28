@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano Tiles</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🎹 Piano Tiles</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="400" height="620"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Tap only the black tiles, from the bottom up. Keyboard: <kbd>D</kbd> <kbd>F</kbd> <kbd>J</kbd> <kbd>K</kbd> for the four columns. Don't touch the white and don't let a black tile slip past!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, COLS = 4, CW = W / COLS, RH = 155;
+// Ode to Joy, looped, as the melody for successive taps
+const MELODY = [330, 330, 349, 392, 392, 349, 330, 294, 262, 262, 294, 330, 330, 294, 294, 330, 330, 349, 392, 392, 349, 330, 294, 262, 262, 294, 330, 294, 262, 262];
+let rows, speed, score, state = 'ready', last = 0, wrong = null, flashT = 0;
+let best = Store.get('piano-best', 0);
+document.getElementById('best').textContent = best;
+
+function reset() {
+  rows = [];
+  for (let i = 0; i < 6; i++) rows.push({ col: randInt(0, 3), y: H - RH * (i + 1) - 10, hit: false, start: i === 0 });
+  speed = 0;
+  score = 0;
+  wrong = null;
+  document.getElementById('score').textContent = 0;
+}
+
+function lowest() {
+  let r = null;
+  for (const row of rows) if (!row.hit && (!r || row.y > r.y)) r = row;
+  return r;
+}
+
+function fail(col, y, msg) {
+  state = 'over';
+  wrong = { col, y };
+  flashT = 0;
+  Sound.beep(110, 0.5, 'sawtooth', 0.06);
+  best = recordBest('piano-best', score);
+  document.getElementById('best').textContent = best;
+  setTimeout(() => overlay(ov, `<h2>${msg}</h2><p>Score ${score} · Best ${best}</p><button class="btn" onclick="restart()">Play again</button>`), 700);
+}
+
+function tap(col, y) {
+  if (state === 'over') return;
+  const r = lowest();
+  if (!r) return;
+  if (col === r.col) {
+    r.hit = true;
+    if (state === 'ready') { state = 'play'; speed = 280; }
+    score++;
+    speed += 5;
+    document.getElementById('score').textContent = score;
+    Sound.beep(MELODY[(score - 1) % MELODY.length], 0.25, 'triangle', 0.09);
+  } else if (y == null || y > r.y - RH * 1.5) {
+    // tapping a white tile near the active row counts as a mistake
+    fail(col, y == null ? r.y : r.y + Math.floor((y - r.y) / RH) * RH, 'Wrong tile!');
+  }
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  rows.forEach(r => { r.y += speed * s; });
+  const top = Math.min(...rows.map(r => r.y));
+  if (top > -RH) rows.push({ col: randInt(0, 3), y: top - RH, hit: false });
+  const miss = rows.find(r => !r.hit && r.y > H);
+  if (miss) {
+    // scroll back so the missed tile is visible
+    const back = miss.y - (H - RH - 10);
+    rows.forEach(r => { r.y -= back; });
+    fail(miss.col, miss.y, 'Missed one!');
+    return;
+  }
+  rows = rows.filter(r => r.y < H + RH);
+}
+
+function draw() {
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#cbd5e1';
+  for (let c = 1; c < COLS; c++) { ctx.beginPath(); ctx.moveTo(c * CW, 0); ctx.lineTo(c * CW, H); ctx.stroke(); }
+  for (const r of rows) {
+    ctx.fillStyle = r.hit ? '#cbd5e1' : '#0f172a';
+    ctx.fillRect(r.col * CW + 1, r.y + 1, CW - 2, RH - 2);
+    if (r.start && !r.hit) {
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 20px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('START', r.col * CW + CW / 2, r.y + RH / 2 + 7);
+    }
+  }
+  if (wrong) {
+    flashT += 16;
+    if (Math.floor(flashT / 120) % 2 === 0) { ctx.fillStyle = '#ef4444'; ctx.fillRect(wrong.col * CW + 1, wrong.y + 1, CW - 2, RH - 2); }
+  }
+  ctx.fillStyle = 'rgba(239,68,68,.9)';
+  ctx.font = 'bold 40px system-ui';
+  ctx.textAlign = 'center';
+  if (state !== 'ready') ctx.fillText(score, W / 2, 50);
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function restart() { reset(); state = 'ready'; overlay(ov, null); }
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const p = canvasPoint(cv, e);
+  tap(clamp(Math.floor(p.x / CW), 0, 3), p.y);
+});
+document.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  const col = { d: 0, f: 1, j: 2, k: 3, D: 0, F: 1, J: 2, K: 3 }[e.key];
+  if (col != null) tap(col, null);
+  if ((e.key === ' ' || e.key === 'Enter') && state === 'over') restart();
+});
+
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

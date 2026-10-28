@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Breaker</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #rows { display: flex; flex-direction: column-reverse; gap: 6px; background: var(--panel); padding: 12px; border-radius: 12px; border: 1px solid var(--line); }
+  .row { display: flex; align-items: center; gap: 12px; padding: 4px 8px; border-radius: 8px; }
+  .row.active { background: var(--panel-2); }
+  .row .n { width: 18px; color: var(--muted); font-size: 12px; text-align: right; }
+  .slots { display: flex; gap: 8px; }
+  .slot { width: 34px; height: 34px; border-radius: 50%; background: #0b0c18; box-shadow: inset 0 2px 4px rgba(0,0,0,.6); border: 0; padding: 0; }
+  .row.active .slot { cursor: pointer; outline: 1px dashed #4b5280; }
+  .fb { display: grid; grid-template-columns: repeat(3, 10px); gap: 3px; width: 42px; }
+  .fb i { width: 10px; height: 10px; border-radius: 50%; background: #0b0c18; display: block; }
+  .fb i.b { background: #f8fafc; } .fb i.w { background: #64748b; box-shadow: inset 0 0 0 2px #f8fafc; }
+  .palette { display: flex; gap: 10px; margin: 14px 0 8px; flex-wrap: wrap; justify-content: center; }
+  .palette button { width: 44px; height: 44px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25); cursor: pointer; }
+  .secret .slot { box-shadow: none; }
+  .peg { box-shadow: inset -3px -4px 6px rgba(0,0,0,.35), inset 3px 3px 5px rgba(255,255,255,.35) !important; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔐 Code Breaker</h1>
+  <div class="stats">Solved <b id="wins">0</b> Best <b id="best">—</b></div>
+</header>
+<div class="controls">
+  <select id="mode"><option value="4,6">Classic · 4 pegs, 6 colours</option><option value="5,8">Hard · 5 pegs, 8 colours</option></select>
+  <button class="btn alt" id="new">New code</button>
+</div>
+<div class="stage">
+  <div id="rows"></div>
+</div>
+<div class="palette" id="pal"></div>
+<div class="controls"><button class="btn alt" id="back">⌫ Erase</button><button class="btn" id="submit">Check guess</button></div>
+<div class="msg" id="msg"></div>
+<p class="help">Crack the hidden colour code in 10 guesses. After each guess: a <b>white</b> peg means right colour in the right spot, a <b>ringed grey</b> peg means right colour in the wrong spot. Colours can repeat. Keys <kbd>1</kbd>–<kbd>8</kbd>, <kbd>Backspace</kbd>, <kbd>Enter</kbd>.</p>
+<script src="shared.js"></script>
+<script>
+const COLORS = ['#ef4444', '#f59e0b', '#facc15', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#f8fafc'];
+const ROWS = 10;
+let P, K, secret, guesses, cur, over;
+let wins = Store.get('codebreaker-wins', 0);
+
+function newGame() {
+  [P, K] = document.getElementById('mode').value.split(',').map(Number);
+  secret = Array.from({ length: P }, () => randInt(0, K - 1));
+  guesses = [];
+  cur = [];
+  over = false;
+  const pal = document.getElementById('pal');
+  pal.innerHTML = '';
+  for (let i = 0; i < K; i++) {
+    const b = document.createElement('button');
+    b.className = 'peg';
+    b.style.background = COLORS[i];
+    b.onclick = () => add(i);
+    pal.appendChild(b);
+  }
+  document.getElementById('msg').textContent = '';
+  render();
+}
+
+function score(g) {
+  let black = 0, white = 0;
+  const sc = Array(K).fill(0), gc = Array(K).fill(0);
+  g.forEach((v, i) => { if (v === secret[i]) black++; else { sc[secret[i]]++; gc[v]++; } });
+  for (let i = 0; i < K; i++) white += Math.min(sc[i], gc[i]);
+  return { black, white };
+}
+
+function render() {
+  const rows = document.getElementById('rows');
+  rows.innerHTML = '';
+  for (let r = 0; r < ROWS; r++) {
+    const row = document.createElement('div');
+    const active = !over && r === guesses.length;
+    row.className = 'row' + (active ? ' active' : '');
+    const g = guesses[r], vals = g ? g.g : active ? cur : [];
+    let slots = '';
+    for (let i = 0; i < P; i++) {
+      const v = vals[i];
+      slots += `<button class="slot${v != null ? ' peg' : ''}" data-i="${i}" style="${v != null ? 'background:' + COLORS[v] : ''}"></button>`;
+    }
+    let fb = '';
+    if (g) for (let i = 0; i < P; i++) fb += `<i class="${i < g.black ? 'b' : i < g.black + g.white ? 'w' : ''}"></i>`;
+    row.innerHTML = `<span class="n">${r + 1}</span><div class="slots">${slots}</div><div class="fb">${fb}</div>`;
+    if (active) row.querySelectorAll('.slot').forEach(s => { s.onclick = () => { const i = +s.dataset.i; if (i < cur.length) { cur.splice(i, 1); render(); } }; });
+    rows.appendChild(row);
+  }
+  if (over) {
+    const row = document.createElement('div');
+    row.className = 'row secret';
+    row.innerHTML = `<span class="n">🔓</span><div class="slots">${secret.map(v => `<span class="slot peg" style="background:${COLORS[v]}"></span>`).join('')}</div><div class="fb"></div>`;
+    rows.prepend(row);
+  }
+  document.getElementById('wins').textContent = wins;
+  const b = Store.get('codebreaker-best-' + P, null);
+  document.getElementById('best').textContent = b ? b + ' guesses' : '—';
+}
+
+function add(i) {
+  if (over || cur.length >= P) return;
+  cur.push(i);
+  Sound.beep(300 + i * 60, 0.04, 'triangle', 0.03);
+  render();
+}
+
+function submit() {
+  const msg = document.getElementById('msg');
+  if (over) return newGame();
+  if (cur.length < P) { msg.textContent = `Pick ${P} colours first`; return; }
+  const s = score(cur);
+  guesses.push({ g: cur.slice(), ...s });
+  cur = [];
+  msg.textContent = '';
+  if (s.black === P) {
+    over = true;
+    wins++;
+    Store.set('codebreaker-wins', wins);
+    recordBest('codebreaker-best-' + P, guesses.length, true);
+    msg.textContent = `Cracked it in ${guesses.length} ${guesses.length === 1 ? 'guess' : 'guesses'}! 🎉 Press Enter for a new code.`;
+    Sound.beep(880, 0.3, 'triangle');
+  } else if (guesses.length >= ROWS) {
+    over = true;
+    msg.textContent = 'Out of guesses — the code is shown above. Press Enter to try again.';
+    Sound.beep(150, 0.3, 'sawtooth');
+  } else Sound.beep(500, 0.05, 'square', 0.03);
+  render();
+}
+
+document.getElementById('submit').onclick = submit;
+document.getElementById('back').onclick = () => { cur.pop(); render(); };
+document.getElementById('new').onclick = newGame;
+document.getElementById('mode').onchange = newGame;
+document.addEventListener('keydown', e => {
+  const n = +e.key;
+  if (n >= 1 && n <= K) add(n - 1);
+  else if (e.key === 'Backspace') { cur.pop(); render(); }
+  else if (e.key === 'Enter') submit();
+});
+newGame();
+</script>
+</body>
+</html>

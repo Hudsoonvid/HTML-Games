@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Typing Rush</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #typed {
+    width: min(400px, calc(100vw - 24px)); font-size: 22px; padding: 10px 14px; border-radius: 10px;
+    border: 2px solid var(--line); background: var(--panel); color: var(--fg); text-align: center; outline: none;
+  }
+  #typed:focus { border-color: var(--accent); }
+  #typed.bad { border-color: var(--bad); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⌨️ Typing Rush</h1>
+  <div class="stats">Score <b id="score">0</b> Lives <b id="lives">5</b> WPM <b id="wpm">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="760" height="460"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<input id="typed" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="type here…">
+<p class="help">Type the falling words before they hit the ground. Words that match what you've typed so far light up. <kbd>Esc</kbd> clears your input.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov'), input = document.getElementById('typed');
+const W = cv.width, H = cv.height;
+const WORDS = ('time year people way day man thing woman life child world school state family student group country problem hand part place case week company system program question work government number night point home water room mother area money story fact month lot right study book eye job word business issue side kind head house service friend father power hour game line end member law car city community name president team minute idea kid body information back parent face others level office door health person art war history party result change morning reason research girl guy moment air teacher force education foot boy age policy music market sense nation plan college interest death experience effect class control care field development role effort rate heart drug show leader light voice wife police mind price report decision son view relationship town road arm difference value building action model season society tax director position player record paper space ground form event official matter center couple site project activity star table need court oil situation cost industry figure street image phone data picture practice piece land product doctor wall patient worker news test movie north love support technology step baby computer type attention film tree source organization hair window evidence population site chance amazing rocket keyboard galaxy dragon puzzle wizard castle thunder planet jungle volcano pirate penguin balloon whisper mystery crystal lantern harbor meadow blizzard compass voyage tornado').split(' ');
+let words, score, lives, typedChars, startT, spawnT, level, parts, state = 'ready', last = 0;
+let best = Store.get('typing-best', 0);
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('lives').textContent = lives;
+  const mins = (performance.now() - startT) / 60000;
+  document.getElementById('wpm').textContent = state === 'play' && mins > 0.05 ? Math.round(typedChars / 5 / mins) : document.getElementById('wpm').textContent;
+  document.getElementById('best').textContent = best;
+}
+
+function start() {
+  words = []; parts = [];
+  score = 0; lives = 5; typedChars = 0; level = 1; spawnT = 0;
+  startT = performance.now();
+  state = 'play';
+  input.value = '';
+  input.focus();
+  overlay(ov, null);
+  hud();
+}
+
+function spawn() {
+  const maxLen = 4 + Math.min(level, 6);
+  const pool = WORDS.filter(w => w.length <= maxLen && !words.some(o => o.text === w));
+  const text = pick(pool);
+  ctx.font = 'bold 20px ui-monospace, monospace';
+  const w = ctx.measureText(text).width;
+  words.push({ text, x: rand(10, W - w - 10), y: -10, speed: rand(18, 30) + level * 6, w });
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  level = 1 + Math.floor(score / 150);
+  spawnT -= dt;
+  if (spawnT <= 0) { spawn(); spawnT = Math.max(600, 2300 - level * 170) * rand(0.7, 1.2); }
+  for (const w of words) {
+    w.y += w.speed * s;
+    if (w.y > H - 8) {
+      w.dead = true;
+      lives--;
+      Sound.beep(140, 0.25, 'sawtooth');
+      for (let i = 0; i < 12; i++) parts.push({ x: w.x + w.w / 2, y: H - 10, vx: rand(-90, 90), vy: rand(-160, -40), life: 600, c: '#ef4444' });
+    }
+  }
+  words = words.filter(w => !w.dead);
+  parts.forEach(p => { p.x += p.vx * s; p.y += p.vy * s; p.vy += 300 * s; p.life -= dt; });
+  parts = parts.filter(p => p.life > 0);
+  hud();
+  if (lives <= 0) {
+    state = 'over';
+    best = recordBest('typing-best', score);
+    hud();
+    overlay(ov, `<h2>Game over</h2><p>Score ${score} · ${document.getElementById('wpm').textContent} WPM</p><button class="btn" onclick="start()">Play again</button>`);
+  }
+}
+
+function checkInput() {
+  const v = input.value.trim().toLowerCase();
+  if (state !== 'play') return;
+  const hit = words.find(w => w.text === v);
+  if (hit) {
+    hit.dead = true;
+    score += hit.text.length * 5;
+    typedChars += hit.text.length + 1;
+    for (let i = 0; i < 16; i++) parts.push({ x: hit.x + hit.w / 2, y: hit.y, vx: rand(-120, 120), vy: rand(-120, 60), life: 500, c: '#22d3ee' });
+    words = words.filter(w => !w.dead);
+    input.value = '';
+    Sound.beep(700 + hit.text.length * 40, 0.06, 'triangle');
+  }
+  input.classList.toggle('bad', v.length > 0 && !words.some(w => w.text.startsWith(v)));
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b1020'); g.addColorStop(1, '#1e1b4b');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(0, H - 4, W, 4);
+  if (!words) return;
+  const v = input.value.trim().toLowerCase();
+  ctx.font = 'bold 20px ui-monospace, monospace';
+  ctx.textBaseline = 'middle';
+  for (const w of words) {
+    const match = v && w.text.startsWith(v);
+    ctx.fillStyle = match ? 'rgba(34,211,238,.18)' : 'rgba(255,255,255,.06)';
+    ctx.beginPath(); ctx.roundRect(w.x - 6, w.y - 14, w.w + 12, 28, 6); ctx.fill();
+    ctx.fillStyle = '#e6e7f2';
+    ctx.fillText(w.text, w.x, w.y);
+    if (match) { ctx.fillStyle = '#22d3ee'; ctx.fillText(w.text.slice(0, v.length), w.x, w.y); }
+  }
+  parts.forEach(p => { ctx.globalAlpha = p.life / 600; ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y, 3, 3); });
+  ctx.globalAlpha = 1;
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#9097b8';
+  ctx.font = '13px system-ui';
+  ctx.fillText('Level ' + level, 10, 20);
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+input.addEventListener('input', checkInput);
+input.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { input.value = ''; checkInput(); }
+  if (e.key === 'Enter' && state !== 'play') start();
+});
+cv.addEventListener('pointerdown', () => input.focus());
+
+score = 0; lives = 5; level = 1;
+hud();
+overlay(ov, '<h2>Typing Rush</h2><p>Type fast to stop the words from landing.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

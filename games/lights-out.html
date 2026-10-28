@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lights Out</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #board { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; width: min(420px, calc(100vw - 24px)); padding: 14px; background: #0b0c18; border-radius: 16px; border: 1px solid var(--line); }
+  .l { aspect-ratio: 1; border-radius: 12px; border: 0; cursor: pointer; background: #1f2241; box-shadow: inset 0 -4px 0 rgba(0,0,0,.35); transition: background .12s, box-shadow .12s; }
+  .l.on { background: radial-gradient(circle at 40% 35%, #fef9c3, #facc15 55%, #ca8a04); box-shadow: 0 0 18px rgba(250,204,21,.6), inset 0 -4px 0 rgba(0,0,0,.2); }
+  .l.hint { outline: 3px dashed #22d3ee; outline-offset: -6px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>💡 Lights Out</h1>
+  <div class="stats">Level <b id="level">1</b> Moves <b id="moves">0</b> Par <b id="par">0</b></div>
+</header>
+<div class="controls">
+  <button class="btn alt" id="restart">Restart level</button>
+  <button class="btn alt" id="hint">Show a hint</button>
+  <button class="btn alt" id="skip">Skip level</button>
+</div>
+<div class="stage">
+  <div id="board"></div>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Pressing a light toggles it and its four neighbours. Switch every light off. Each level is built from random presses, so it's always solvable — "par" is the number of presses used to make it.</p>
+<script src="shared.js"></script>
+<script>
+const N = 5, boardEl = document.getElementById('board'), ov = document.getElementById('ov');
+let lights, start, level = Store.get('lightsout-level', 1), moves, par, btns = [];
+
+for (let i = 0; i < N * N; i++) {
+  const b = document.createElement('button');
+  b.className = 'l';
+  b.onclick = () => press(i, true);
+  boardEl.appendChild(b);
+  btns.push(b);
+}
+
+function toggle(arr, i) {
+  const r = Math.floor(i / N), c = i % N;
+  [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dr, dc]) => {
+    const rr = r + dr, cc = c + dc;
+    if (rr >= 0 && rr < N && cc >= 0 && cc < N) arr[rr * N + cc] ^= 1;
+  });
+}
+
+function newLevel() {
+  par = Math.min(3 + level, 15);
+  do {
+    lights = Array(N * N).fill(0);
+    shuffle([...Array(N * N).keys()]).slice(0, par).forEach(i => toggle(lights, i));
+  } while (!lights.some(Boolean));
+  start = lights.slice();
+  moves = 0;
+  overlay(ov, null);
+  render();
+}
+
+function render() {
+  lights.forEach((v, i) => { btns[i].classList.toggle('on', !!v); btns[i].classList.remove('hint'); });
+  document.getElementById('level').textContent = level;
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('par').textContent = par;
+}
+
+function press(i) {
+  if (!ov.classList.contains('hidden')) return;
+  toggle(lights, i);
+  moves++;
+  Sound.beep(lights[i] ? 660 : 440, 0.04, 'triangle', 0.03);
+  render();
+  if (!lights.some(Boolean)) {
+    const stars = moves <= par ? '⭐⭐⭐' : moves <= par * 1.5 ? '⭐⭐' : '⭐';
+    level++;
+    Store.set('lightsout-level', level);
+    Sound.beep(880, 0.25, 'triangle');
+    overlay(ov, `<h2>Lights out! ${stars}</h2><p>Solved in ${moves} moves (par ${par})</p><button class="btn" onclick="newLevel()">Level ${level}</button>`);
+  }
+}
+
+// Solve over GF(2) with Gaussian elimination to find a press set from the current state.
+function solve() {
+  const M = N * N;
+  const rows = [];
+  for (let i = 0; i < M; i++) {
+    const row = Array(M + 1).fill(0);
+    for (let j = 0; j < M; j++) { const t = Array(M).fill(0); toggle(t, j); row[j] = t[i]; }
+    row[M] = lights[i];
+    rows.push(row);
+  }
+  const where = Array(M).fill(-1);
+  let r = 0;
+  for (let c = 0; c < M && r < M; c++) {
+    const p = rows.findIndex((row, k) => k >= r && row[c]);
+    if (p < 0) continue;
+    [rows[r], rows[p]] = [rows[p], rows[r]];
+    for (let k = 0; k < M; k++) if (k !== r && rows[k][c]) for (let j = c; j <= M; j++) rows[k][j] ^= rows[r][j];
+    where[c] = r++;
+  }
+  return where.map(w => (w >= 0 ? rows[w][M] : 0));
+}
+
+document.getElementById('hint').onclick = () => {
+  const s = solve();
+  const i = s.findIndex(Boolean);
+  if (i >= 0) btns[i].classList.add('hint');
+};
+document.getElementById('restart').onclick = () => { lights = start.slice(); moves = 0; render(); };
+document.getElementById('skip').onclick = () => { level++; Store.set('lightsout-level', level); newLevel(); };
+newLevel();
+</script>
+</body>
+</html>

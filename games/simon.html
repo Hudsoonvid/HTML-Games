@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simon Says</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #board {
+    width: min(440px, calc(100vw - 32px));
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: #111;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    padding: 12px;
+    position: relative;
+    margin: 12px auto;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+  .pad { border: 0; cursor: pointer; opacity: .55; transition: opacity .08s, filter .08s; touch-action: manipulation; }
+  .pad.lit { opacity: 1; filter: brightness(1.35) saturate(1.2); }
+  .pad:disabled { cursor: default; }
+  .p0 { background: #22c55e; border-radius: 100% 0 0 0; }
+  .p1 { background: #ef4444; border-radius: 0 100% 0 0; }
+  .p2 { background: #facc15; border-radius: 0 0 0 100%; }
+  .p3 { background: #3b82f6; border-radius: 0 0 100% 0; }
+  #center {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 38%; aspect-ratio: 1; border-radius: 50%; background: #1f2937; border: 10px solid #111;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #e5e7eb;
+  }
+  #center .big { font-size: 34px; font-weight: 800; }
+  #center .small { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🚦 Simon Says</h1>
+  <div class="stats">Best <b id="best">0</b></div>
+</header>
+<div class="controls">
+  <button class="btn" id="go">Start</button>
+  <label class="help" style="margin:0"><input type="checkbox" id="strict"> Strict mode (one mistake ends the game)</label>
+</div>
+<div id="board">
+  <button class="pad p0" data-i="0"></button>
+  <button class="pad p1" data-i="1"></button>
+  <button class="pad p2" data-i="2"></button>
+  <button class="pad p3" data-i="3"></button>
+  <div id="center"><div class="big" id="count">--</div><div class="small" id="status">Press start</div></div>
+</div>
+<p class="help">Watch the sequence, then repeat it by clicking the pads or pressing <kbd>Q</kbd> <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> (top-left, top-right, bottom-left, bottom-right). Each round adds one more step.</p>
+<script src="shared.js"></script>
+<script>
+const pads = [...document.querySelectorAll('.pad')];
+const TONES = [329.6, 440, 277.2, 164.8];
+let seq = [], pos = 0, accepting = false, timers = [];
+let best = Store.get('simon-best', 0);
+document.getElementById('best').textContent = best;
+
+function setStatus(count, msg) {
+  document.getElementById('count').textContent = count;
+  document.getElementById('status').textContent = msg;
+}
+
+function light(i, ms) {
+  pads[i].classList.add('lit');
+  Sound.beep(TONES[i], ms / 1000, 'triangle', 0.08);
+  timers.push(setTimeout(() => pads[i].classList.remove('lit'), ms));
+}
+
+function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+function playSeq() {
+  accepting = false;
+  pos = 0;
+  setStatus(seq.length, 'Watch…');
+  const speed = Math.max(220, 600 - seq.length * 22);
+  seq.forEach((p, k) => timers.push(setTimeout(() => light(p, speed * 0.7), 600 + k * speed)));
+  timers.push(setTimeout(() => { accepting = true; setStatus(seq.length, 'Your turn'); }, 600 + seq.length * speed));
+}
+
+function start() {
+  clearTimers();
+  seq = [randInt(0, 3)];
+  playSeq();
+}
+
+function press(i) {
+  if (!accepting) return;
+  light(i, 220);
+  if (i !== seq[pos]) {
+    accepting = false;
+    Sound.beep(110, 0.6, 'sawtooth', 0.08);
+    const score = seq.length - 1;
+    if (document.getElementById('strict').checked) {
+      best = recordBest('simon-best', score);
+      document.getElementById('best').textContent = best;
+      setStatus('✖', `Game over · ${score}`);
+    } else {
+      setStatus('✖', 'Try again…');
+      timers.push(setTimeout(playSeq, 1200));
+    }
+    return;
+  }
+  pos++;
+  if (pos === seq.length) {
+    accepting = false;
+    best = recordBest('simon-best', seq.length);
+    document.getElementById('best').textContent = best;
+    setStatus(seq.length, 'Nice!');
+    seq.push(randInt(0, 3));
+    timers.push(setTimeout(playSeq, 900));
+  }
+}
+
+pads.forEach(p => p.addEventListener('pointerdown', e => { e.preventDefault(); press(+p.dataset.i); }));
+document.getElementById('go').onclick = start;
+document.addEventListener('keydown', e => {
+  const i = { q: 0, w: 1, a: 2, s: 3, Q: 0, W: 1, A: 2, S: 3 }[e.key];
+  if (i != null) press(i);
+  if (e.key === 'Enter') start();
+});
+</script>
+</body>
+</html>

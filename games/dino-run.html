@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dino Run</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🦖 Dino Run</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="760" height="260"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="tJ">⤒</button><button id="tD">⤓</button></div>
+<p class="help"><kbd>Space</kbd>/<kbd>↑</kbd> jump (hold for higher) · <kbd>↓</kbd> duck. Tap the game to jump on touch screens.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, GROUND = 210;
+let dino, obs, clouds, speed, dist, state = 'ready', last = 0, jumpHeld = false, duckHeld = false, spawnT, night = 0;
+let best = Store.get('dino-best', 0);
+document.getElementById('best').textContent = best;
+
+// Simple pixel art: X = body, E = eye (drawn as background colour)
+const DINO = [
+  '          XXXXXXXX',
+  '         XXEXXXXXXX',
+  '         XXXXXXXXXX',
+  '         XXXXXXXXXX',
+  '         XXXXX     ',
+  '         XXXXXXXX  ',
+  'X       XXXXX      ',
+  'X      XXXXXXX     ',
+  'XX   XXXXXXXXXXX   ',
+  'XXX XXXXXXXXXX X   ',
+  'XXXXXXXXXXXXXX     ',
+  ' XXXXXXXXXXXXX     ',
+  '  XXXXXXXXXXX      ',
+  '   XXXXXXXXX       ',
+  '    XXX  XX        ',
+  '    XX    X        ',
+  '    X     X        ',
+  '    XX    XX       '
+];
+const PX = 2.6;
+
+function reset() {
+  dino = { y: GROUND, vy: 0, duck: false, leg: 0 };
+  obs = [];
+  clouds = [{ x: 200, y: 50 }, { x: 520, y: 80 }];
+  speed = 6;
+  dist = 0;
+  spawnT = 900;
+}
+
+function hud() {
+  document.getElementById('score').textContent = Math.floor(dist / 10);
+  document.getElementById('best').textContent = best;
+}
+
+function jump() {
+  if (state === 'ready' || (state === 'over' && performance.now() - deadAt > 400)) { reset(); state = 'play'; overlay(ov, null); return; }
+  if (state === 'play' && dino.y >= GROUND) { dino.vy = -11.5; Sound.beep(600, 0.05, 'triangle'); }
+}
+let deadAt = 0;
+
+function spawn() {
+  const score = dist / 10;
+  if (score > 250 && Math.random() < 0.3) {
+    obs.push({ type: 'bird', x: W + 20, y: pick([GROUND - 22, GROUND - 52, GROUND - 82]), w: 42, h: 26, flap: 0 });
+  } else {
+    const big = Math.random() < 0.45, n = randInt(1, big ? 2 : 3);
+    const w = (big ? 24 : 16) * n + (n - 1) * 4, h = big ? 50 : 34;
+    obs.push({ type: 'cactus', x: W + 20, y: GROUND - h, w, h, n, big });
+  }
+  spawnT = rand(650, 1400) * (7 / speed) + 250;
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  speed = Math.min(15, 6 + dist / 2500);
+  dist += speed * f;
+  const g = jumpHeld && dino.vy < 0 ? 0.45 : 0.85;
+  dino.vy += g * f;
+  if (duckHeld && dino.y < GROUND) dino.vy += 1.2 * f;
+  dino.y = Math.min(GROUND, dino.y + dino.vy * f);
+  if (dino.y >= GROUND) dino.vy = 0;
+  dino.duck = duckHeld && dino.y >= GROUND;
+  dino.leg += dt;
+  spawnT -= dt * (speed / 7);
+  if (spawnT <= 0) spawn();
+  for (const o of obs) { o.x -= speed * f * (o.type === 'bird' ? 1.1 : 1); o.flap += dt; }
+  obs = obs.filter(o => o.x + o.w > -10);
+  for (const c of clouds) { c.x -= speed * 0.2 * f; if (c.x < -80) { c.x = W + rand(0, 200); c.y = rand(30, 110); } }
+  // collision with a slightly forgiving hitbox
+  const box = dino.duck ? { x: 34, y: dino.y - 28, w: 58, h: 26 } : { x: 40, y: dino.y - 44, w: 32, h: 42 };
+  for (const o of obs) {
+    if (box.x < o.x + o.w - 4 && box.x + box.w > o.x + 4 && box.y < o.y + o.h - 2 && box.y + box.h > o.y + 4) {
+      state = 'over';
+      deadAt = performance.now();
+      Sound.beep(150, 0.3, 'sawtooth');
+      best = recordBest('dino-best', Math.floor(dist / 10));
+      overlay(ov, `<h2>Game over</h2><p>Score ${Math.floor(dist / 10)} · Best ${best}</p><p>Jump to restart</p>`);
+    }
+  }
+  if (Math.floor(dist / 10) % 100 === 0 && Math.floor(dist / 10) > 0 && !milestone) { milestone = true; Sound.beep(1200, 0.08, 'triangle'); }
+  if (Math.floor(dist / 10) % 100 !== 0) milestone = false;
+  night = Math.floor(dist / 10 / 700) % 2;
+  hud();
+}
+let milestone = false;
+
+function drawDino() {
+  const fg = night ? '#e5e7eb' : '#374151', bg = night ? '#111827' : '#f8fafc';
+  const ox = 36, oy = dino.y - DINO.length * PX;
+  if (dino.duck) {
+    ctx.fillStyle = fg;
+    ctx.fillRect(ox, dino.y - 26, 56, 18);
+    ctx.fillRect(ox + 40, dino.y - 30, 26, 16);
+    ctx.fillStyle = bg;
+    ctx.fillRect(ox + 52, dino.y - 26, 4, 4);
+    ctx.fillStyle = fg;
+    const step = Math.floor(dino.leg / 100) % 2;
+    ctx.fillRect(ox + 12, dino.y - 8, 6, step ? 8 : 4);
+    ctx.fillRect(ox + 30, dino.y - 8, 6, step ? 4 : 8);
+    return;
+  }
+  const running = dino.y >= GROUND && state === 'play';
+  const step = Math.floor(dino.leg / 100) % 2;
+  DINO.forEach((row, y) => [...row].forEach((ch, x) => {
+    if (ch === ' ') return;
+    if (running && y >= 15 && ((step && x < 7) || (!step && x >= 7))) return;
+    ctx.fillStyle = ch === 'E' ? bg : fg;
+    ctx.fillRect(ox + x * PX, oy + y * PX, PX + 0.5, PX + 0.5);
+  }));
+}
+
+function draw() {
+  const fg = night ? '#e5e7eb' : '#374151';
+  ctx.fillStyle = night ? '#111827' : '#f8fafc';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = night ? '#374151' : '#e2e8f0';
+  for (const c of clouds) { ctx.fillRect(c.x, c.y, 60, 10); ctx.fillRect(c.x + 14, c.y - 8, 30, 10); }
+  ctx.fillStyle = fg;
+  ctx.fillRect(0, GROUND, W, 2);
+  for (let i = 0; i < 40; i++) {
+    const x = ((i * 89 - dist) % W + W) % W;
+    ctx.fillRect(x, GROUND + 6 + (i % 3) * 5, 3 + (i % 4), 2);
+  }
+  for (const o of obs) {
+    ctx.fillStyle = night ? '#86efac' : '#15803d';
+    if (o.type === 'cactus') {
+      const cw = o.big ? 24 : 16;
+      for (let i = 0; i < o.n; i++) {
+        const x = o.x + i * (cw + 4);
+        ctx.fillRect(x + cw * 0.3, o.y, cw * 0.4, o.h);
+        ctx.fillRect(x, o.y + o.h * 0.3, cw * 0.2, o.h * 0.35);
+        ctx.fillRect(x, o.y + o.h * 0.55, cw * 0.4, cw * 0.15);
+        ctx.fillRect(x + cw * 0.8, o.y + o.h * 0.2, cw * 0.2, o.h * 0.35);
+        ctx.fillRect(x + cw * 0.6, o.y + o.h * 0.45, cw * 0.4, cw * 0.15);
+      }
+    } else {
+      ctx.fillStyle = fg;
+      ctx.fillRect(o.x, o.y + 10, 42, 8);
+      ctx.fillRect(o.x - 6, o.y + 8, 10, 6);
+      const up = Math.floor(o.flap / 160) % 2;
+      ctx.fillRect(o.x + 14, up ? o.y : o.y + 16, 12, 12);
+    }
+  }
+  drawDino();
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w') { if (!e.repeat) jump(); jumpHeld = true; }
+  if (e.key === 'ArrowDown' || e.key === 's') duckHeld = true;
+});
+document.addEventListener('keyup', e => {
+  if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w') jumpHeld = false;
+  if (e.key === 'ArrowDown' || e.key === 's') duckHeld = false;
+});
+const press = e => { e.preventDefault(); jump(); jumpHeld = true; };
+cv.addEventListener('pointerdown', press);
+ov.addEventListener('pointerdown', press);
+window.addEventListener('pointerup', () => { jumpHeld = false; });
+holdButton(document.getElementById('tJ'), v => { if (v) jump(); jumpHeld = v; });
+holdButton(document.getElementById('tD'), v => { duckHeld = v; });
+
+reset();
+hud();
+overlay(ov, '<h2>Dino Run</h2><p>Press Space or tap to start running</p>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

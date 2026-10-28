@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Word Scramble</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .area { width: min(520px, calc(100vw - 24px)); display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px 16px; }
+  #tiles { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; min-height: 58px; }
+  #tiles button { width: 50px; height: 56px; border-radius: 10px; border: 0; background: linear-gradient(#fde68a, #f59e0b); color: #451a03; font-size: 26px; font-weight: 900; cursor: pointer; box-shadow: 0 4px 0 #92400e; text-transform: uppercase; }
+  #tiles button.used { opacity: .25; transform: translateY(4px); box-shadow: none; }
+  #answer { display: flex; gap: 6px; min-height: 52px; justify-content: center; flex-wrap: wrap; }
+  #answer span { width: 42px; height: 48px; border-radius: 8px; background: var(--panel-2); border: 2px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 800; text-transform: uppercase; }
+  #answer.good span { border-color: var(--good); background: #14532d; }
+  #answer.bad { animation: shake .35s; }
+  @keyframes shake { 25%, 75% { transform: translateX(-6px); } 50% { transform: translateX(6px); } }
+  #hint { color: var(--muted); font-style: italic; min-height: 1.4em; text-align: center; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔤 Word Scramble</h1>
+  <div class="stats">Score <b id="score">0</b> Time <b id="time">90</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <div class="panel area">
+    <div id="hint"></div>
+    <div id="answer"></div>
+    <div id="tiles"></div>
+    <div class="controls"><button class="btn alt" id="clear">Clear</button><button class="btn alt" id="shuf">Shuffle</button><button class="btn alt" id="hintBtn">Hint (−5)</button><button class="btn alt" id="skip">Skip</button></div>
+  </div>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Unscramble as many words as you can in 90 seconds. Type the letters or tap the tiles; <kbd>Backspace</kbd> removes, <kbd>Enter</kbd> skips once the word is wrong, <kbd>Space</kbd> shuffles. Longer words are worth more.</p>
+<script src="shared.js"></script>
+<script>
+const LIST = [
+  ['planet', 'Orbits a star'], ['garden', 'Where flowers grow'], ['bridge', 'Crosses a river'], ['candle', 'Wax and a wick'], ['winter', 'The coldest season'],
+  ['pirate', 'Sails for treasure'], ['jungle', 'Dense tropical forest'], ['rocket', 'Blasts off to space'], ['castle', 'A king lives here'], ['guitar', 'Six strings'],
+  ['dragon', 'Breathes fire'], ['island', 'Land surrounded by water'], ['basket', 'Woven container'], ['cookie', 'Sweet baked treat'], ['silver', 'Shiny metal'],
+  ['forest', 'Lots of trees'], ['market', 'Place to buy and sell'], ['window', 'Glass in a wall'], ['pencil', 'For writing and erasing'], ['monkey', 'Swings from trees'],
+  ['butter', 'Spread on toast'], ['camera', 'Takes pictures'], ['puzzle', 'Something to solve'], ['tunnel', 'Underground passage'], ['zipper', 'Closes a jacket'],
+  ['school', 'Place of learning'], ['flower', 'Blooms in spring'], ['mirror', 'Shows your reflection'], ['button', 'Press it or sew it'], ['circle', 'Round shape'],
+  ['banana', 'Yellow fruit'], ['travel', 'Go on a journey'], ['summer', 'The hottest season'], ['wizard', 'Casts spells'], ['helmet', 'Protects your head'],
+  ['anchor', 'Keeps a ship in place'], ['thunder', 'Follows lightning'], ['blanket', 'Keeps you warm in bed'], ['diamond', 'Hardest gemstone'], ['penguin', 'Bird that can\'t fly'],
+  ['library', 'Full of books'], ['volcano', 'Erupts with lava'], ['balloon', 'Filled with air'], ['captain', 'Leads the crew'], ['kitchen', 'Where meals are made'],
+  ['rainbow', 'Colours after rain'], ['dolphin', 'Smart sea mammal'], ['picture', 'Worth a thousand words'], ['harvest', 'Gathering crops'], ['lantern', 'Portable light'],
+  ['cactus', 'Prickly desert plant'], ['bottle', 'Holds liquids'], ['orange', 'A colour and a fruit'], ['puppet', 'Moved by strings'], ['shadow', 'Follows you in sunlight'],
+  ['tomato', 'Red, used in ketchup'], ['velvet', 'Soft fabric'], ['honey', 'Made by bees'], ['cloud', 'Floats in the sky'], ['beach', 'Sand and waves'],
+  ['tiger', 'Striped big cat'], ['piano', 'Black and white keys'], ['smile', 'Happy face'], ['train', 'Runs on rails'], ['crown', 'Worn by royalty']
+];
+const ov = document.getElementById('ov');
+let word, clue, letters, used, picked, score, timeLeft, state = 'ready', last = 0, queue = [], hintsUsed;
+let best = Store.get('scramble-best', 0);
+document.getElementById('best').textContent = best;
+
+function scramble(w) {
+  let s;
+  do { s = shuffle([...w]); } while (s.join('') === w);
+  return s;
+}
+
+function nextWord() {
+  if (!queue.length) queue = shuffle(LIST.slice());
+  [word, clue] = queue.pop();
+  letters = scramble(word);
+  used = letters.map(() => false);
+  picked = [];
+  hintsUsed = 0;
+  document.getElementById('hint').textContent = 'Hint: ' + clue;
+  render();
+}
+
+function render() {
+  const tiles = document.getElementById('tiles');
+  tiles.innerHTML = '';
+  letters.forEach((ch, i) => {
+    const b = document.createElement('button');
+    b.textContent = ch;
+    if (used[i]) b.classList.add('used');
+    b.onclick = () => choose(i);
+    tiles.appendChild(b);
+  });
+  const ans = document.getElementById('answer');
+  ans.innerHTML = Array.from({ length: word.length }, (_, i) => `<span>${picked[i] != null ? letters[picked[i]] : ''}</span>`).join('');
+  document.getElementById('score').textContent = score;
+}
+
+function choose(i) {
+  if (state !== 'play' || used[i]) return;
+  used[i] = true;
+  picked.push(i);
+  Sound.beep(500 + picked.length * 50, 0.03, 'triangle', 0.03);
+  render();
+  if (picked.length === word.length) check();
+}
+
+function check() {
+  const guess = picked.map(i => letters[i]).join('');
+  const ans = document.getElementById('answer');
+  if (guess === word) {
+    const pts = Math.max(1, word.length * 5 - hintsUsed * 5);
+    score += pts;
+    ans.className = 'good';
+    Sound.beep(880, 0.12, 'triangle');
+    state = 'pause';
+    setTimeout(() => { ans.className = ''; state = 'play'; nextWord(); }, 500);
+    document.getElementById('score').textContent = score;
+  } else {
+    ans.className = 'bad';
+    Sound.beep(160, 0.15, 'sawtooth');
+    setTimeout(() => { ans.className = ''; undoAll(); }, 450);
+  }
+}
+
+function undoAll() { used = letters.map(() => false); picked = []; render(); }
+function backspace() { const i = picked.pop(); if (i != null) used[i] = false; render(); }
+
+function start() {
+  score = 0; timeLeft = 90000; state = 'play';
+  nextWord();
+  overlay(ov, null);
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play' || state === 'pause') {
+    timeLeft -= dt;
+    document.getElementById('time').textContent = Math.max(0, Math.ceil(timeLeft / 1000));
+    if (timeLeft <= 0) {
+      state = 'over';
+      best = recordBest('scramble-best', score);
+      document.getElementById('best').textContent = best;
+      overlay(ov, `<h2>Time's up!</h2><p>The last word was <b>${word.toUpperCase()}</b>.</p><p>Score ${score} · Best ${best}</p><button class="btn" onclick="start()">Play again</button>`);
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => {
+  if (state !== 'play') { if (e.key === 'Enter' && state !== 'pause') start(); return; }
+  if (e.key === 'Backspace') return backspace();
+  if (e.key === ' ') { letters = scramble(word); undoAll(); return; }
+  if (/^[a-z]$/i.test(e.key)) {
+    const i = letters.findIndex((ch, k) => ch === e.key.toLowerCase() && !used[k]);
+    if (i >= 0) choose(i);
+  }
+});
+document.getElementById('clear').onclick = undoAll;
+document.getElementById('shuf').onclick = () => { if (state === 'play') { letters = scramble(word); undoAll(); } };
+document.getElementById('skip').onclick = () => { if (state === 'play') nextWord(); };
+document.getElementById('hintBtn').onclick = () => {
+  if (state !== 'play') return;
+  // reveal the next correct letter in place
+  undoAll();
+  hintsUsed++;
+  score = Math.max(0, score - 5);
+  for (let k = 0; k < Math.min(hintsUsed, word.length - 1); k++) {
+    const i = letters.findIndex((ch, j) => ch === word[k] && !used[j]);
+    used[i] = true;
+    picked.push(i);
+  }
+  render();
+};
+
+word = 'scramble'; letters = [...word]; used = letters.map(() => false); picked = []; score = 0;
+render();
+overlay(ov, '<h2>Word Scramble</h2><p>Unscramble the letters before time runs out.</p><button class="btn" onclick="start()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

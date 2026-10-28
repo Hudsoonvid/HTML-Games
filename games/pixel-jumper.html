@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixel Jumper</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🍄 Pixel Jumper</h1>
+  <div class="stats">Level <b id="level">1</b> Coins <b id="coins">0</b> Lives <b id="lives">3</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="640" height="384"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="tL">◀</button><button id="tR">▶</button><button id="tJ">⤒</button></div>
+<p class="help">Run with <kbd>←</kbd><kbd>→</kbd>/<kbd>A</kbd><kbd>D</kbd>, jump with <kbd>Space</kbd>/<kbd>↑</kbd>/<kbd>W</kbd> (hold to jump higher). Stomp on enemies, avoid spikes, grab coins and reach the flag.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const T = 32, VW = cv.width, VH = cv.height, ROWS = 12;
+const GRAV = 2000, JUMP = 700, RUN = 230;
+// Levels are built from fill operations: [char, x0, x1, y0, y1]
+const LEVELS = [
+  { w: 90, start: [2, 9], flag: [86, 9], ops: [
+    ['#', 0, 22, 10, 11], ['#', 26, 39, 10, 11], ['#', 43, 55, 10, 11], ['#', 58, 64, 10, 11], ['#', 68, 89, 10, 11],
+    ['^', 32, 33, 9, 9],
+    ['B', 10, 14, 7, 7], ['o', 10, 14, 6, 6], ['o', 23, 25, 8, 8], ['o', 40, 42, 8, 8],
+    ['B', 45, 49, 7, 7], ['o', 45, 49, 6, 6], ['o', 59, 63, 9, 9],
+    ['B', 74, 74, 9, 9], ['B', 75, 75, 8, 9], ['B', 76, 76, 7, 9], ['o', 76, 76, 5, 6]
+  ], enemies: [[36, 9], [50, 9], [80, 9]] },
+  { w: 96, start: [2, 9], flag: [92, 9], ops: [
+    ['#', 0, 15, 10, 11], ['#', 19, 31, 10, 11], ['#', 35, 44, 10, 11], ['#', 48, 60, 10, 11], ['#', 64, 95, 10, 11],
+    ['^', 24, 25, 9, 9], ['^', 52, 53, 9, 9],
+    ['B', 8, 11, 7, 7], ['o', 8, 11, 6, 6], ['o', 32, 34, 8, 8],
+    ['o', 16, 18, 8, 8], ['o', 45, 47, 8, 8], ['o', 61, 63, 8, 8],
+    ['B', 66, 70, 7, 7], ['B', 72, 75, 5, 5], ['o', 72, 75, 4, 4], ['B', 78, 80, 7, 7], ['o', 78, 80, 6, 6],
+    ['B', 86, 87, 8, 9]
+  ], enemies: [[40, 9], [68, 6], [76, 9], [84, 9]] },
+  { w: 112, start: [2, 9], flag: [107, 9], ops: [
+    ['#', 0, 10, 10, 11], ['#', 14, 21, 10, 11], ['#', 25, 29, 10, 11], ['#', 33, 45, 10, 11], ['#', 49, 53, 10, 11],
+    ['#', 57, 76, 10, 11], ['#', 80, 111, 10, 11],
+    ['^', 38, 39, 9, 9], ['^', 62, 63, 9, 9], ['^', 90, 91, 9, 9],
+    ['o', 38, 39, 7, 7], ['o', 11, 13, 8, 8], ['o', 22, 24, 8, 8], ['o', 30, 32, 8, 8], ['o', 46, 48, 8, 8],
+    ['o', 54, 56, 8, 8], ['o', 77, 79, 8, 8], ['o', 62, 63, 7, 7], ['B', 73, 73, 9, 9],
+    ['o', 84, 87, 8, 8], ['o', 90, 91, 7, 7], ['o', 94, 97, 8, 8],
+    ['B', 99, 99, 9, 9], ['B', 100, 100, 8, 9]
+  ], enemies: [[17, 9], [70, 9], [86, 9], [96, 9]] }
+];
+let map, lw, me, foes, coins, totalCoins, lives, lvl, cam, state = 'ready', last = 0, keys = {}, coyote = 0, jumpBuf = 0, startTime, tick = 0;
+
+function hud() {
+  document.getElementById('level').textContent = lvl + 1;
+  document.getElementById('coins').textContent = totalCoins + coins;
+  document.getElementById('lives').textContent = lives;
+}
+
+function loadLevel(i) {
+  const L = LEVELS[i];
+  lw = L.w;
+  map = Array.from({ length: ROWS }, () => Array(lw).fill('.'));
+  for (const [ch, x0, x1, y0, y1] of L.ops) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) map[y][x] = ch;
+  me = { x: L.start[0] * T + 4, y: L.start[1] * T, w: 22, h: 30, vx: 0, vy: 0, face: 1, ground: false };
+  foes = L.enemies.map(([x, y]) => ({ x: x * T + 2, y: y * T + 8, w: 28, h: 24, vx: -60, dead: 0 }));
+  coins = 0;
+  cam = 0;
+  hud();
+}
+
+const solidCh = c => c === '#' || c === 'B';
+const tileAt = (tx, ty) => (tx < 0 || tx >= lw) ? '#' : (ty < 0 || ty >= ROWS) ? '.' : map[ty][tx];
+const solidAt = (px, py) => solidCh(tileAt(Math.floor(px / T), Math.floor(py / T)));
+
+function moveBody(b, dx, dy) {
+  b.x += dx;
+  if (dx !== 0) {
+    const edge = dx > 0 ? b.x + b.w : b.x;
+    for (const py of [b.y + 1, b.y + b.h / 2, b.y + b.h - 1]) {
+      if (solidAt(edge, py)) {
+        b.x = dx > 0 ? Math.floor(edge / T) * T - b.w - 0.01 : (Math.floor(edge / T) + 1) * T + 0.01;
+        b.hitWall = true;
+        break;
+      }
+    }
+  }
+  b.y += dy;
+  b.ground = false;
+  if (dy !== 0) {
+    const edge = dy > 0 ? b.y + b.h : b.y;
+    for (const px of [b.x + 2, b.x + b.w - 2]) {
+      if (solidAt(px, edge)) {
+        if (dy > 0) { b.y = Math.floor(edge / T) * T - b.h - 0.01; b.ground = true; }
+        else b.y = (Math.floor(edge / T) + 1) * T + 0.01;
+        b.vy = 0;
+        break;
+      }
+    }
+  }
+}
+
+function die() {
+  if (state !== 'play') return;
+  lives--;
+  Sound.beep(160, 0.4, 'sawtooth');
+  state = 'dead';
+  me.vy = -500;
+  hud();
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  tick += dt;
+  if (state === 'dead') {
+    me.vy += GRAV * s;
+    me.y += me.vy * s;
+    if (me.y > VH + 200) {
+      if (lives <= 0) {
+        state = 'over';
+        overlay(ov, `<h2>Game over</h2><p>You collected ${totalCoins} coins.</p><button class="btn" onclick="newGame()">Try again</button>`);
+      } else { loadLevel(lvl); state = 'play'; }
+    }
+    return;
+  }
+  const dir = (keys.ArrowRight || keys.d ? 1 : 0) - (keys.ArrowLeft || keys.a ? 1 : 0);
+  const accel = me.ground ? 1800 : 1100;
+  if (dir) { me.vx = clamp(me.vx + dir * accel * s, -RUN, RUN); me.face = dir; }
+  else { const fr = (me.ground ? 1600 : 400) * s; me.vx = Math.abs(me.vx) <= fr ? 0 : me.vx - Math.sign(me.vx) * fr; }
+  coyote = me.ground ? 0.09 : coyote - s;
+  jumpBuf -= s;
+  if (jumpBuf > 0 && coyote > 0) { me.vy = -JUMP; coyote = 0; jumpBuf = 0; Sound.beep(520, 0.06, 'triangle', 0.03); }
+  if (!(keys[' '] || keys.ArrowUp || keys.w || keys.jump) && me.vy < -300) me.vy = -300;
+  me.vy = Math.min(me.vy + GRAV * s, 900);
+  moveBody(me, me.vx * s, me.vy * s);
+  if (me.y > ROWS * T + 40) return die();
+  // tiles touched: coins, spikes
+  for (let ty = Math.floor(me.y / T); ty <= Math.floor((me.y + me.h) / T); ty++) for (let tx = Math.floor(me.x / T); tx <= Math.floor((me.x + me.w) / T); tx++) {
+    const c = tileAt(tx, ty);
+    if (c === 'o') { map[ty][tx] = '.'; coins++; Sound.beep(1300, 0.06, 'square', 0.03); hud(); }
+    if (c === '^' && me.y + me.h > ty * T + 14 && me.x + me.w > tx * T + 5 && me.x < tx * T + T - 5) return die();
+  }
+  // enemies
+  for (const f of foes) {
+    if (f.dead) { f.dead -= dt; continue; }
+    f.hitWall = false;
+    moveBody(f, f.vx * s, 0);
+    const aheadX = f.vx > 0 ? f.x + f.w + 2 : f.x - 2;
+    const blocked = f.hitWall || tileAt(Math.floor(aheadX / T), Math.floor((f.y + f.h / 2) / T)) === '^';
+    const noFloor = !solidAt(aheadX, f.y + f.h + 4);
+    if (blocked || noFloor) f.vx = -f.vx;
+    if (me.x < f.x + f.w && me.x + me.w > f.x && me.y < f.y + f.h && me.y + me.h > f.y) {
+      if (me.vy > 0 && me.y + me.h - f.y < 16) {
+        f.dead = 400;
+        f.squashed = true;
+        me.vy = -JUMP * 0.7;
+        coins += 2;
+        Sound.beep(300, 0.1, 'square', 0.04);
+        hud();
+      } else return die();
+    }
+  }
+  foes = foes.filter(f => !(f.squashed && f.dead <= 0));
+  // goal
+  const L = LEVELS[lvl];
+  if (me.x + me.w > L.flag[0] * T + 8) {
+    totalCoins += coins;
+    coins = 0;
+    Sound.beep(880, 0.3, 'triangle');
+    if (lvl + 1 < LEVELS.length) {
+      state = 'between';
+      overlay(ov, `<h2>Level ${lvl + 1} complete!</h2><p>Coins so far: ${totalCoins}</p><button class="btn" onclick="nextLevel()">Continue</button>`);
+    } else {
+      state = 'won';
+      const secs = Math.round((performance.now() - startTime) / 1000);
+      const bestT = recordBest('jumper-time', secs, true);
+      overlay(ov, `<h2>You beat every level! 🏁</h2><p>${totalCoins} coins · ${secs}s (best ${bestT}s)</p><button class="btn" onclick="newGame()">Play again</button>`);
+    }
+    hud();
+  }
+  cam = clamp(me.x - VW / 2 + me.w / 2, 0, lw * T - VW);
+}
+
+function nextLevel() { lvl++; loadLevel(lvl); state = 'play'; overlay(ov, null); }
+function newGame() { lvl = 0; lives = 3; totalCoins = 0; loadLevel(0); state = 'play'; startTime = performance.now(); overlay(ov, null); }
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, '#60a5fa'); g.addColorStop(1, '#bfdbfe');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, VW, VH);
+  // parallax hills
+  ctx.fillStyle = '#86efac';
+  for (let i = -1; i < 6; i++) {
+    const x = i * 220 - (cam * 0.3) % 220;
+    ctx.beginPath(); ctx.ellipse(x + 110, VH - 60, 140, 110, 0, Math.PI, 0); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  for (let i = -1; i < 5; i++) {
+    const x = i * 260 - (cam * 0.15) % 260;
+    ctx.beginPath(); ctx.arc(x + 60, 60, 20, 0, 7); ctx.arc(x + 85, 50, 26, 0, 7); ctx.arc(x + 112, 60, 20, 0, 7); ctx.fill();
+  }
+  if (!map) return;
+  const x0 = Math.floor(cam / T), x1 = Math.min(lw - 1, x0 + Math.ceil(VW / T) + 1);
+  for (let y = 0; y < ROWS; y++) for (let x = x0; x <= x1; x++) {
+    const c = map[y][x], px = Math.round(x * T - cam), py = y * T;
+    if (c === '#') {
+      ctx.fillStyle = '#92400e';
+      ctx.fillRect(px, py, T, T);
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(px + 6, py + 12, 4, 4); ctx.fillRect(px + 20, py + 22, 4, 4);
+      if (y === 0 || !solidCh(map[y - 1][x])) { ctx.fillStyle = '#16a34a'; ctx.fillRect(px, py, T, 8); }
+    } else if (c === 'B') {
+      ctx.fillStyle = '#ea580c';
+      ctx.fillRect(px, py, T, T);
+      ctx.strokeStyle = '#7c2d12';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(px + 1, py + 1, T - 2, T - 2);
+      ctx.beginPath(); ctx.moveTo(px, py + T / 2); ctx.lineTo(px + T, py + T / 2); ctx.moveTo(px + T / 2, py); ctx.lineTo(px + T / 2, py + T / 2); ctx.moveTo(px + T / 4, py + T / 2); ctx.lineTo(px + T / 4, py + T); ctx.stroke();
+    } else if (c === '^') {
+      ctx.fillStyle = '#9ca3af';
+      for (let k = 0; k < 3; k++) { ctx.beginPath(); ctx.moveTo(px + k * 11, py + T); ctx.lineTo(px + k * 11 + 5.5, py + 12); ctx.lineTo(px + k * 11 + 11, py + T); ctx.fill(); }
+    } else if (c === 'o') {
+      const sx = Math.abs(Math.cos(tick / 250 + x));
+      ctx.fillStyle = '#facc15';
+      ctx.beginPath(); ctx.ellipse(px + T / 2, py + T / 2, 9 * sx + 1, 11, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fde68a';
+      ctx.beginPath(); ctx.ellipse(px + T / 2, py + T / 2, 4 * sx, 6, 0, 0, 7); ctx.fill();
+    }
+  }
+  // flag
+  const L = LEVELS[lvl], fx = L.flag[0] * T - cam + T / 2, fy = (L.flag[1] + 1) * T;
+  ctx.fillStyle = '#e5e7eb';
+  ctx.fillRect(fx - 2, fy - 5 * T, 4, 5 * T);
+  ctx.fillStyle = '#ef4444';
+  ctx.beginPath(); ctx.moveTo(fx + 2, fy - 5 * T); ctx.lineTo(fx + 40, fy - 4.5 * T); ctx.lineTo(fx + 2, fy - 4 * T); ctx.fill();
+  // enemies
+  for (const f of foes) {
+    const px = f.x - cam, py = f.y;
+    ctx.fillStyle = '#7e22ce';
+    if (f.squashed) { ctx.fillRect(px, py + f.h - 8, f.w, 8); continue; }
+    ctx.beginPath(); ctx.roundRect(px, py, f.w, f.h, [12, 12, 4, 4]); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(px + 6, py + 6, 6, 7); ctx.fillRect(px + 16, py + 6, 6, 7);
+    ctx.fillStyle = '#000';
+    const lx = f.vx > 0 ? 2 : 0;
+    ctx.fillRect(px + 7 + lx, py + 8, 3, 4); ctx.fillRect(px + 17 + lx, py + 8, 3, 4);
+    ctx.fillStyle = '#581c87';
+    const step = Math.floor(tick / 150) % 2;
+    ctx.fillRect(px + 2, py + f.h - 4, 9, 4 + step * 2); ctx.fillRect(px + f.w - 11, py + f.h - 4, 9, 6 - step * 2);
+  }
+  // player
+  const px = me.x - cam, py = me.y;
+  ctx.fillStyle = '#dc2626';
+  ctx.fillRect(px + 2, py, me.w - 4, 8);
+  ctx.fillRect(me.face > 0 ? px + 8 : px - 2, py + 4, 16, 4);
+  ctx.fillStyle = '#fcd34d';
+  ctx.fillRect(px + 3, py + 8, me.w - 6, 9);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(me.face > 0 ? px + 13 : px + 6, py + 10, 3, 4);
+  ctx.fillStyle = '#2563eb';
+  ctx.fillRect(px + 2, py + 17, me.w - 4, 9);
+  ctx.fillStyle = '#7c2d12';
+  const run = me.ground && Math.abs(me.vx) > 20 ? Math.floor(tick / 90) % 2 : 0;
+  ctx.fillRect(px + 2, py + 26, 7, 4 - run * 2);
+  ctx.fillRect(px + me.w - 9, py + 26, 7, 2 + run * 2);
+}
+
+function loop(t) {
+  const dt = Math.min(33, t - last);
+  last = t;
+  if (state === 'play' || state === 'dead') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function pressJump() { jumpBuf = 0.12; }
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if ((e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w') && !e.repeat) {
+    if (state === 'ready' || state === 'over' || state === 'won') return newGame();
+    if (state === 'between') return nextLevel();
+    pressJump();
+  }
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+holdButton(document.getElementById('tL'), v => { keys.ArrowLeft = v; });
+holdButton(document.getElementById('tR'), v => { keys.ArrowRight = v; });
+holdButton(document.getElementById('tJ'), v => { keys.jump = v; if (v) pressJump(); });
+
+lvl = 0; lives = 3; totalCoins = 0;
+loadLevel(0);
+overlay(ov, '<h2>Pixel Jumper</h2><p>Three levels of running, jumping and stomping.</p><button class="btn" onclick="newGame()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

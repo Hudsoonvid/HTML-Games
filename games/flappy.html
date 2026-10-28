@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flappy</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐤 Flappy</h1>
+  <div class="stats">Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="380" height="580"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Click, tap, or press <kbd>Space</kbd> to flap. Fly through the gaps.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, GROUND = H - 70, GAP = 150, PIPE_W = 64, SPACING = 210;
+let bird, pipes, score, state = 'ready', last = 0, scroll = 0, deadT = 0;
+let best = Store.get('flappy-best', 0);
+document.getElementById('best').textContent = best;
+
+function reset() {
+  bird = { x: 100, y: H / 2 - 40, vy: 0, r: 14 };
+  pipes = [];
+  score = 0;
+  for (let i = 0; i < 3; i++) addPipe(W + 120 + i * SPACING);
+}
+
+function addPipe(x) {
+  pipes.push({ x, top: rand(70, GROUND - GAP - 60), passed: false });
+}
+
+function flap() {
+  if (state === 'ready') { state = 'play'; overlay(ov, null); }
+  if (state === 'play') { bird.vy = -7.6; Sound.beep(700, 0.04, 'triangle'); }
+  else if (state === 'over' && deadT <= 0) { reset(); state = 'ready'; overlay(ov, '<h2>Get ready</h2><p>Flap to start</p>'); }
+}
+
+function die() {
+  if (state !== 'play') return;
+  state = 'over';
+  deadT = 500;
+  Sound.beep(140, 0.3, 'sawtooth');
+  best = recordBest('flappy-best', score);
+  document.getElementById('best').textContent = best;
+  const medal = score >= 40 ? '🏆' : score >= 25 ? '🥇' : score >= 10 ? '🥈' : score >= 5 ? '🥉' : '';
+  overlay(ov, `<h2>${medal} Game over</h2><p>Score ${score} · Best ${best}</p><p>Flap to try again</p>`);
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  if (state === 'over') {
+    deadT -= dt;
+    if (bird.y < GROUND - bird.r) { bird.vy += 0.5 * f; bird.y = Math.min(GROUND - bird.r, bird.y + bird.vy * f); }
+    return;
+  }
+  scroll = (scroll + 2.6 * f) % 24;
+  if (state === 'ready') { bird.y = H / 2 - 40 + Math.sin(performance.now() / 250) * 8; return; }
+  bird.vy = Math.min(bird.vy + 0.42 * f, 11);
+  bird.y += bird.vy * f;
+  if (bird.y > GROUND - bird.r) { bird.y = GROUND - bird.r; die(); }
+  if (bird.y < -30) bird.y = -30;
+  for (const p of pipes) {
+    p.x -= 2.6 * f;
+    if (!p.passed && p.x + PIPE_W < bird.x) { p.passed = true; score++; Sound.beep(980, 0.05, 'triangle'); }
+    const inX = bird.x + bird.r - 3 > p.x && bird.x - bird.r + 3 < p.x + PIPE_W;
+    if (inX && (bird.y - bird.r + 3 < p.top || bird.y + bird.r - 3 > p.top + GAP)) die();
+  }
+  if (pipes[0].x < -PIPE_W) { pipes.shift(); addPipe(pipes[pipes.length - 1].x + SPACING); }
+}
+
+function drawPipe(x, y, h, flip) {
+  const g = ctx.createLinearGradient(x, 0, x + PIPE_W, 0);
+  g.addColorStop(0, '#16a34a'); g.addColorStop(0.5, '#4ade80'); g.addColorStop(1, '#15803d');
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, PIPE_W, h);
+  ctx.fillRect(x - 5, flip ? y + h - 24 : y, PIPE_W + 10, 24);
+  ctx.strokeStyle = '#14532d';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, PIPE_W, h);
+  ctx.strokeRect(x - 5, flip ? y + h - 24 : y, PIPE_W + 10, 24);
+}
+
+function draw() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#38bdf8'); sky.addColorStop(1, '#bae6fd');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,.8)';
+  [[60, 120], [250, 80], [180, 200]].forEach(([x, y]) => {
+    ctx.beginPath(); ctx.arc(x, y, 22, 0, 7); ctx.arc(x + 25, y - 8, 26, 0, 7); ctx.arc(x + 50, y, 20, 0, 7); ctx.fill();
+  });
+  for (const p of pipes) {
+    drawPipe(p.x, 0, p.top, true);
+    drawPipe(p.x, p.top + GAP, GROUND - p.top - GAP, false);
+  }
+  ctx.fillStyle = '#ddd29b';
+  ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = '#84cc16';
+  ctx.fillRect(0, GROUND, W, 14);
+  ctx.fillStyle = '#65a30d';
+  for (let x = -scroll; x < W; x += 24) ctx.fillRect(x, GROUND + 4, 12, 6);
+  // bird
+  ctx.save();
+  ctx.translate(bird.x, bird.y);
+  ctx.rotate(clamp(bird.vy / 10, -0.5, 1.2));
+  ctx.fillStyle = '#facc15';
+  ctx.beginPath(); ctx.ellipse(0, 0, bird.r + 3, bird.r, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fde68a';
+  const flapUp = Math.floor(performance.now() / 100) % 2 && state !== 'over';
+  ctx.beginPath(); ctx.ellipse(-6, flapUp ? -4 : 3, 8, 5, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(7, -5, 5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(8.5, -5, 2.2, 0, 7); ctx.fill();
+  ctx.fillStyle = '#f97316';
+  ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(22, 3); ctx.lineTo(12, 6); ctx.fill();
+  ctx.restore();
+  if (state === 'play' || state === 'over') {
+    ctx.fillStyle = '#fff';
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 4;
+    ctx.font = 'bold 48px system-ui';
+    ctx.textAlign = 'center';
+    ctx.strokeText(score, W / 2, 80);
+    ctx.fillText(score, W / 2, 80);
+  }
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w') flap(); });
+cv.addEventListener('pointerdown', e => { e.preventDefault(); flap(); });
+ov.addEventListener('pointerdown', e => { e.preventDefault(); flap(); });
+
+reset();
+overlay(ov, '<h2>Flappy</h2><p>Click, tap or press Space to flap</p>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

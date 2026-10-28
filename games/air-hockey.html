@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Air Hockey</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏒 Air Hockey</h1>
+  <div class="stats">You <b id="ps">0</b> CPU <b id="cs">0</b></div>
+</header>
+<div class="controls">
+  <select id="diff"><option value="0">Easy</option><option value="1" selected>Medium</option><option value="2">Hard</option></select>
+  <button class="btn" id="go">New match</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="680"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Move your mallet (bottom) with the mouse or a finger, or with <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd>. Hit the puck into the CPU's goal. First to 7 wins.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, PR = 16, MR = 26, GOAL = 140, WIN = 7;
+const DIFF = [{ speed: 4.5, aggro: 0.6 }, { speed: 7, aggro: 0.85 }, { speed: 10, aggro: 1 }];
+let puck, me, cpu, ps, cs, state = 'ready', last = 0, target = null, keys = {}, pauseT = 0;
+
+function resetPuck(towards) {
+  puck = { x: W / 2, y: towards > 0 ? H / 2 + 60 : H / 2 - 60, vx: 0, vy: 0 };
+  pauseT = 600;
+}
+
+function newMatch() {
+  me = { x: W / 2, y: H - 80, vx: 0, vy: 0 };
+  cpu = { x: W / 2, y: 80, vx: 0, vy: 0 };
+  ps = cs = 0;
+  target = { x: me.x, y: me.y };
+  resetPuck(Math.random() < 0.5 ? 1 : -1);
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('ps').textContent = ps;
+  document.getElementById('cs').textContent = cs;
+}
+
+function collide(m) {
+  const dx = puck.x - m.x, dy = puck.y - m.y, d = Math.hypot(dx, dy);
+  if (d === 0 || d >= PR + MR) return;
+  const nx = dx / d, ny = dy / d;
+  puck.x = m.x + nx * (PR + MR);
+  puck.y = m.y + ny * (PR + MR);
+  const rvx = puck.vx - m.vx, rvy = puck.vy - m.vy, dot = rvx * nx + rvy * ny;
+  if (dot < 0) {
+    puck.vx -= 1.9 * dot * nx;
+    puck.vy -= 1.9 * dot * ny;
+    Sound.beep(300 + Math.random() * 100, 0.03, 'square', 0.03);
+  }
+}
+
+function moveMallet(m, tx, ty, maxSp, f, minY, maxY) {
+  tx = clamp(tx, MR, W - MR);
+  ty = clamp(ty, minY, maxY);
+  let dx = tx - m.x, dy = ty - m.y;
+  const d = Math.hypot(dx, dy), lim = maxSp * f;
+  if (d > lim) { dx *= lim / d; dy *= lim / d; }
+  m.vx = dx / f;
+  m.vy = dy / f;
+  m.x += dx;
+  m.y += dy;
+}
+
+function update(dt) {
+  const f = Math.max(dt / 16.67, 0.01);
+  // player
+  if (keys.ArrowLeft || keys.ArrowRight || keys.ArrowUp || keys.ArrowDown) {
+    target.x = me.x + ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) * 12;
+    target.y = me.y + ((keys.ArrowDown ? 1 : 0) - (keys.ArrowUp ? 1 : 0)) * 12;
+  }
+  moveMallet(me, target.x, target.y, 22, f, H / 2 + MR, H - MR);
+  // cpu
+  const d = DIFF[+document.getElementById('diff').value];
+  let tx, ty;
+  if (puck.y < H / 2 + 40 && (puck.vy < 2 || puck.y < cpu.y + 40)) {
+    if (puck.y < cpu.y) { tx = puck.x + (puck.x < W / 2 ? 30 : -30); ty = puck.y - 40; }
+    else { tx = puck.x + (W / 2 - puck.x) * 0.1; ty = puck.y - MR * d.aggro; }
+  } else {
+    tx = W / 2 + (puck.x - W / 2) * 0.6;
+    ty = 70;
+  }
+  moveMallet(cpu, tx, ty, d.speed, f, MR, H / 2 - MR);
+  if (pauseT > 0) { pauseT -= dt; return; }
+  // puck
+  const steps = 4;
+  for (let i = 0; i < steps; i++) {
+    puck.x += puck.vx * f / steps;
+    puck.y += puck.vy * f / steps;
+    if (puck.x < PR) { puck.x = PR; puck.vx = Math.abs(puck.vx) * 0.9; }
+    if (puck.x > W - PR) { puck.x = W - PR; puck.vx = -Math.abs(puck.vx) * 0.9; }
+    const inGoal = Math.abs(puck.x - W / 2) < GOAL / 2 - PR / 2;
+    if (!inGoal) {
+      if (puck.y < PR) { puck.y = PR; puck.vy = Math.abs(puck.vy) * 0.9; }
+      if (puck.y > H - PR) { puck.y = H - PR; puck.vy = -Math.abs(puck.vy) * 0.9; }
+    }
+    collide(me);
+    collide(cpu);
+  }
+  puck.vx *= Math.pow(0.996, f);
+  puck.vy *= Math.pow(0.996, f);
+  const sp = Math.hypot(puck.vx, puck.vy);
+  if (sp > 20) { puck.vx *= 20 / sp; puck.vy *= 20 / sp; }
+  if (puck.y < -PR) goal(true);
+  else if (puck.y > H + PR) goal(false);
+}
+
+function goal(mine) {
+  if (mine) ps++; else cs++;
+  Sound.beep(mine ? 880 : 220, 0.3, 'triangle');
+  hud();
+  if (ps >= WIN || cs >= WIN) {
+    state = 'over';
+    overlay(ov, `<h2>${ps > cs ? 'You win! 🏆' : 'CPU wins'}</h2><p>${ps} – ${cs}</p><button class="btn" onclick="newMatch()">Play again</button>`);
+  }
+  resetPuck(mine ? -1 : 1);
+}
+
+function mallet(m, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(m.x, m.y, MR, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.beginPath(); ctx.arc(m.x, m.y, MR * 0.6, 0, 7); ctx.fill();
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(m.x, m.y, MR * 0.4, 0, 7); ctx.fill();
+}
+
+function draw() {
+  ctx.fillStyle = '#e0f2fe';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#fca5a5';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(W / 2, H / 2, 60, 0, 7); ctx.stroke();
+  ctx.strokeStyle = '#93c5fd';
+  ctx.beginPath(); ctx.arc(W / 2, 0, 90, 0, Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.arc(W / 2, H, 90, Math.PI, 0); ctx.stroke();
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(W / 2 - GOAL / 2, 0, GOAL, 6);
+  ctx.fillRect(W / 2 - GOAL / 2, H - 6, GOAL, 6);
+  ctx.strokeStyle = '#334155';
+  ctx.lineWidth = 8;
+  ctx.strokeRect(0, 0, W, H);
+  if (!puck) return;
+  mallet(cpu, '#ef4444');
+  mallet(me, '#2563eb');
+  ctx.fillStyle = '#111827';
+  ctx.beginPath(); ctx.arc(puck.x, puck.y, PR, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#4b5563';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(puck.x, puck.y, PR - 4, 0, 7); ctx.stroke();
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+const aim = e => { if (state === 'play') target = canvasPoint(cv, e); };
+cv.addEventListener('pointermove', aim);
+cv.addEventListener('pointerdown', aim);
+document.addEventListener('keydown', e => { keys[e.key] = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') newMatch(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+document.getElementById('go').onclick = newMatch;
+
+overlay(ov, '<h2>Air Hockey</h2><p>You are blue (bottom). First to 7.</p><button class="btn" onclick="newMatch()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

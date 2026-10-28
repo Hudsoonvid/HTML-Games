@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flood It</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .palette { display: flex; gap: 10px; margin: 12px 0; flex-wrap: wrap; justify-content: center; }
+  .palette button { width: 52px; height: 52px; border-radius: 50%; border: 3px solid rgba(255,255,255,.2); cursor: pointer; }
+  .palette button:hover { transform: scale(1.08); }
+  .palette button.cur { border-color: #fff; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🌊 Flood It</h1>
+  <div class="stats">Moves <b id="moves">0</b> / <b id="max">25</b> Wins <b id="wins">0</b></div>
+</header>
+<div class="controls">
+  <select id="size"><option value="10">Small 10×10 (17 moves)</option><option value="14" selected>Medium 14×14 (25 moves)</option><option value="18">Large 18×18 (32 moves)</option></select>
+  <button class="btn" id="new">New board</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="504" height="504"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<div class="palette" id="pal"></div>
+<p class="help">Pick a colour to flood the area connected to the top-left corner. Fill the whole board with one colour before you run out of moves. Keys <kbd>1</kbd>–<kbd>6</kbd> work too, or click a cell of the colour you want.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const COLORS = ['#ef4444', '#f59e0b', '#facc15', '#22c55e', '#3b82f6', '#a855f7'];
+const MAX = { 10: 17, 14: 25, 18: 32 };
+let N, grid, moves, maxMoves, flooded, over;
+let wins = Store.get('flood-wins', 0);
+
+const pal = document.getElementById('pal');
+COLORS.forEach((c, i) => {
+  const b = document.createElement('button');
+  b.style.background = c;
+  b.title = 'Colour ' + (i + 1);
+  b.onclick = () => play(i);
+  pal.appendChild(b);
+});
+
+function newGame() {
+  N = +document.getElementById('size').value;
+  maxMoves = MAX[N];
+  grid = Array.from({ length: N * N }, () => randInt(0, COLORS.length - 1));
+  moves = 0;
+  over = false;
+  computeFlood();
+  overlay(ov, null);
+  render();
+}
+
+function computeFlood() {
+  const c = grid[0];
+  flooded = new Set([0]);
+  const q = [0];
+  while (q.length) {
+    const k = q.pop(), x = k % N, y = Math.floor(k / N);
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy, nk = ny * N + nx;
+      if (nx >= 0 && ny >= 0 && nx < N && ny < N && !flooded.has(nk) && grid[nk] === c) { flooded.add(nk); q.push(nk); }
+    }
+  }
+}
+
+function play(color) {
+  if (over || color === grid[0]) return;
+  flooded.forEach(k => { grid[k] = color; });
+  moves++;
+  computeFlood();
+  Sound.beep(300 + color * 80, 0.05, 'triangle', 0.04);
+  render();
+  if (flooded.size === N * N) {
+    over = true;
+    wins++;
+    Store.set('flood-wins', wins);
+    render();
+    overlay(ov, `<h2>Flooded! 🌊</h2><p>Done in ${moves} of ${maxMoves} moves</p><button class="btn" onclick="newGame()">Next board</button>`);
+  } else if (moves >= maxMoves) {
+    over = true;
+    overlay(ov, `<h2>Out of moves</h2><p>${Math.round(flooded.size / (N * N) * 100)}% flooded</p><button class="btn" onclick="newGame()">Try again</button>`);
+  }
+}
+
+function render() {
+  const s = cv.width / N;
+  for (let k = 0; k < N * N; k++) {
+    ctx.fillStyle = COLORS[grid[k]];
+    ctx.fillRect((k % N) * s, Math.floor(k / N) * s, s + 0.5, s + 0.5);
+  }
+  // outline the flooded region so progress is easy to see
+  ctx.strokeStyle = 'rgba(255,255,255,.85)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  flooded.forEach(k => {
+    const x = k % N, y = Math.floor(k / N);
+    if (y === 0 || !flooded.has(k - N)) { ctx.moveTo(x * s, y * s); ctx.lineTo(x * s + s, y * s); }
+    if (y === N - 1 || !flooded.has(k + N)) { ctx.moveTo(x * s, y * s + s); ctx.lineTo(x * s + s, y * s + s); }
+    if (x === 0 || !flooded.has(k - 1)) { ctx.moveTo(x * s, y * s); ctx.lineTo(x * s, y * s + s); }
+    if (x === N - 1 || !flooded.has(k + 1)) { ctx.moveTo(x * s + s, y * s); ctx.lineTo(x * s + s, y * s + s); }
+  });
+  ctx.stroke();
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('max').textContent = maxMoves;
+  document.getElementById('wins').textContent = wins;
+  [...pal.children].forEach((b, i) => b.classList.toggle('cur', i === grid[0]));
+}
+
+cv.addEventListener('pointerdown', e => {
+  const p = canvasPoint(cv, e), s = cv.width / N;
+  const k = Math.floor(p.y / s) * N + Math.floor(p.x / s);
+  if (grid[k] != null) play(grid[k]);
+});
+document.addEventListener('keydown', e => { const i = +e.key - 1; if (i >= 0 && i < COLORS.length) play(i); });
+document.getElementById('new').onclick = newGame;
+document.getElementById('size').onchange = newGame;
+newGame();
+</script>
+</body>
+</html>

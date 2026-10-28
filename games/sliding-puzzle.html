@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sliding Puzzle</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #board {
+    --size: min(440px, calc(100vw - 24px));
+    width: var(--size); height: var(--size); position: relative; background: #11132a; border-radius: 12px; border: 2px solid var(--line);
+    user-select: none; -webkit-user-select: none; touch-action: manipulation;
+  }
+  .t {
+    position: absolute; width: calc(var(--size) / var(--n) - 6px); height: calc(var(--size) / var(--n) - 6px);
+    left: 3px; top: 3px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: calc(var(--size) / var(--n) * .38); color: #fff; cursor: pointer;
+    transform: translate(calc(var(--c) * var(--size) / var(--n)), calc(var(--r) * var(--size) / var(--n)));
+    transition: transform .12s ease-out; box-shadow: inset 0 -4px 0 rgba(0,0,0,.25);
+  }
+  .t.home { outline: 2px solid rgba(255,255,255,.35); outline-offset: -4px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🧩 Sliding Puzzle</h1>
+  <div class="stats">Moves <b id="moves">0</b> Time <b id="time">0</b>s Best <b id="best">—</b></div>
+</header>
+<div class="controls">
+  <select id="size"><option value="3">3 × 3 (8-puzzle)</option><option value="4" selected>4 × 4 (15-puzzle)</option><option value="5">5 × 5 (24-puzzle)</option></select>
+  <button class="btn" id="shuffle">Shuffle</button>
+</div>
+<div class="stage">
+  <div id="board"></div>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Click a tile in the same row or column as the gap to slide it (and any tiles between). Arrow keys slide the tile next to the gap. Put the numbers in order with the gap in the bottom-right corner.</p>
+<script src="shared.js"></script>
+<script>
+const boardEl = document.getElementById('board'), ov = document.getElementById('ov');
+let n, cells, els, moves, t0, timerId, solved, started;
+
+const bestKey = () => 'slide-best-' + n;
+function showBest() { const b = Store.get(bestKey(), null); document.getElementById('best').textContent = b ?? '—'; }
+
+function setup() {
+  n = +document.getElementById('size').value;
+  boardEl.style.setProperty('--n', n);
+  boardEl.innerHTML = '';
+  els = [];
+  for (let v = 1; v < n * n; v++) {
+    const el = document.createElement('div');
+    el.className = 't';
+    el.textContent = v;
+    const hue = 250 + ((v - 1) / (n * n - 1)) * 120;
+    el.style.background = `linear-gradient(135deg, hsl(${hue % 360},70%,60%), hsl(${(hue + 30) % 360},70%,45%))`;
+    el.addEventListener('pointerdown', e => { e.preventDefault(); clickTile(v); });
+    boardEl.appendChild(el);
+    els[v] = el;
+  }
+  cells = [...Array(n * n - 1).keys()].map(i => i + 1).concat(0);
+  // shuffle with random legal moves so the puzzle is always solvable
+  let blank = n * n - 1, prev = -1;
+  for (let k = 0; k < n * n * 40; k++) {
+    const opts = neighbors(blank).filter(i => i !== prev);
+    const i = pick(opts);
+    [cells[blank], cells[i]] = [cells[i], cells[blank]];
+    prev = blank;
+    blank = i;
+  }
+  if (isSolved()) return setup();
+  moves = 0; solved = false; started = false;
+  clearInterval(timerId);
+  document.getElementById('time').textContent = 0;
+  overlay(ov, null);
+  showBest();
+  render();
+}
+
+function neighbors(i) {
+  const r = Math.floor(i / n), c = i % n, out = [];
+  if (r > 0) out.push(i - n);
+  if (r < n - 1) out.push(i + n);
+  if (c > 0) out.push(i - 1);
+  if (c < n - 1) out.push(i + 1);
+  return out;
+}
+
+const isSolved = () => cells.every((v, i) => (i === n * n - 1 ? v === 0 : v === i + 1));
+
+function render() {
+  cells.forEach((v, i) => {
+    if (!v) return;
+    els[v].style.setProperty('--r', Math.floor(i / n));
+    els[v].style.setProperty('--c', i % n);
+    els[v].classList.toggle('home', v === i + 1);
+  });
+  document.getElementById('moves').textContent = moves;
+}
+
+function slideFrom(i) {
+  if (solved) return;
+  const blank = cells.indexOf(0);
+  const br = Math.floor(blank / n), bc = blank % n, r = Math.floor(i / n), c = i % n;
+  if (r !== br && c !== bc) return;
+  if (i === blank) return;
+  const step = r === br ? (c < bc ? -1 : 1) : (r < br ? -n : n);
+  // move each tile between the clicked tile and the gap one step toward the gap
+  for (let p = blank; p !== i; p += step) {
+    cells[p] = cells[p + step];
+    cells[p + step] = 0;
+    moves++;
+  }
+  if (!started) {
+    started = true;
+    t0 = Date.now();
+    timerId = setInterval(() => { document.getElementById('time').textContent = Math.floor((Date.now() - t0) / 1000); }, 500);
+  }
+  Sound.beep(420, 0.03, 'triangle', 0.03);
+  render();
+  if (isSolved()) {
+    solved = true;
+    clearInterval(timerId);
+    const secs = Math.floor((Date.now() - t0) / 1000);
+    const best = recordBest(bestKey(), moves, true);
+    showBest();
+    Sound.beep(880, 0.3, 'triangle');
+    setTimeout(() => overlay(ov, `<h2>Solved! 🎉</h2><p>${moves} moves in ${secs}s · Best ${best} moves</p><button class="btn" onclick="setup()">Play again</button>`), 250);
+  }
+}
+
+function clickTile(v) { slideFrom(cells.indexOf(v)); }
+
+document.addEventListener('keydown', e => {
+  const blank = cells.indexOf(0), r = Math.floor(blank / n), c = blank % n;
+  // arrow = direction the tile moves, so the source tile is on the opposite side of the gap
+  if (e.key === 'ArrowLeft' && c < n - 1) slideFrom(blank + 1);
+  if (e.key === 'ArrowRight' && c > 0) slideFrom(blank - 1);
+  if (e.key === 'ArrowUp' && r < n - 1) slideFrom(blank + n);
+  if (e.key === 'ArrowDown' && r > 0) slideFrom(blank - n);
+});
+document.getElementById('shuffle').onclick = setup;
+document.getElementById('size').onchange = setup;
+setup();
+</script>
+</body>
+</html>

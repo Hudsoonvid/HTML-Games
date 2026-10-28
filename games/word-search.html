@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Word Search</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .wrap { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+  #list { display: grid; grid-template-columns: repeat(2, auto); gap: 6px 18px; font-weight: 700; letter-spacing: 1px; align-content: start; padding: 12px 16px; }
+  #list span.found { text-decoration: line-through; color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔍 Word Search</h1>
+  <div class="stats">Found <b id="found">0</b> Time <b id="time">0</b>s</div>
+</header>
+<div class="controls">
+  <select id="theme"></select>
+  <select id="diff"><option value="easy">Easy (→ ↓ only)</option><option value="hard" selected>Hard (all 8 directions)</option></select>
+  <button class="btn" id="new">New puzzle</button>
+</div>
+<div class="wrap">
+  <div class="stage">
+    <canvas id="c" class="game" width="480" height="480"></canvas>
+    <div class="overlay hidden" id="ov"></div>
+  </div>
+  <div class="panel" id="list"></div>
+</div>
+<p class="help">Drag across the letters (in a straight line) to select a word. Words can run forwards, backwards, up, down or diagonally on Hard.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const N = 12, S = cv.width / N;
+const THEMES = {
+  Fruit: 'APPLE BANANA CHERRY GRAPE LEMON MANGO ORANGE PAPAYA PEACH PEAR PLUM KIWI MELON LIME APRICOT COCONUT',
+  Animals: 'TIGER ZEBRA HORSE MONKEY RABBIT OTTER PANDA EAGLE SHARK WHALE LIZARD BEAVER KOALA FALCON BADGER',
+  Ocean: 'CORAL WAVE SHELL SQUID OYSTER TIDE REEF CRAB ANCHOR SAILOR DOLPHIN SEAWEED HARBOR LAGOON',
+  Space: 'PLANET COMET ORBIT ROCKET MOON STAR GALAXY METEOR SATURN MARS COSMOS NEBULA PULSAR LUNAR',
+  Weather: 'RAIN SNOW STORM CLOUD THUNDER SUNNY WINDY FOG HAIL FROST BREEZE DRIZZLE MONSOON TORNADO',
+  Music: 'GUITAR PIANO DRUMS VIOLIN FLUTE TRUMPET MELODY RHYTHM CHORD TEMPO HARP CELLO BANJO OPERA',
+  Kitchen: 'SPOON FORK KNIFE PLATE BOWL OVEN TOASTER KETTLE BLENDER LADLE WHISK SKILLET GRATER APRON'
+};
+const COLORS = ['#f472b6', '#22d3ee', '#a3e635', '#facc15', '#fb923c', '#a78bfa', '#4ade80', '#f87171', '#60a5fa', '#e879f9'];
+let grid, words, placed, found, sel = null, t0, timerId, done;
+
+const themeEl = document.getElementById('theme');
+['Mixed', ...Object.keys(THEMES)].forEach(t => themeEl.insertAdjacentHTML('beforeend', `<option>${t}</option>`));
+
+function newGame() {
+  const theme = themeEl.value;
+  const pool = theme === 'Mixed' ? Object.values(THEMES).join(' ').split(' ') : THEMES[theme].split(' ');
+  const dirs = document.getElementById('diff').value === 'easy' ? [[1, 0], [0, 1]] : [[1, 0], [0, 1], [1, 1], [-1, 1], [-1, 0], [0, -1], [-1, -1], [1, -1]];
+  grid = Array.from({ length: N }, () => Array(N).fill(''));
+  placed = [];
+  for (const w of shuffle(pool.filter(w => w.length <= N))) {
+    if (placed.length >= 10) break;
+    for (let tries = 0; tries < 300; tries++) {
+      const [dx, dy] = pick(dirs), x = randInt(0, N - 1), y = randInt(0, N - 1);
+      const ex = x + dx * (w.length - 1), ey = y + dy * (w.length - 1);
+      if (ex < 0 || ey < 0 || ex >= N || ey >= N) continue;
+      let ok = true;
+      for (let i = 0; i < w.length && ok; i++) { const c = grid[y + dy * i][x + dx * i]; if (c && c !== w[i]) ok = false; }
+      if (!ok) continue;
+      for (let i = 0; i < w.length; i++) grid[y + dy * i][x + dx * i] = w[i];
+      placed.push({ w, x, y, ex, ey });
+      break;
+    }
+  }
+  const letters = 'EEEAAAIIOOTTNNSSRRLLDDUCMPHGBYFWKV';
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (!grid[y][x]) grid[y][x] = pick([...letters]);
+  words = placed.map(p => p.w).sort();
+  found = [];
+  done = false;
+  clearInterval(timerId);
+  t0 = Date.now();
+  timerId = setInterval(() => { document.getElementById('time').textContent = Math.floor((Date.now() - t0) / 1000); }, 500);
+  overlay(ov, null);
+  render();
+}
+
+function capsule(x1, y1, x2, y2, color, alpha) {
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = S * 0.78;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo((x1 + 0.5) * S, (y1 + 0.5) * S);
+  ctx.lineTo((x2 + 0.5) * S, (y2 + 0.5) * S);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function render() {
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  found.forEach((f, i) => capsule(f.x, f.y, f.ex, f.ey, COLORS[i % COLORS.length], 0.55));
+  if (sel) capsule(sel.x, sel.y, sel.ex, sel.ey, '#8b5cf6', 0.4);
+  ctx.fillStyle = '#1e1b4b';
+  ctx.font = `bold ${S * 0.5}px system-ui`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) ctx.fillText(grid[y][x], (x + 0.5) * S, (y + 0.5) * S + 1);
+  document.getElementById('list').innerHTML = words.map(w => `<span class="${found.some(f => f.w === w) ? 'found' : ''}">${w}</span>`).join('');
+  document.getElementById('found').textContent = `${found.length}/${words.length}`;
+}
+
+const cellOf = e => { const p = canvasPoint(cv, e); return [clamp(Math.floor(p.x / S), 0, N - 1), clamp(Math.floor(p.y / S), 0, N - 1)]; };
+
+cv.addEventListener('pointerdown', e => {
+  if (done) return;
+  e.preventDefault();
+  cv.setPointerCapture(e.pointerId);
+  const [x, y] = cellOf(e);
+  sel = { x, y, ex: x, ey: y };
+  render();
+});
+cv.addEventListener('pointermove', e => {
+  if (!sel) return;
+  const [cx, cy] = cellOf(e);
+  let dx = cx - sel.x, dy = cy - sel.y;
+  // snap to the nearest of the 8 directions
+  const len = Math.max(Math.abs(dx), Math.abs(dy));
+  if (len) {
+    const a = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+    dx = Math.round(Math.cos(a)); dy = Math.round(Math.sin(a));
+    let ex = sel.x + dx * len, ey = sel.y + dy * len;
+    while (ex < 0 || ey < 0 || ex >= N || ey >= N) { ex -= dx; ey -= dy; }
+    sel.ex = ex; sel.ey = ey;
+  } else { sel.ex = sel.x; sel.ey = sel.y; }
+  render();
+});
+cv.addEventListener('pointerup', () => {
+  if (!sel) return;
+  const dx = Math.sign(sel.ex - sel.x), dy = Math.sign(sel.ey - sel.y), len = Math.max(Math.abs(sel.ex - sel.x), Math.abs(sel.ey - sel.y)) + 1;
+  let s = '';
+  for (let i = 0; i < len; i++) s += grid[sel.y + dy * i][sel.x + dx * i];
+  const rev = [...s].reverse().join('');
+  const w = words.find(w => (w === s || w === rev) && !found.some(f => f.w === w));
+  if (w) {
+    found.push({ w, x: sel.x, y: sel.y, ex: sel.ex, ey: sel.ey });
+    Sound.beep(700 + found.length * 40, 0.1, 'triangle');
+  }
+  sel = null;
+  render();
+  if (found.length === words.length) {
+    done = true;
+    clearInterval(timerId);
+    const secs = Math.floor((Date.now() - t0) / 1000);
+    const best = recordBest('wordsearch-best', secs, true);
+    setTimeout(() => overlay(ov, `<h2>All words found! 🎉</h2><p>${secs}s · Best ${best}s</p><button class="btn" onclick="newGame()">New puzzle</button>`), 300);
+  }
+});
+
+document.getElementById('new').onclick = newGame;
+themeEl.onchange = newGame;
+document.getElementById('diff').onchange = newGame;
+newGame();
+</script>
+</body>
+</html>

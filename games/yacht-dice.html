@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yacht Dice</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .wrap { display: flex; gap: 22px; flex-wrap: wrap; justify-content: center; align-items: flex-start; width: min(860px, calc(100vw - 16px)); }
+  .left { display: flex; flex-direction: column; align-items: center; gap: 12px; flex: 1 1 320px; }
+  #dice { display: flex; gap: 10px; }
+  .die { width: 62px; height: 62px; border-radius: 12px; background: #f8fafc; border: 0; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 1fr); padding: 8px; cursor: pointer; box-shadow: 0 4px 0 #94a3b8; }
+  .die i { width: 10px; height: 10px; border-radius: 50%; background: #111827; margin: auto; visibility: hidden; }
+  .die i.on { visibility: visible; }
+  .die.held { background: #fde68a; box-shadow: 0 4px 0 #ca8a04; transform: translateY(-6px); }
+  .die.roll { animation: roll .4s ease-out; }
+  @keyframes roll { 30% { transform: rotate(-25deg) scale(.9); } 60% { transform: rotate(18deg); } }
+  table { border-collapse: collapse; min-width: 300px; flex: 1 1 300px; }
+  td { padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; width: 70px; font-variant-numeric: tabular-nums; }
+  tr.cat { cursor: pointer; }
+  tr.cat:hover td { background: var(--panel-2); }
+  tr.cat.used { cursor: default; }
+  tr.cat.used td:last-child { color: var(--fg); font-weight: 800; }
+  tr.cat:not(.used) td:last-child { color: #86efac; }
+  tr.cat:not(.used) td:last-child.zero { color: var(--muted); }
+  tr.sum td { color: var(--muted); font-size: 13px; }
+  tr.total td { font-weight: 800; font-size: 18px; border-top: 2px solid var(--accent); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🎲 Yacht Dice</h1>
+  <div class="stats">Round <b id="round">1</b>/13 Best <b id="best">0</b></div>
+</header>
+<div class="wrap">
+  <div class="left">
+    <div id="dice"></div>
+    <button class="btn" id="roll">Roll (3 left)</button>
+    <div class="msg" id="msg">Roll the dice to begin!</div>
+    <button class="btn alt" id="new">New game</button>
+  </div>
+  <table id="card"></table>
+</div>
+<p class="help">Roll up to three times per turn — click dice to hold them between rolls. Then pick a box on the scorecard to score. Every box must be filled once (score 0 if it doesn't fit). An upper-section total of 63+ earns a 35-point bonus. <kbd>Space</kbd> rolls, <kbd>1</kbd>–<kbd>5</kbd> toggle holds.</p>
+<script src="shared.js"></script>
+<script>
+const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
+const counts = d => { const c = Array(7).fill(0); d.forEach(v => c[v]++); return c; };
+const sum = d => d.reduce((a, b) => a + b, 0);
+const hasRun = (d, n) => { const s = new Set(d); for (let a = 1; a + n - 1 <= 6; a++) { let ok = true; for (let k = 0; k < n; k++) if (!s.has(a + k)) ok = false; if (ok) return true; } return false; };
+const CATS = [
+  ['ones', 'Ones', d => counts(d)[1] * 1], ['twos', 'Twos', d => counts(d)[2] * 2], ['threes', 'Threes', d => counts(d)[3] * 3],
+  ['fours', 'Fours', d => counts(d)[4] * 4], ['fives', 'Fives', d => counts(d)[5] * 5], ['sixes', 'Sixes', d => counts(d)[6] * 6],
+  ['three', 'Three of a kind', d => (counts(d).some(c => c >= 3) ? sum(d) : 0)],
+  ['four', 'Four of a kind', d => (counts(d).some(c => c >= 4) ? sum(d) : 0)],
+  ['full', 'Full house', d => { const c = counts(d).filter(Boolean).sort(); return c.length === 2 && c[0] === 2 ? 25 : 0; }],
+  ['small', 'Small straight', d => (hasRun(d, 4) ? 30 : 0)],
+  ['large', 'Large straight', d => (hasRun(d, 5) ? 40 : 0)],
+  ['yacht', 'Yacht (5 of a kind)', d => (counts(d).some(c => c === 5) ? 50 : 0)],
+  ['chance', 'Chance', d => sum(d)]
+];
+let dice, held, rollsLeft, scores, round, over;
+let best = Store.get('yacht-best', 0);
+
+const diceEl = document.getElementById('dice');
+for (let i = 0; i < 5; i++) {
+  const b = document.createElement('button');
+  b.className = 'die';
+  b.innerHTML = '<i></i>'.repeat(9);
+  b.onclick = () => toggle(i);
+  diceEl.appendChild(b);
+}
+
+function newGame() {
+  dice = [1, 2, 3, 4, 5]; held = Array(5).fill(false); rollsLeft = 3; scores = {}; round = 1; over = false;
+  document.getElementById('msg').textContent = 'Roll the dice to begin!';
+  render();
+}
+
+function toggle(i) {
+  if (rollsLeft === 3 || rollsLeft === 0 || over) return;
+  held[i] = !held[i];
+  render();
+}
+
+function roll() {
+  if (rollsLeft === 0 || over) return;
+  dice = dice.map((v, i) => (held[i] ? v : randInt(1, 6)));
+  rollsLeft--;
+  [...diceEl.children].forEach((el, i) => { if (!held[i]) { el.classList.remove('roll'); void el.offsetWidth; el.classList.add('roll'); } });
+  Sound.beep(300, 0.05, 'square', 0.03);
+  document.getElementById('msg').textContent = rollsLeft ? 'Hold dice and roll again, or choose a box.' : 'Choose a box to score.';
+  if (counts(dice).some(c => c === 5)) { document.getElementById('msg').textContent = '🎉 YACHT! 🎉'; Sound.beep(1200, 0.3, 'triangle'); }
+  render();
+}
+
+function upperTotal() { return CATS.slice(0, 6).reduce((a, [k]) => a + (scores[k] || 0), 0); }
+function grandTotal() { const up = upperTotal(); return up + (up >= 63 ? 35 : 0) + CATS.slice(6).reduce((a, [k]) => a + (scores[k] || 0), 0); }
+
+function choose(key, fn) {
+  if (over || rollsLeft === 3 || scores[key] != null) return;
+  scores[key] = fn(dice);
+  Sound.beep(660, 0.08, 'triangle');
+  if (round === 13) {
+    over = true;
+    const t = grandTotal();
+    best = recordBest('yacht-best', t);
+    document.getElementById('msg').textContent = `Game over! Final score ${t}${t >= best ? ' — new best! 🏆' : ''}`;
+  } else {
+    round++;
+    rollsLeft = 3;
+    held = Array(5).fill(false);
+    document.getElementById('msg').textContent = 'Roll for the next round.';
+  }
+  render();
+}
+
+function render() {
+  [...diceEl.children].forEach((el, i) => {
+    el.classList.toggle('held', held[i]);
+    [...el.children].forEach((p, k) => p.classList.toggle('on', PIPS[dice[i]].includes(k) && rollsLeft < 3));
+  });
+  const btn = document.getElementById('roll');
+  btn.textContent = `Roll (${rollsLeft} left)`;
+  btn.disabled = rollsLeft === 0 || over;
+  const card = document.getElementById('card');
+  card.innerHTML = '';
+  const row = (cls, label, val, extra = '') => { const tr = document.createElement('tr'); tr.className = cls; tr.innerHTML = `<td>${label}</td><td class="${extra}">${val}</td>`; card.appendChild(tr); return tr; };
+  CATS.forEach(([key, label, fn], i) => {
+    const used = scores[key] != null;
+    const preview = !used && rollsLeft < 3 && !over ? fn(dice) : '';
+    const tr = row('cat' + (used ? ' used' : ''), label, used ? scores[key] : preview, preview === 0 ? 'zero' : '');
+    tr.onclick = () => choose(key, fn);
+    if (i === 5) {
+      const up = upperTotal();
+      row('sum', 'Upper section', `${up} / 63`);
+      row('sum', 'Bonus (63+)', up >= 63 ? 35 : 0);
+    }
+  });
+  row('total', 'Total', grandTotal());
+  document.getElementById('round').textContent = round;
+  document.getElementById('best').textContent = best;
+}
+
+document.getElementById('roll').onclick = roll;
+document.getElementById('new').onclick = newGame;
+document.addEventListener('keydown', e => {
+  if (e.key === ' ') roll();
+  const n = +e.key;
+  if (n >= 1 && n <= 5) toggle(n - 1);
+});
+newGame();
+</script>
+</body>
+</html>

@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artillery</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .aim { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; align-items: center; color: var(--muted); font-size: 14px; }
+  .aim label { display: flex; align-items: center; gap: 8px; }
+  .aim input[type=range] { width: 160px; accent-color: var(--accent); }
+  .aim b { color: var(--fg); min-width: 2.5em; display: inline-block; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>💣 Artillery</h1>
+  <div class="stats">Wins <b id="wins">0</b> Losses <b id="losses">0</b></div>
+</header>
+<div class="controls">
+  <select id="diff"><option value="7">Easy CPU</option><option value="3.5" selected>Normal CPU</option><option value="1.2">Hard CPU</option></select>
+  <button class="btn alt" id="newgame">New battle</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="800" height="450"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="aim">
+  <label>Angle <input type="range" id="ang" min="0" max="180" value="45"> <b id="angV">45°</b></label>
+  <label>Power <input type="range" id="pow" min="10" max="100" value="60"> <b id="powV">60</b></label>
+  <button class="btn" id="fire">Fire!</button>
+</div>
+<p class="help"><kbd>←</kbd><kbd>→</kbd> angle · <kbd>↑</kbd><kbd>↓</kbd> power · <kbd>Space</kbd> fire. Mind the wind. Each shot carves the landscape.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, GRAV = 300, BLAST = 32;
+const angEl = document.getElementById('ang'), powEl = document.getElementById('pow');
+let ground, tanks, turn, shell, booms, wind, state = 'ready', last = 0, aiTimer = 0, trail = [];
+let wins = Store.get('artillery-wins', 0), losses = Store.get('artillery-losses', 0);
+
+function stats() {
+  document.getElementById('wins').textContent = wins;
+  document.getElementById('losses').textContent = losses;
+}
+
+function genTerrain() {
+  ground = new Float32Array(W);
+  const a = [rand(30, 60), rand(15, 35), rand(5, 15)], p = [rand(0, 7), rand(0, 7), rand(0, 7)], fr = [rand(0.004, 0.008), rand(0.012, 0.02), rand(0.03, 0.05)];
+  const base = rand(H * 0.55, H * 0.7);
+  for (let x = 0; x < W; x++) ground[x] = base + a[0] * Math.sin(x * fr[0] + p[0]) + a[1] * Math.sin(x * fr[1] + p[1]) + a[2] * Math.sin(x * fr[2] + p[2]);
+  // a hill in the middle makes direct shots harder
+  for (let x = 0; x < W; x++) ground[x] -= Math.max(0, 110 - Math.abs(x - W / 2) * 0.6) * rand(0.95, 1);
+  // flatten the tank spots
+  [[60, 120], [W - 120, W - 60]].forEach(([a, b]) => { const y = ground[Math.floor((a + b) / 2)]; for (let x = a; x < b; x++) ground[x] = y; });
+}
+
+const groundY = x => ground[clamp(Math.floor(x), 0, W - 1)];
+
+function newGame() {
+  genTerrain();
+  tanks = [
+    { x: 90, hp: 100, angle: 45, power: 60, color: '#22d3ee', name: 'You' },
+    { x: W - 90, hp: 100, angle: 135, power: 60, color: '#f87171', name: 'CPU', learn: 1 }
+  ];
+  booms = []; shell = null; trail = [];
+  turn = 0;
+  newWind();
+  syncInputs();
+  state = 'aim';
+  overlay(ov, null);
+}
+
+function newWind() { wind = Math.round(rand(-60, 60)); }
+
+function syncInputs() {
+  angEl.value = tanks[0].angle;
+  powEl.value = tanks[0].power;
+  document.getElementById('angV').textContent = tanks[0].angle + '°';
+  document.getElementById('powV').textContent = tanks[0].power;
+}
+
+function muzzle(t) {
+  const a = t.angle * Math.PI / 180, y = groundY(t.x) - 10;
+  return { x: t.x + Math.cos(a) * 18, y: y - Math.sin(a) * 18 };
+}
+
+function fire(t) {
+  const a = t.angle * Math.PI / 180, m = muzzle(t), sp = t.power * 7;
+  shell = { x: m.x, y: m.y, vx: Math.cos(a) * sp, vy: -Math.sin(a) * sp, owner: t };
+  trail = [];
+  state = 'fly';
+  Sound.beep(160, 0.15, 'sawtooth', 0.05);
+}
+
+function stepShell(s, dt) {
+  s.vx += wind * dt;
+  s.vy += GRAV * dt;
+  s.x += s.vx * dt;
+  s.y += s.vy * dt;
+  if (s.x < 0 || s.x >= W || s.y > H) return 'out';
+  if (s.y >= groundY(s.x)) return 'ground';
+  for (const t of tanks) if (t !== s.owner || s.y > groundY(t.x) - 30) {
+    if (Math.hypot(s.x - t.x, s.y - (groundY(t.x) - 8)) < 13) return 'tank';
+  }
+  return null;
+}
+
+function explode(x, y) {
+  booms.push({ x, y, t: 0 });
+  Sound.beep(70, 0.5, 'sawtooth', 0.07);
+  for (let xx = Math.floor(x - BLAST); xx <= x + BLAST; xx++) {
+    if (xx < 0 || xx >= W) continue;
+    const h = Math.sqrt(BLAST * BLAST - (xx - x) ** 2);
+    if (ground[xx] < y + h) ground[xx] = Math.min(H - 4, Math.max(ground[xx], y + h));
+  }
+  for (const t of tanks) {
+    const d = Math.hypot(t.x - x, groundY(t.x) - 8 - y);
+    if (d < BLAST + 14) t.hp = Math.max(0, t.hp - Math.round(12 + 48 * (1 - d / (BLAST + 14))));
+  }
+}
+
+function endTurn() {
+  if (tanks.some(t => t.hp <= 0)) {
+    state = 'over';
+    const won = tanks[1].hp <= 0 && tanks[0].hp > 0, draw = tanks[0].hp <= 0 && tanks[1].hp <= 0;
+    if (won) { wins++; Store.set('artillery-wins', wins); } else if (!draw) { losses++; Store.set('artillery-losses', losses); }
+    stats();
+    overlay(ov, `<h2>${draw ? 'Mutual destruction!' : won ? 'Victory! 🎖️' : 'Your tank was destroyed'}</h2><button class="btn" onclick="newGame()">New battle</button>`);
+    return;
+  }
+  turn = 1 - turn;
+  newWind();
+  if (turn === 1) { state = 'ai'; aiTimer = 800; } else state = 'aim';
+}
+
+function aiAim() {
+  const me = tanks[1], foe = tanks[0];
+  let best = null, bestD = Infinity;
+  for (let ang = 95; ang <= 175; ang += 2) for (let pw = 20; pw <= 100; pw += 2) {
+    const a = ang * Math.PI / 180, m = muzzle({ ...me, angle: ang });
+    const s = { x: m.x, y: m.y, vx: Math.cos(a) * pw * 7, vy: -Math.sin(a) * pw * 7, owner: me };
+    let r = null, n = 0;
+    while (!r && n++ < 600) r = stepShell(s, 1 / 60);
+    if (r === 'out') continue;
+    const d = Math.abs(s.x - foe.x) + Math.abs(s.y - groundY(foe.x)) * 0.5;
+    if (d < bestD) { bestD = d; best = [ang, pw]; }
+  }
+  if (!best) best = [135, 60];
+  // the CPU gets more accurate with every shot it takes
+  const err = +document.getElementById('diff').value * me.learn;
+  me.learn = Math.max(0.3, me.learn * 0.75);
+  me.angle = clamp(Math.round(best[0] + rand(-err, err)), 90, 180);
+  me.power = clamp(Math.round(best[1] + rand(-err, err) * 1.5), 10, 100);
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  booms.forEach(b => { b.t += dt; });
+  booms = booms.filter(b => b.t < 500);
+  if (state === 'ai') {
+    aiTimer -= dt;
+    if (aiTimer <= 0) { aiAim(); fire(tanks[1]); }
+  } else if (state === 'fly') {
+    for (let i = 0; i < 4 && shell; i++) {
+      const r = stepShell(shell, s / 4);
+      trail.push([shell.x, shell.y]);
+      if (r === 'out') { shell = null; state = 'boom'; aiTimer = 400; }
+      else if (r) { explode(shell.x, shell.y); shell = null; state = 'boom'; aiTimer = 700; }
+    }
+  } else if (state === 'boom') {
+    aiTimer -= dt;
+    if (aiTimer <= 0) endTurn();
+  }
+}
+
+function drawTank(t, active) {
+  const y = groundY(t.x);
+  const a = t.angle * Math.PI / 180;
+  ctx.strokeStyle = t.color;
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(t.x, y - 10); ctx.lineTo(t.x + Math.cos(a) * 20, y - 10 - Math.sin(a) * 20); ctx.stroke();
+  ctx.fillStyle = t.color;
+  ctx.beginPath(); ctx.arc(t.x, y - 10, 8, Math.PI, 0); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(t.x - 15, y - 10, 30, 9, 4); ctx.fill();
+  ctx.fillStyle = '#1f2937';
+  ctx.beginPath(); ctx.roundRect(t.x - 16, y - 3, 32, 5, 3); ctx.fill();
+  // health bar
+  ctx.fillStyle = '#1f2937';
+  ctx.fillRect(t.x - 22, y - 38, 44, 6);
+  ctx.fillStyle = t.hp > 50 ? '#22c55e' : t.hp > 25 ? '#f59e0b' : '#ef4444';
+  ctx.fillRect(t.x - 22, y - 38, 44 * t.hp / 100, 6);
+  if (active) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(t.x - 5, y - 52); ctx.lineTo(t.x + 5, y - 52); ctx.lineTo(t.x, y - 44); ctx.fill(); }
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0c4a6e'); g.addColorStop(1, '#f59e0b');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  if (!ground) return;
+  ctx.fillStyle = '#3f2a14';
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  for (let x = 0; x < W; x += 2) ctx.lineTo(x, ground[x]);
+  ctx.lineTo(W, H);
+  ctx.fill();
+  ctx.strokeStyle = '#65a30d';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let x = 0; x < W; x += 2) x ? ctx.lineTo(x, ground[x]) : ctx.moveTo(0, ground[0]);
+  ctx.stroke();
+  if (!tanks) return;
+  tanks.forEach((t, i) => drawTank(t, i === turn && (state === 'aim' || state === 'ai')));
+  ctx.fillStyle = 'rgba(255,255,255,.4)';
+  trail.forEach(([x, y], i) => { if (i % 3 === 0) ctx.fillRect(x, y, 2, 2); });
+  if (shell) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(shell.x, shell.y, 4, 0, 7); ctx.fill(); }
+  booms.forEach(b => {
+    ctx.fillStyle = `rgba(253,224,71,${1 - b.t / 500})`;
+    ctx.beginPath(); ctx.arc(b.x, b.y, BLAST * (0.5 + b.t / 1000), 0, 7); ctx.fill();
+  });
+  // wind indicator
+  ctx.fillStyle = '#e6e7f2';
+  ctx.font = '14px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText(`Wind ${Math.abs(wind)} ${wind < 0 ? '◀' : wind > 0 ? '▶' : ''}`, W / 2, 24);
+  ctx.fillStyle = 'rgba(255,255,255,.6)';
+  ctx.fillRect(W / 2, 32, wind * 1.2, 4);
+  ctx.textAlign = 'left';
+  ctx.fillText(state === 'ai' || (state !== 'aim' && turn === 1) ? 'CPU is aiming…' : 'Your turn', 12, 24);
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state !== 'ready' && state !== 'over') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function setAim(da, dp) {
+  if (state !== 'aim') return;
+  const t = tanks[0];
+  t.angle = clamp(t.angle + da, 0, 180);
+  t.power = clamp(t.power + dp, 10, 100);
+  syncInputs();
+}
+angEl.oninput = () => { if (state === 'aim') { tanks[0].angle = +angEl.value; syncInputs(); } };
+powEl.oninput = () => { if (state === 'aim') { tanks[0].power = +powEl.value; syncInputs(); } };
+document.getElementById('fire').onclick = () => { if (state === 'aim') fire(tanks[0]); };
+document.getElementById('newgame').onclick = newGame;
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowLeft') setAim(1, 0);
+  else if (e.key === 'ArrowRight') setAim(-1, 0);
+  else if (e.key === 'ArrowUp') setAim(0, 1);
+  else if (e.key === 'ArrowDown') setAim(0, -1);
+  else if (e.key === ' ') { if (state === 'aim') fire(tanks[0]); else if (state === 'ready' || state === 'over') newGame(); }
+});
+
+stats();
+genTerrain();
+overlay(ov, '<h2>Artillery</h2><p>Set angle and power, account for wind, and blow up the enemy tank.</p><button class="btn" onclick="newGame()">Start battle</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
