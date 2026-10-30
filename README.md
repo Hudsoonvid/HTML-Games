@@ -1,17 +1,46 @@
 # HTML Games Arcade
 
-A collection of **64 browser games** written from scratch in plain HTML, CSS and JavaScript — no frameworks, no build step, no external assets. Open `index.html` and play.
+**64 browser games, plus an all-in-one version that fits every game into a single HTML file you can embed on any website.** Everything is written from scratch in plain HTML, CSS and JavaScript: no frameworks, no external assets, no internet connection needed.
 
-![Games](https://img.shields.io/badge/games-64-8b5cf6) ![Dependencies](https://img.shields.io/badge/dependencies-none-22c55e)
+![Games](https://img.shields.io/badge/games-64-8b5cf6) ![All-in-one](https://img.shields.io/badge/all--in--one-1%20file%2C%20486%20KB-22c55e)
 
-## Playing
+| File | What it is |
+|---|---|
+| [`all-in-one.html`](all-in-one.html) | **Mega All-In-One:** every game inside one self-contained file, with a searchable game list beside the player. This is the file to put on your website. |
+| [`index.html`](index.html) | The regular arcade homepage for this folder; it opens the separate files in `games/`. |
+| `games/` | One page per game. Each works on its own, and they're the source that `all-in-one.html` is built from. |
 
-- **Locally:** clone the repo and open `index.html` in any modern browser (double-clicking it works — everything runs from `file://`).
-- **Hosted:** the folder is a static site, so it works as-is on GitHub Pages, Netlify, or any web server. On GitHub, enable *Settings → Pages → Deploy from branch* and pick the repo root.
+## Putting the games on your website
 
-The launcher page has search (press <kbd>/</kbd>), category filters, a random-game button and a "recently played" row. Every game has a **← Arcade** link back to it.
+You only need **`all-in-one.html`** (rename it if you like). Pick whichever way your site supports:
 
-High scores, best times, records and progress (for example the clicker save, Box Pusher levels and your Blackjack bankroll) are kept in your browser's `localStorage`.
+**Option 1: upload the file and embed it with an iframe** (works everywhere and is the most reliable):
+
+```html
+<iframe src="all-in-one.html" style="width:100%;height:900px;border:0" allow="fullscreen *; autoplay *"></iframe>
+```
+
+**Option 2: paste the code.** Open `all-in-one.html` in a text editor, copy everything, and paste it into your site builder's *Embed code*, *Custom HTML* or *Code* block. The arcade draws itself inside a sealed-off box, so your site's styles can't break it and it won't restyle your site. On a narrow page column the list stacks above the game automatically.
+
+**Option 3: link to it.** Upload `all-in-one.html` anywhere that serves files (GitHub Pages, Netlify, your own host) and link to it.
+
+### Starting on a particular game
+
+- Add `data-game="sudoku"` to the arcade's container: change `<div id="html-games-arcade"></div>` to `<div id="html-games-arcade" data-game="sudoku"></div>`, or
+- link to the file with the game id after a `#`, for example `all-in-one.html#sudoku`. The address updates as you switch games, so you can copy a link to any game.
+
+The id is the game's file name in `games/` (`2048`, `sudoku`, `solitaire`, `pixel-jumper`, …).
+
+### Good to know
+
+- If a site builder refuses the pasted code because it's too large, use option 1 instead.
+- Each game runs in its own frame, so games never interfere with each other or with your page, and switching games stops the previous one.
+- High scores, best times and progress (Gem Clicker save, Box Pusher levels, Blackjack bankroll, …) are saved in each visitor's browser. Sites that block browser storage still work; scores just aren't kept.
+- Each game has 🔊 mute and ⛶ fullscreen buttons. Fullscreen needs `allow="fullscreen *"` on your iframe. **Open Game** opens the current game by itself in a new tab.
+
+## Playing locally
+
+Double-click `all-in-one.html` (or `index.html`) to play straight from your disk in any modern browser.
 
 ## The games
 
@@ -119,16 +148,19 @@ High scores, best times, records and progress (for example the clicker save, Box
 ## Project layout
 
 ```
-index.html          the arcade launcher (game list lives in the GAMES array)
-games/
-  shared.css        common theme: colours, top bar, buttons, overlays, touch pad
-  shared.js         tiny helpers: Store (localStorage), recordBest, rand/pick/shuffle,
-                    onSwipe, canvasPoint, holdButton, overlay, Sound (Web Audio beeps)
-  <game>.html       one self-contained page per game
+all-in-one.html       Mega All-In-One: every game in one file (generated, don't edit by hand)
+index.html            arcade homepage that links to the separate game files
+games/                the source of each game, one page per game (each also runs on its own)
+  shared.css          common theme: colours, top bar, buttons, overlays, touch pad
+  shared.js           tiny helpers: Store (localStorage), recordBest, rand/pick/shuffle, onSwipe,
+                      canvasPoint, holdButton, overlay, Sound (Web Audio beeps), mute/fullscreen
+tools/
+  all-in-one-template.html  the Mega All-In-One page (layout, styles, game list)
+  build.js                  packs the template + games/ into all-in-one.html
 ```
 
-## Adding a game
+## Editing or adding a game
 
-1. Create `games/my-game.html`. Start from any existing game — a typical page links `shared.css`, includes a `<header class="topbar">` with a `← Arcade` link back to `../index.html`, and loads `shared.js` before its own inline `<script>`.
-2. Add an entry to the `GAMES` array in `index.html`: `['my-game', 'My Game', '🎮', 'Arcade', 'One-line description.']`.
-3. Keep it dependency-free so it works offline and from `file://`.
+1. Edit a page in `games/`, or create `games/my-game.html` by copying an existing game: it links `shared.css`, has a `<header class="topbar">` with a `← Arcade` link to `../index.html`, and loads `shared.js` before its own inline `<script>`.
+2. For a new game, add the same entry to the `GAMES` list in both `index.html` and `tools/all-in-one-template.html`: `['my-game', 'My Game', '🎮', 'Arcade', 'One-line description.']`.
+3. Rebuild the single file with [Node.js](https://nodejs.org): `node tools/build.js`. It checks that every listed game exists and writes a fresh `all-in-one.html`.

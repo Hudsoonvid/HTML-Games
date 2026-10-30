@@ -113,8 +113,8 @@ const Sound = {
   }
 };
 
-// Add a mute toggle to the top bar of every game.
-(function addMuteButton() {
+// Add mute and fullscreen toggles to the top bar of every game.
+(function addTopbarButtons() {
   const bar = document.querySelector('.topbar');
   if (!bar) return;
   const b = document.createElement('button');
@@ -124,6 +124,17 @@ const Sound = {
   b.onclick = () => { Sound.muted = !Sound.muted; Store.set('muted', Sound.muted); paint(); };
   paint();
   bar.appendChild(b);
+  if (document.fullscreenEnabled) {
+    const fs = document.createElement('button');
+    fs.className = 'btn alt mute';
+    fs.title = 'Full screen';
+    fs.textContent = '⛶';
+    fs.onclick = () => {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      else document.documentElement.requestFullscreen().catch(() => {});
+    };
+    bar.appendChild(fs);
+  }
 })();
 
 // Keep arrow keys and space from scrolling the page while playing.
