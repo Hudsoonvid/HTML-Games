@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sling Birds</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐦 Sling Birds</h1>
+  <div class="stats">Level <b id="level">1</b> Birds <b id="birds">3</b> Score <b id="score">0</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="restart">↺ Restart level</button></div>
+<div class="stage">
+  <canvas id="c" class="game" width="900" height="480"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Drag back from the slingshot and let go to fling a bird. Knock out every pig 🐷 — hit them directly or bring the blocks down on them. Wood breaks easily, stone takes a big hit. Tap while a bird is flying to give it a speed boost.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, GROUND = H - 40, G = 600, SX = 150, SY = GROUND - 90, BR = 14, MAXPULL = 90;
+// blocks: [x, y(bottom above ground), w, h, material]; pigs: [x, y(bottom above ground)]
+const LEVELS = [
+  { blocks: [[600, 0, 20, 80, 'w'], [680, 0, 20, 80, 'w'], [590, 80, 120, 16, 'w']], pigs: [[650, 0], [650, 96]] },
+  { blocks: [[560, 0, 20, 100, 'w'], [660, 0, 20, 100, 'w'], [550, 100, 140, 16, 'w'], [600, 116, 20, 70, 'w'], [640, 116, 20, 70, 'w'], [590, 186, 80, 14, 'w'], [740, 0, 60, 40, 's']], pigs: [[620, 0], [630, 116], [770, 40]] },
+  { blocks: [[520, 0, 40, 40, 's'], [620, 0, 40, 40, 's'], [510, 40, 160, 16, 's'], [540, 56, 20, 90, 'w'], [620, 56, 20, 90, 'w'], [530, 146, 120, 16, 'w'], [760, 0, 20, 140, 'w'], [820, 0, 20, 140, 'w'], [750, 140, 100, 16, 'w']], pigs: [[590, 56], [590, 162], [800, 0], [800, 156]] },
+  { blocks: [[480, 0, 20, 60, 'g'], [560, 0, 20, 60, 'g'], [470, 60, 120, 14, 'w'], [640, 0, 30, 200, 's'], [700, 0, 20, 80, 'w'], [780, 0, 20, 80, 'w'], [690, 80, 120, 14, 'w'], [720, 94, 20, 60, 'w'], [760, 94, 20, 60, 'w'], [710, 154, 80, 14, 'w']], pigs: [[520, 0], [520, 74], [740, 0], [740, 94], [745, 168]] },
+  { blocks: [[520, 0, 260, 30, 's'], [540, 30, 20, 80, 'w'], [620, 30, 20, 80, 'g'], [700, 30, 20, 80, 'w'], [740, 30, 20, 80, 'w'], [530, 110, 240, 14, 'w'], [580, 124, 20, 60, 'g'], [680, 124, 20, 60, 'g'], [570, 184, 140, 14, 'w'], [630, 198, 20, 40, 'w']], pigs: [[580, 30], [660, 30], [720, 30], [640, 124], [640, 238]] }
+];
+const MAT = { w: { hp: 60, col: '#b45309', edge: '#78350f' }, s: { hp: 260, col: '#94a3b8', edge: '#475569' }, g: { hp: 25, col: 'rgba(147,197,253,.75)', edge: '#60a5fa' } };
+let level = Store.get('sling-level', 0) % LEVELS.length, blocks, pigs, bird, birdsLeft, score, state = 'aim', pull = null, debris = [], settleT = 0, boosted = false;
+
+function startLevel() {
+  const L = LEVELS[level];
+  blocks = L.blocks.map(([x, y, w, h, m]) => ({ x, y: GROUND - y - h, w, h, m, hp: MAT[m].hp, vy: 0 }));
+  pigs = L.pigs.map(([x, y]) => ({ x, y: GROUND - y - 15, r: 15, hp: 30, vy: 0, fall: 0 }));
+  birdsLeft = 3 + (level >= 3 ? 1 : 0);
+  score = 0; bird = null; state = 'aim'; debris = []; boosted = false;
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('level').textContent = level + 1;
+  document.getElementById('birds').textContent = birdsLeft;
+  document.getElementById('score').textContent = score;
+}
+
+function hitBlock(b, dmg) {
+  b.hp -= dmg;
+  if (b.hp <= 0 && !b.dead) {
+    b.dead = true; score += 100;
+    for (let i = 0; i < 6; i++) debris.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, vx: rand(-150, 150), vy: rand(-250, -50), col: MAT[b.m].col, t: 0 });
+    Sound.beep(b.m === 's' ? 120 : b.m === 'g' ? 1400 : 220, 0.08, 'square', 0.04);
+  }
+}
+function hitPig(p, dmg) {
+  p.hp -= dmg;
+  if (p.hp <= 0 && !p.dead) { p.dead = true; score += 500; Sound.beep(880, 0.15, 'triangle', 0.05); debris.push({ x: p.x, y: p.y, vx: 0, vy: -60, poof: true, t: 0 }); }
+}
+
+// everything falls straight down until it rests on the ground or on something below
+function settle(dt) {
+  const s = dt / 1000;
+  const solids = blocks.filter(b => !b.dead);
+  const items = solids.concat(pigs.filter(p => !p.dead)).sort((a, b) => bottom(b) - bottom(a));
+  for (const o of items) {
+    o.vy += G * s;
+    let ny = o.y + o.vy * s;
+    let floor = GROUND;
+    const ox0 = left(o), ox1 = right(o);
+    for (const b of solids) {
+      if (b === o || right(b) <= ox0 + 1 || left(b) >= ox1 - 1) continue;
+      if (b.y >= bottom(o) - 2 && b.y < floor) floor = b.y;
+    }
+    const h = o.r ? o.r : o.h;
+    if ((o.r ? ny + o.r : ny + o.h) >= floor) {
+      const impact = o.vy;
+      ny = floor - (o.r ? o.r : o.h);
+      if (impact > 260) {
+        if (o.r) hitPig(o, impact / 8); else hitBlock(o, impact / 10);
+        // landing on a pig squashes it
+        pigs.forEach(p => { if (!p.dead && p !== o && p.y - p.r < floor + 4 && p.y > floor - 4 && p.x > ox0 && p.x < ox1) hitPig(p, impact / 5); });
+      }
+      o.vy = 0;
+    }
+    o.y = ny;
+    void h;
+  }
+}
+const left = o => (o.r ? o.x - o.r : o.x), right = o => (o.r ? o.x + o.r : o.x + o.w), bottom = o => (o.r ? o.y + o.r : o.y + o.h);
+
+function launch(dx, dy) {
+  const d = Math.min(MAXPULL, Math.hypot(dx, dy)), a = Math.atan2(dy, dx);
+  bird = { x: SX - Math.cos(a) * d, y: SY - Math.sin(a) * d, vx: Math.cos(a) * d * 8.2, vy: Math.sin(a) * d * 8.2, trail: [], life: 0 };
+  birdsLeft--;
+  state = 'fly';
+  boosted = false;
+  Sound.beep(400, 0.1, 'triangle', 0.04);
+  hud();
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  if (bird) {
+    for (let k = 0; k < 4; k++) {
+      const ss = s / 4;
+      bird.vy += G * ss;
+      bird.x += bird.vx * ss; bird.y += bird.vy * ss;
+      const sp = Math.hypot(bird.vx, bird.vy);
+      for (const b of blocks) {
+        if (b.dead) continue;
+        const cx = clamp(bird.x, b.x, b.x + b.w), cy = clamp(bird.y, b.y, b.y + b.h), d = Math.hypot(bird.x - cx, bird.y - cy);
+        if (d < BR) {
+          const dmg = sp * (b.m === 's' ? 0.12 : 0.22);
+          hitBlock(b, dmg);
+          if (b.dead) { bird.vx *= 0.65; bird.vy *= 0.65; }
+          else {
+            const nx = (bird.x - cx) / (d || 1), ny = (bird.y - cy) / (d || 1);
+            bird.x = cx + nx * BR; bird.y = cy + ny * BR;
+            const vn = bird.vx * nx + bird.vy * ny;
+            if (vn < 0) { bird.vx -= 1.4 * vn * nx; bird.vy -= 1.4 * vn * ny; }
+            bird.vx *= 0.6; bird.vy *= 0.6;
+            // a hard hit can shove a light block off its support
+            if (dmg > 25 && b.m !== 's') b.vy = -60;
+          }
+        }
+      }
+      pigs.forEach(p => { if (!p.dead && Math.hypot(bird.x - p.x, bird.y - p.y) < BR + p.r) { hitPig(p, sp * 0.3); bird.vx *= 0.7; } });
+      if (bird.y > GROUND - BR) { bird.y = GROUND - BR; bird.vy *= -0.35; bird.vx *= 0.75; }
+    }
+    bird.trail.push([bird.x, bird.y]);
+    bird.life += dt;
+    if (bird.x > W + 50 || bird.x < -50 || bird.life > 6000 || (Math.hypot(bird.vx, bird.vy) < 15 && bird.y >= GROUND - BR - 1)) { bird = null; state = 'settle'; settleT = 1200; }
+  }
+  settle(dt);
+  blocks = blocks.filter(b => !b.dead);
+  debris.forEach(d => { d.t += dt; d.x += d.vx * s; d.y += d.vy * s; d.vy += G * s; });
+  debris = debris.filter(d => d.t < 700);
+  if (state === 'settle') {
+    settleT -= dt;
+    if (settleT <= 0) {
+      if (pigs.every(p => p.dead)) {
+        score += birdsLeft * 1000;
+        const stars = birdsLeft >= 2 ? '⭐⭐⭐' : birdsLeft === 1 ? '⭐⭐' : '⭐';
+        state = 'won';
+        hud();
+        const lv = level;
+        level = (level + 1) % LEVELS.length;
+        Store.set('sling-level', level);
+        Sound.beep(988, 0.3, 'triangle');
+        overlay(ov, `<h2>Level ${lv + 1} cleared! ${stars}</h2><p>Score ${score}</p><button class="btn" onclick="startLevel()">${level ? 'Next level' : 'Play again from level 1'}</button>`);
+      } else if (birdsLeft <= 0) {
+        state = 'lost';
+        Sound.beep(150, 0.4, 'sawtooth', 0.05);
+        overlay(ov, `<h2>Out of birds 🐷😂</h2><p>${pigs.filter(p => !p.dead).length} pig(s) left</p><button class="btn" onclick="startLevel()">Try again</button>`);
+      } else state = 'aim';
+    }
+  }
+  hud();
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#7dd3fc'); g.addColorStop(1, '#e0f2fe');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#84cc16'; ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = '#4d7c0f'; ctx.fillRect(0, GROUND, W, 6);
+  if (!blocks) return;
+  // slingshot
+  ctx.fillStyle = '#78350f'; ctx.fillRect(SX - 6, SY, 12, GROUND - SY);
+  ctx.fillRect(SX - 22, SY - 20, 8, 30); ctx.fillRect(SX + 14, SY - 20, 8, 30);
+  blocks.forEach(b => {
+    ctx.fillStyle = MAT[b.m].col; ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = MAT[b.m].edge; ctx.lineWidth = 2; ctx.strokeRect(b.x + 1, b.y + 1, b.w - 2, b.h - 2);
+    if (b.hp < MAT[b.m].hp * 0.5) { ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.beginPath(); ctx.moveTo(b.x + 3, b.y + 3); ctx.lineTo(b.x + b.w - 3, b.y + b.h - 3); ctx.stroke(); }
+  });
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  pigs.forEach(p => { if (!p.dead) { ctx.font = `${p.r * 2.2}px system-ui`; ctx.fillText('🐷', p.x, p.y + 2); } });
+  debris.forEach(d => { if (d.poof) { ctx.globalAlpha = 1 - d.t / 700; ctx.font = '30px system-ui'; ctx.fillText('💨', d.x, d.y); ctx.globalAlpha = 1; } else { ctx.fillStyle = d.col; ctx.fillRect(d.x, d.y, 6, 6); } });
+  if (bird) { ctx.fillStyle = 'rgba(255,255,255,.7)'; bird.trail.forEach(([x, y], i) => { if (i % 4 === 0) ctx.fillRect(x - 2, y - 2, 4, 4); }); }
+  // band and bird in the sling
+  if (state === 'aim' && birdsLeft > 0) {
+    const bx = pull ? pull.bx : SX, by = pull ? pull.by : SY - 10;
+    ctx.strokeStyle = '#451a03'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(SX - 18, SY - 16); ctx.lineTo(bx, by); ctx.lineTo(SX + 18, SY - 16); ctx.stroke();
+    ctx.font = '30px system-ui'; ctx.fillText('🐦', bx, by);
+    if (pull) {
+      const dx = SX - bx, dy = SY - 10 - by;
+      let x = bx, y = by, vx = dx * 8.2, vy = dy * 8.2;
+      ctx.fillStyle = 'rgba(255,255,255,.8)';
+      for (let i = 0; i < 30; i++) { for (let k = 0; k < 3; k++) { vy += G * 0.01; x += vx * 0.01; y += vy * 0.01; } ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 7); ctx.fill(); }
+    }
+  }
+  if (bird) { ctx.font = '30px system-ui'; ctx.save(); ctx.translate(bird.x, bird.y); ctx.rotate(Math.atan2(bird.vy, bird.vx) * 0.5); ctx.fillText('🐦', 0, 0); ctx.restore(); }
+  ctx.font = '22px system-ui';
+  for (let i = 0; i < birdsLeft - (state === 'aim' ? 1 : 0); i++) ctx.fillText('🐦', SX - 50 - i * 28, GROUND - 12);
+}
+
+let last = 0;
+function loop(t) {
+  const dt = Math.min(33, t - last);
+  last = t;
+  if (blocks && state !== 'won' && state !== 'lost') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', e => {
+  const p = canvasPoint(cv, e);
+  if (state === 'fly' && bird && !boosted) { boosted = true; bird.vx *= 1.6; bird.vy *= 1.1; Sound.beep(900, 0.08, 'triangle', 0.04); return; }
+  if (state !== 'aim' || birdsLeft <= 0) return;
+  if (Math.hypot(p.x - SX, p.y - SY) < 120) { pull = { bx: SX, by: SY - 10 }; cv.setPointerCapture(e.pointerId); }
+});
+cv.addEventListener('pointermove', e => {
+  if (!pull) return;
+  const p = canvasPoint(cv, e), dx = p.x - SX, dy = p.y - (SY - 10), d = Math.hypot(dx, dy), k = d > MAXPULL ? MAXPULL / d : 1;
+  pull.bx = SX + dx * k; pull.by = SY - 10 + dy * k;
+});
+cv.addEventListener('pointerup', () => {
+  if (!pull) return;
+  const dx = SX - pull.bx, dy = SY - 10 - pull.by;
+  pull = null;
+  if (Math.hypot(dx, dy) > 20) launch(dx, dy);
+});
+document.getElementById('restart').onclick = startLevel;
+startLevel();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

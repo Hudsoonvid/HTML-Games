@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garden Defense</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🌻 Garden Defense</h1>
+  <div class="stats">☀️ <b id="sun">150</b> Wave <b id="wave">1</b> Best <b id="best">0</b></div>
+</header>
+<div class="controls" id="seeds"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="810" height="500"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Pick a plant card, then tap a lawn square to plant it. Tap falling suns ☀️ to collect them — sunflowers make more. Peashooters shoot, frost peas slow, walls block, and cherry bombs blow up everything nearby. Each lane has one emergency mower. Don't let the zombies reach your house!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const LANES = 5, COLS = 9, CS = 80, OX = 70, OY = 50;
+const PLANTS = {
+  sun: { e: '🌻', name: 'Sunflower', cost: 50, hp: 60, cd: 7000 },
+  pea: { e: '🌱', name: 'Shooter', cost: 100, hp: 60, cd: 7000 },
+  wall: { e: '🥔', name: 'Wall', cost: 50, hp: 600, cd: 20000 },
+  frost: { e: '❄️', name: 'Frost Pea', cost: 175, hp: 60, cd: 7000 },
+  bomb: { e: '🍒', name: 'Cherry Bomb', cost: 150, hp: 999, cd: 30000 }
+};
+let grid, zombies, peas, suns, mowers, sun, wave, waveT, spawnLeft, sel = null, cool, state = 'ready', last = 0, skyT, best = Store.get('garden-best', 0), fx;
+
+function newGame() {
+  grid = Array.from({ length: LANES }, () => Array(COLS).fill(null));
+  zombies = []; peas = []; suns = []; fx = [];
+  mowers = Array(LANES).fill(true).map(() => ({ x: OX - 40, on: false, used: false }));
+  sun = 150; wave = 0; waveT = 18000; spawnLeft = 0; skyT = 5000; sel = null;
+  cool = {}; Object.keys(PLANTS).forEach(k => { cool[k] = 0; });
+  state = 'play';
+  overlay(ov, null);
+  seeds();
+  hud();
+}
+
+function seeds() {
+  document.getElementById('seeds').innerHTML = Object.entries(PLANTS).map(([k, p]) => `<button class="btn ${sel === k ? '' : 'alt'}" data-k="${k}" ${sun < p.cost || cool[k] > 0 ? 'disabled' : ''}>${p.e} ${p.name} ☀️${p.cost}${cool[k] > 0 ? ` (${Math.ceil(cool[k] / 1000)}s)` : ''}</button>`).join('');
+  document.querySelectorAll('#seeds button').forEach(b => { b.onclick = () => { sel = sel === b.dataset.k ? null : b.dataset.k; seeds(); }; });
+}
+
+function hud() {
+  document.getElementById('sun').textContent = sun;
+  document.getElementById('wave').textContent = wave;
+  document.getElementById('best').textContent = best;
+}
+
+function spawnZombie() {
+  const lane = randInt(0, LANES - 1), r = Math.random();
+  const kind = wave > 4 && r < 0.15 ? 'bucket' : wave > 2 && r < 0.35 ? 'cone' : 'basic';
+  const hp = { basic: 60, cone: 140, bucket: 300 }[kind] * (1 + wave * 0.06);
+  zombies.push({ lane, x: OX + COLS * CS + 20, hp, max: hp, kind, slowT: 0, eatT: 0 });
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  Object.keys(cool).forEach(k => { cool[k] = Math.max(0, cool[k] - dt); });
+  skyT -= dt;
+  if (skyT <= 0) { skyT = rand(7000, 10000); suns.push({ x: rand(OX + 20, OX + COLS * CS - 20), y: -20, ty: rand(OY + 40, OY + LANES * CS - 40), v: 25 }); }
+  // waves: a trickle, then a bigger push; each wave has more zombies
+  waveT -= dt;
+  if (waveT <= 0 && spawnLeft <= 0) { wave++; spawnLeft = 4 + wave * 3; waveT = 26000; hud(); }
+  if (spawnLeft > 0 && Math.random() < dt / Math.max(500, 2600 - wave * 120)) { spawnZombie(); spawnLeft--; }
+  for (let l = 0; l < LANES; l++) for (let c = 0; c < COLS; c++) {
+    const p = grid[l][c];
+    if (!p) continue;
+    p.t = (p.t || 0) - dt;
+    const x = OX + c * CS + CS / 2, y = OY + l * CS + CS / 2;
+    if (p.k === 'sun' && p.t <= 0) { p.t = 14000; suns.push({ x: x + rand(-15, 15), y: y - 20, ty: y + 10, v: 20, plant: true }); }
+    if ((p.k === 'pea' || p.k === 'frost') && p.t <= 0 && zombies.some(z => z.lane === l && z.x > x && z.x < OX + COLS * CS + 30)) { p.t = 1400; peas.push({ lane: l, x: x + 20, y: y - 8, frost: p.k === 'frost' }); }
+    if (p.k === 'bomb' && p.t <= -900) {
+      zombies.forEach(z => { if (Math.abs(z.lane - l) <= 1 && Math.abs(z.x - x) < CS * 1.5) z.hp -= 1800; });
+      fx.push({ x, y, t: 0 });
+      Sound.beep(80, 0.5, 'sawtooth', 0.07);
+      grid[l][c] = null;
+    }
+  }
+  peas.forEach(pe => {
+    pe.x += 300 * s;
+    const z = zombies.find(z => z.lane === pe.lane && Math.abs(z.x - pe.x) < 18 && z.hp > 0);
+    if (z) { z.hp -= 20; if (pe.frost) z.slowT = 3000; pe.done = true; Sound.beep(300, 0.02, 'square', 0.015); }
+    if (pe.x > OX + COLS * CS + 40) pe.done = true;
+  });
+  peas = peas.filter(pe => !pe.done);
+  zombies.forEach(z => {
+    z.slowT -= dt;
+    const col = Math.floor((z.x - 20 - OX) / CS), p = col >= 0 && col < COLS ? grid[z.lane][col] : null;
+    if (p && p.k !== 'bomb' && z.x - 20 < OX + col * CS + CS - 10) {
+      // munching
+      z.eatT -= dt;
+      if (z.eatT <= 0) { z.eatT = 500; p.hp -= 10 * (z.slowT > 0 ? 0.5 : 1); Sound.beep(200, 0.02, 'triangle', 0.015); if (p.hp <= 0) grid[z.lane][col] = null; }
+    } else z.x -= (z.kind === 'basic' ? 13 : 11) * (z.slowT > 0 ? 0.5 : 1) * s;
+    if (z.x < OX - 10) {
+      const m = mowers[z.lane];
+      if (!m.used) { m.on = true; m.used = true; Sound.beep(400, 0.3, 'sawtooth', 0.04); }
+      else if (z.x < OX - 50) {
+        state = 'over';
+        if (wave > best) { best = wave; Store.set('garden-best', best); }
+        Sound.beep(90, 0.8, 'sawtooth', 0.06);
+        overlay(ov, `<h2>The zombies ate your brains! 🧟</h2><p>You survived to wave ${wave}.</p><button class="btn" onclick="newGame()">Try again</button>`);
+      }
+    }
+  });
+  mowers.forEach((m, l) => { if (m.on) { m.x += 300 * s; zombies.forEach(z => { if (z.lane === l && Math.abs(z.x - m.x) < 30) z.hp = 0; }); if (m.x > OX + COLS * CS + 60) m.on = false; } });
+  zombies = zombies.filter(z => z.hp > 0);
+  suns.forEach(su => { if (su.y < su.ty) su.y += su.v * s * 3; su.life = (su.life || 0) + dt; });
+  suns = suns.filter(su => su.life < 12000);
+  fx.forEach(f => { f.t += dt; });
+  fx = fx.filter(f => f.t < 500);
+  if (Math.random() < dt / 300) seeds();
+  hud();
+}
+
+function draw() {
+  ctx.fillStyle = '#365314';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let l = 0; l < LANES; l++) for (let c = 0; c < COLS; c++) {
+    ctx.fillStyle = (l + c) % 2 ? '#65a30d' : '#4d7c0f';
+    ctx.fillRect(OX + c * CS, OY + l * CS, CS, CS);
+  }
+  ctx.fillStyle = '#78350f'; ctx.fillRect(0, OY, OX - 30, LANES * CS);
+  ctx.font = '40px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('🏠', 22, OY + LANES * CS / 2);
+  if (!grid) return;
+  mowers.forEach((m, l) => { if (!m.used || m.on) { ctx.font = '30px system-ui'; ctx.fillText('🚜', m.x, OY + l * CS + CS / 2); } });
+  for (let l = 0; l < LANES; l++) for (let c = 0; c < COLS; c++) {
+    const p = grid[l][c];
+    if (!p) continue;
+    const x = OX + c * CS + CS / 2, y = OY + l * CS + CS / 2;
+    ctx.font = p.k === 'bomb' ? `${40 + Math.max(0, -p.t) / 30}px system-ui` : '44px system-ui';
+    ctx.fillText(PLANTS[p.k].e, x, y);
+    if (p.hp < PLANTS[p.k].hp && p.k !== 'bomb') { ctx.fillStyle = '#7f1d1d'; ctx.fillRect(x - 20, y + 28, 40, 4); ctx.fillStyle = '#4ade80'; ctx.fillRect(x - 20, y + 28, 40 * p.hp / PLANTS[p.k].hp, 4); }
+  }
+  peas.forEach(pe => { ctx.fillStyle = pe.frost ? '#7dd3fc' : '#22c55e'; ctx.beginPath(); ctx.arc(pe.x, pe.y, 7, 0, 7); ctx.fill(); });
+  zombies.slice().sort((a, b) => a.lane - b.lane).forEach(z => {
+    const y = OY + z.lane * CS + CS / 2;
+    ctx.font = '50px system-ui';
+    ctx.globalAlpha = z.slowT > 0 ? 0.7 : 1;
+    ctx.fillText('🧟', z.x, y);
+    ctx.globalAlpha = 1;
+    if (z.kind !== 'basic') { ctx.font = '22px system-ui'; ctx.fillText(z.kind === 'cone' ? '🔺' : '🪣', z.x, y - 30); }
+    ctx.fillStyle = '#7f1d1d'; ctx.fillRect(z.x - 18, y + 30, 36, 4); ctx.fillStyle = '#fbbf24'; ctx.fillRect(z.x - 18, y + 30, 36 * Math.max(0, z.hp) / z.max, 4);
+  });
+  fx.forEach(f => { ctx.fillStyle = `rgba(251,146,60,${0.8 - f.t / 625})`; ctx.beginPath(); ctx.arc(f.x, f.y, 60 + f.t / 4, 0, 7); ctx.fill(); });
+  suns.forEach(su => { ctx.font = '38px system-ui'; ctx.globalAlpha = su.life > 9000 ? 0.5 : 1; ctx.fillText('☀️', su.x, su.y); ctx.globalAlpha = 1; });
+  if (sel && hover) { const c = Math.floor((hover.x - OX) / CS), l = Math.floor((hover.y - OY) / CS); if (c >= 0 && c < COLS && l >= 0 && l < LANES && !grid[l][c]) { ctx.globalAlpha = 0.5; ctx.font = '44px system-ui'; ctx.fillText(PLANTS[sel].e, OX + c * CS + CS / 2, OY + l * CS + CS / 2); ctx.globalAlpha = 1; } }
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 15px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText(spawnLeft > 0 ? `Wave ${wave} incoming!` : `Next wave in ${Math.ceil(waveT / 1000)}s`, OX, 26);
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+let hover = null;
+cv.addEventListener('pointermove', e => { hover = canvasPoint(cv, e); });
+cv.addEventListener('pointerdown', e => {
+  if (state !== 'play') return;
+  const p = canvasPoint(cv, e);
+  hover = p;
+  // suns first
+  const su = suns.find(s => Math.hypot(s.x - p.x, s.y - p.y) < 30);
+  if (su) { suns = suns.filter(s => s !== su); sun += 25; Sound.beep(900, 0.06, 'triangle', 0.04); seeds(); hud(); return; }
+  const c = Math.floor((p.x - OX) / CS), l = Math.floor((p.y - OY) / CS);
+  if (!sel || c < 0 || c >= COLS || l < 0 || l >= LANES || grid[l][c]) return;
+  const P = PLANTS[sel];
+  if (sun < P.cost || cool[sel] > 0) return;
+  sun -= P.cost; cool[sel] = P.cd;
+  grid[l][c] = { k: sel, hp: P.hp, t: sel === 'sun' ? 4000 : 0 };
+  Sound.beep(500, 0.06, 'triangle', 0.04);
+  sel = null;
+  seeds(); hud();
+});
+hud();
+overlay(ov, '<h2>🌻 Garden Defense</h2><p>Plant sunflowers first, then shooters. Collect the suns!</p><button class="btn" onclick="newGame()">Play</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
