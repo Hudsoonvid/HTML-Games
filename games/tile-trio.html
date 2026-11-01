@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tile Trio</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🍀 Tile Trio</h1>
+  <div class="stats">Level <b id="level">1</b> Tiles <b id="left">0</b></div>
+</header>
+<div class="controls">
+  <button class="btn alt" id="undo">↶ Undo (3)</button>
+  <button class="btn alt" id="shuffle">🔀 Shuffle (2)</button>
+  <button class="btn alt" id="restart">↺ Restart</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="520" height="680"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Tap uncovered tiles to move them into the tray. Three of a kind in the tray vanish. If the tray's seven slots fill up, you lose. Clear every tile to win.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const ICONS = ['🍎', '🍋', '🍇', '🥕', '🌽', '🍄', '🌸', '🍀', '⭐', '🐟', '🍒', '🥝', '🍩', '🎈', '🔔', '🧀'];
+const TW = 58, TH = 64, SLOTS = 7, TRAY_Y = 590;
+let level = Store.get('tiletrio-level', 1), tiles, tray, history, undos, shuffles, over, seed;
+
+function covered(t) {
+  return tiles.some(o => !o.gone && !o.inTray && o.z > t.z && Math.abs(o.x - t.x) < TW - 2 && Math.abs(o.y - t.y) < TH - 2);
+}
+
+// layers of tiles on a half-cell grid; every icon appears a multiple of three times
+function generate() {
+  const kinds = Math.min(5 + level, ICONS.length), groups = Math.min(8 + level * 3, 42);
+  const icons = shuffle([].concat(...Array.from({ length: groups }, (_, i) => Array(3).fill(ICONS[i % kinds]))));
+  const out = [];
+  const cols = 7, rows = 7;
+  let z = 0;
+  while (icons.length) {
+    const off = z % 2 ? 0.5 : 0, slots = [];
+    for (let r = 0; r < rows - (off ? 1 : 0); r++) for (let c = 0; c < cols - (off ? 1 : 0); c++) {
+      if (Math.random() < 0.55 - z * 0.04) slots.push([c + off, r + off]);
+    }
+    for (const [c, r] of shuffle(slots)) {
+      if (!icons.length) break;
+      out.push({ x: 50 + c * (TW + 2) + TW / 2, y: 40 + r * (TH + 4) + TH / 2, z, icon: icons.pop(), gone: false, inTray: false });
+    }
+    z++;
+  }
+  return out;
+}
+
+function startLevel(fresh) {
+  if (fresh || !seed) seed = generate();
+  tiles = seed.map(t => ({ ...t }));
+  tray = []; history = []; undos = 3; shuffles = 2; over = false;
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('level').textContent = level;
+  document.getElementById('left').textContent = tiles.filter(t => !t.gone).length;
+  document.getElementById('undo').textContent = `↶ Undo (${undos})`;
+  document.getElementById('shuffle').textContent = `🔀 Shuffle (${shuffles})`;
+  document.getElementById('undo').disabled = !undos || !history.length;
+  document.getElementById('shuffle').disabled = !shuffles;
+}
+
+function take(t) {
+  history.push(t);
+  t.inTray = true;
+  // keep matching icons next to each other in the tray
+  let at = tray.length;
+  for (let i = tray.length - 1; i >= 0; i--) if (tray[i].icon === t.icon) { at = i + 1; break; }
+  tray.splice(at, 0, t);
+  Sound.beep(520, 0.05, 'triangle', 0.04);
+  const same = tray.filter(o => o.icon === t.icon);
+  if (same.length === 3) {
+    setTimeout(() => {
+      same.forEach(o => { o.gone = true; });
+      tray = tray.filter(o => !o.gone);
+      history = history.filter(o => !o.gone);
+      Sound.beep(880, 0.12, 'triangle', 0.05);
+      hud();
+      if (tiles.every(o => o.gone)) {
+        over = true;
+        level++;
+        Store.set('tiletrio-level', level);
+        overlay(ov, `<h2>Cleared! 🍀</h2><button class="btn" onclick="startLevel(true)">Level ${level}</button>`);
+      }
+    }, 180);
+  } else if (tray.length >= SLOTS) {
+    over = true;
+    Sound.beep(150, 0.4, 'sawtooth', 0.05);
+    setTimeout(() => overlay(ov, '<h2>Tray full!</h2><p>Look ahead: take tiles you can match soon.</p><button class="btn" onclick="startLevel(false)">Try again</button>'), 300);
+  }
+  hud();
+}
+
+function drawTile(x, y, icon, dim, scale = 1) {
+  const w = TW * scale, h = TH * scale;
+  ctx.fillStyle = '#a16207';
+  ctx.beginPath(); ctx.roundRect(x - w / 2 + 2, y - h / 2 + 5, w, h, 9); ctx.fill();
+  ctx.fillStyle = dim ? '#9ca3af' : '#fefce8';
+  ctx.beginPath(); ctx.roundRect(x - w / 2, y - h / 2, w, h, 9); ctx.fill();
+  ctx.globalAlpha = dim ? 0.45 : 1;
+  ctx.font = `${32 * scale}px system-ui`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(icon, x, y + 2);
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  ctx.fillStyle = '#14532d';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (tiles) {
+    tiles.filter(t => !t.gone && !t.inTray).sort((a, b) => a.z - b.z).forEach(t => drawTile(t.x, t.y, t.icon, covered(t)));
+    ctx.fillStyle = '#78350f';
+    ctx.beginPath(); ctx.roundRect(20, TRAY_Y - 40, cv.width - 40, 80, 14); ctx.fill();
+    const sw = (cv.width - 60) / SLOTS;
+    for (let i = 0; i < SLOTS; i++) {
+      ctx.fillStyle = 'rgba(0,0,0,.25)';
+      ctx.beginPath(); ctx.roundRect(30 + i * sw + 2, TRAY_Y - 32, sw - 4, 64, 8); ctx.fill();
+    }
+    tray.forEach((t, i) => drawTile(30 + i * sw + sw / 2, TRAY_Y, t.icon, false, 0.95));
+  }
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (over) return;
+  const p = canvasPoint(cv, e);
+  const hit = tiles.filter(t => !t.gone && !t.inTray && Math.abs(p.x - t.x) < TW / 2 && Math.abs(p.y - t.y) < TH / 2).sort((a, b) => b.z - a.z)[0];
+  if (hit && !covered(hit)) take(hit);
+});
+document.getElementById('undo').onclick = () => {
+  if (over || !undos || !history.length) return;
+  const t = history.pop();
+  t.inTray = false;
+  tray = tray.filter(o => o !== t);
+  undos--;
+  hud();
+};
+document.getElementById('shuffle').onclick = () => {
+  if (over || !shuffles) return;
+  const left = tiles.filter(t => !t.gone && !t.inTray), icons = shuffle(left.map(t => t.icon));
+  left.forEach((t, i) => { t.icon = icons[i]; });
+  shuffles--;
+  hud();
+};
+document.getElementById('restart').onclick = () => startLevel(false);
+startLevel(true);
+draw();
+</script>
+</body>
+</html>

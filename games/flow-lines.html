@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow Lines</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>〰️ Flow Lines</h1>
+  <div class="stats">Level <b id="level">1</b> Flows <b id="flows">0/0</b> Filled <b id="fill">0%</b></div>
+</header>
+<div class="controls">
+  <button class="btn alt" id="restart">↺ Clear</button>
+  <button class="btn alt" id="hint">💡 Hint</button>
+  <button class="btn alt" id="skip">⏭ New puzzle</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="560" height="560"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Drag from a dot to draw a pipe to the other dot of the same colour. Pipes can't cross — drawing over a pipe cuts it. Connect every pair and fill the whole board.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const PAL = ['#ef4444', '#3b82f6', '#22c55e', '#facc15', '#f97316', '#06b6d4', '#ec4899', '#a855f7', '#a16207', '#e5e7eb', '#14b8a6', '#84cc16', '#6366f1', '#f43f5e'];
+let level = Store.get('flowlines-level', 1), N, CS, dots, solution, paths, drawing = null;
+
+// Random Hamiltonian path by "backbite" moves, then cut it into pipes of length 3+.
+function generate() {
+  N = Math.min(5 + Math.floor((level - 1) / 3), 10);
+  let path = [];
+  for (let y = 0; y < N; y++) for (let k = 0; k < N; k++) path.push([y % 2 ? N - 1 - k : k, y]);
+  const idx = () => { const m = new Map(); path.forEach(([x, y], i) => m.set(x + ',' + y, i)); return m; };
+  let where = idx();
+  for (let it = 0; it < N * N * 25; it++) {
+    if (Math.random() < 0.5) { path.reverse(); where = idx(); }
+    const [ex, ey] = path[path.length - 1];
+    const nb = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => [ex + dx, ey + dy]).filter(([x, y]) => x >= 0 && y >= 0 && x < N && y < N);
+    const [nx, ny] = pick(nb), i = where.get(nx + ',' + ny);
+    if (i === path.length - 2) continue;
+    const tail = path.splice(i + 1).reverse();
+    path.push(...tail);
+    tail.forEach(([x, y], k) => where.set(x + ',' + y, i + 1 + k));
+  }
+  const maxLen = Math.max(4, Math.round(N * 1.3)), segs = [];
+  let i = 0;
+  while (i < path.length) {
+    let len = randInt(3, maxLen);
+    if (path.length - (i + len) < 3) len = path.length - i;
+    segs.push(path.slice(i, i + len));
+    i += len;
+  }
+  if (segs.length > PAL.length) return generate();
+  solution = segs;
+  dots = segs.map((s, c) => ({ c, a: s[0], b: s[s.length - 1] }));
+}
+
+function startLevel(fresh) {
+  if (fresh) generate();
+  CS = cv.width / N;
+  paths = dots.map(() => []);
+  drawing = null;
+  overlay(ov, null);
+  hud();
+}
+
+const same = (p, q) => p[0] === q[0] && p[1] === q[1];
+function dotAt(x, y) { for (const d of dots) { if (same(d.a, [x, y]) || same(d.b, [x, y])) return d; } return null; }
+function ownerAt(x, y) { for (let c = 0; c < paths.length; c++) { const i = paths[c].findIndex(p => p[0] === x && p[1] === y); if (i >= 0) return { c, i }; } return null; }
+const complete = c => { const p = paths[c], d = dots[c]; return p.length > 1 && ((same(p[0], d.a) && same(p[p.length - 1], d.b)) || (same(p[0], d.b) && same(p[p.length - 1], d.a))); };
+
+function hud() {
+  const done = dots.filter(d => complete(d.c)).length;
+  const filled = new Set();
+  paths.forEach(p => p.forEach(([x, y]) => filled.add(x + ',' + y)));
+  dots.forEach(d => { filled.add(d.a.join()); filled.add(d.b.join()); });
+  document.getElementById('level').textContent = level;
+  document.getElementById('flows').textContent = `${done}/${dots.length}`;
+  document.getElementById('fill').textContent = Math.round(filled.size / (N * N) * 100) + '%';
+  return { done, full: filled.size === N * N };
+}
+
+function cellOf(e) { const p = canvasPoint(cv, e); return [Math.floor(p.x / CS), Math.floor(p.y / CS)]; }
+
+function startDraw(x, y) {
+  const d = dotAt(x, y);
+  if (d) { paths[d.c] = [[x, y]]; drawing = d.c; return; }
+  const o = ownerAt(x, y);
+  if (o) { paths[o.c] = paths[o.c].slice(0, o.i + 1); drawing = o.c; }
+}
+
+function extend(x, y) {
+  if (drawing == null || x < 0 || y < 0 || x >= N || y >= N) return;
+  const p = paths[drawing], lastP = p[p.length - 1];
+  if (same(lastP, [x, y])) return;
+  if (Math.abs(lastP[0] - x) + Math.abs(lastP[1] - y) !== 1) return;
+  // stepping back undoes
+  const back = p.findIndex(q => same(q, [x, y]));
+  if (back >= 0) { paths[drawing] = p.slice(0, back + 1); return; }
+  if (complete(drawing)) return;
+  const d = dotAt(x, y);
+  if (d && d.c !== drawing) return;
+  // cut through another colour's pipe
+  const o = ownerAt(x, y);
+  if (o && o.c !== drawing) paths[o.c] = paths[o.c].slice(0, o.i);
+  p.push([x, y]);
+  Sound.beep(300 + p.length * 15, 0.02, 'sine', 0.02);
+  if (complete(drawing)) Sound.beep(760, 0.1, 'triangle', 0.04);
+}
+
+function finishDraw() {
+  if (drawing == null) return;
+  drawing = null;
+  const { done, full } = hud();
+  if (done === dots.length) {
+    if (full) {
+      level++;
+      Store.set('flowlines-level', level);
+      Sound.beep(988, 0.3, 'triangle');
+      overlay(ov, `<h2>Perfect! ⭐⭐⭐</h2><p>Every pipe connected and the board full.</p><button class="btn" onclick="startLevel(true)">Level ${level}</button>`);
+    } else overlay(ov, '<h2>All connected!</h2><p>Now fill every empty square for a perfect board.</p><button class="btn" onclick="overlay(ov, null)">Keep going</button>');
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#05060d';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!dots) return requestAnimationFrame(draw);
+  paths.forEach((p, c) => p.forEach(([x, y]) => { ctx.fillStyle = PAL[c] + '33'; ctx.fillRect(x * CS, y * CS, CS, CS); }));
+  ctx.strokeStyle = '#3f3f5a';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= N; i++) {
+    ctx.beginPath(); ctx.moveTo(i * CS, 0); ctx.lineTo(i * CS, N * CS); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * CS); ctx.lineTo(N * CS, i * CS); ctx.stroke();
+  }
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  paths.forEach((p, c) => {
+    if (p.length < 2) return;
+    ctx.strokeStyle = PAL[c];
+    ctx.lineWidth = CS * 0.32;
+    ctx.beginPath();
+    p.forEach(([x, y], i) => (i ? ctx.lineTo : ctx.moveTo).call(ctx, x * CS + CS / 2, y * CS + CS / 2));
+    ctx.stroke();
+  });
+  dots.forEach(d => [d.a, d.b].forEach(([x, y]) => {
+    ctx.fillStyle = PAL[d.c];
+    ctx.beginPath(); ctx.arc(x * CS + CS / 2, y * CS + CS / 2, CS * 0.34, 0, 7); ctx.fill();
+    if (complete(d.c)) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+  }));
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => { if (!ov.classList.contains('hidden')) return; startDraw(...cellOf(e)); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => {
+  if (drawing == null) return;
+  // fill in every cell the pointer crossed, so fast swipes don't skip squares
+  const [x, y] = cellOf(e), p = paths[drawing], lastP = p[p.length - 1];
+  let cx = lastP[0], cy = lastP[1], guard = 0;
+  while ((cx !== x || cy !== y) && guard++ < 30 && drawing != null) {
+    if (cx !== x) cx += Math.sign(x - cx); else cy += Math.sign(y - cy);
+    extend(cx, cy);
+    const np = paths[drawing], nl = np[np.length - 1];
+    if (nl[0] !== cx || nl[1] !== cy) break;
+  }
+  hud();
+});
+cv.addEventListener('pointerup', finishDraw);
+cv.addEventListener('pointercancel', finishDraw);
+document.getElementById('restart').onclick = () => startLevel(false);
+document.getElementById('skip').onclick = () => startLevel(true);
+// a hint lays down one correct pipe from the generated solution
+document.getElementById('hint').onclick = () => {
+  const c = dots.findIndex(d => !complete(d.c) || paths[d.c].length !== solution[d.c].length);
+  if (c < 0) return;
+  const cells = solution[c];
+  paths.forEach((p, k) => { if (k !== c) { const cut = p.findIndex(q => cells.some(s => same(s, q))); if (cut >= 0) paths[k] = p.slice(0, cut); } });
+  paths[c] = cells.map(q => q.slice());
+  drawing = c;
+  finishDraw();
+};
+generate();
+startLevel(false);
+draw();
+</script>
+</body>
+</html>

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Merge Drop</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>✖️ Merge Drop</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="new">New game</button></div>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="640"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Tap a column (or use <kbd>←</kbd><kbd>→</kbd> and <kbd>Space</kbd>) to drop the next block. Blocks with the same number that touch merge into double the value — and chains keep merging. Don't let a column overflow.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const COLS = 5, ROWS = 7, CS = 76, OX = (420 - COLS * CS) / 2, OY = 100;
+const HUES = { 2: '#f87171', 4: '#fb923c', 8: '#facc15', 16: '#4ade80', 32: '#22d3ee', 64: '#60a5fa', 128: '#a78bfa', 256: '#f472b6', 512: '#e879f9', 1024: '#fde047', 2048: '#f59e0b' };
+let grid, next, after, score, best = Store.get('mergedrop-best', 0), busy = false, over = false, aimCol = 2, pops = [], falling = null;
+
+function newGame() {
+  grid = Array.from({ length: COLS }, () => []);
+  score = 0; over = false; busy = false; pops = []; falling = null;
+  next = roll(); after = roll();
+  overlay(ov, null);
+  hud();
+}
+
+// new blocks are small, but bigger ones appear as the board grows
+function roll() {
+  const top = Math.max(2, ...[].concat(...grid));
+  const opts = [2, 4, 8, 16, 32, 64].filter(v => v <= Math.max(8, top / 8));
+  return pick(opts);
+}
+
+function hud() { document.getElementById('score').textContent = score; document.getElementById('best').textContent = best; }
+
+function drop(c) {
+  if (busy || over) return;
+  if (grid[c].length >= ROWS) {
+    // a full column only accepts a block that merges with its top
+    if (grid[c][ROWS - 1] !== next) return;
+  }
+  busy = true;
+  const v = next;
+  next = after; after = roll();
+  falling = { c, v, y: ROWS + 0.4, to: Math.min(grid[c].length, ROWS - 1) };
+}
+
+const color = v => HUES[v] || '#fafafa';
+
+// merge everything that touches the cell at (c, r) with the same value, then let blocks settle
+function resolve(c, r) {
+  const v = grid[c][r];
+  const nb = [[c - 1, r], [c + 1, r], [c, r - 1]].filter(([x, y]) => x >= 0 && x < COLS && y >= 0 && grid[x][y] === v);
+  if (!nb.length) return settle();
+  let total = v;
+  nb.forEach(([x, y]) => { grid[x][y] = null; total += v; pops.push({ x, y, t: 0 }); });
+  // the value doubles for each block absorbed
+  let nv = v;
+  for (let i = 0; i < nb.length; i++) nv *= 2;
+  grid[c][r] = nv;
+  score += nv;
+  if (score > best) { best = score; Store.set('mergedrop-best', best); }
+  hud();
+  Sound.beep(300 + Math.log2(nv) * 60, 0.1, 'triangle', 0.05);
+  setTimeout(() => {
+    // collapse gaps
+    for (let x = 0; x < COLS; x++) grid[x] = grid[x].filter(b => b != null);
+    // the merged block moves up one if the block above it was absorbed; keep chaining from there
+    resolve(c, nb.some(([x, y]) => x === c && y === r - 1) ? r - 1 : r);
+  }, 160);
+}
+
+// after a merge, check every block in case gravity created new matches
+function settle() {
+  for (let x = 0; x < COLS; x++) for (let y = 0; y < grid[x].length; y++) {
+    const v = grid[x][y];
+    if ((x + 1 < COLS && grid[x + 1][y] === v) || (y + 1 < grid[x].length && grid[x][y + 1] === v)) return resolve(x, y);
+  }
+  busy = false;
+  if (grid.every(col => col.length >= ROWS) && grid.every(col => col[ROWS - 1] !== next)) {
+    over = true;
+    Sound.beep(140, 0.4, 'sawtooth', 0.05);
+    overlay(ov, `<h2>Board full</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Play again</button>`);
+  }
+}
+
+function block(x, y, v, s = 1) {
+  const w = (CS - 6) * s;
+  ctx.fillStyle = color(v);
+  ctx.beginPath(); ctx.roundRect(x - w / 2, y - w / 2, w, w, 10); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.15)';
+  ctx.fillRect(x - w / 2 + 4, y + w / 2 - 8, w - 8, 4);
+  ctx.fillStyle = '#111827';
+  ctx.font = `bold ${(v >= 1000 ? 20 : v >= 100 ? 24 : 28) * s}px system-ui`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(v >= 10000 ? Math.round(v / 1000) + 'k' : v, x, y + 1);
+}
+
+function draw() {
+  ctx.fillStyle = '#111827';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!grid) return requestAnimationFrame(draw);
+  ctx.fillStyle = '#1f2937';
+  ctx.beginPath(); ctx.roundRect(OX - 6, OY - 6, COLS * CS + 12, ROWS * CS + 12, 12); ctx.fill();
+  for (let x = 0; x < COLS; x++) {
+    ctx.fillStyle = x === aimCol ? 'rgba(255,255,255,.06)' : 'transparent';
+    ctx.fillRect(OX + x * CS, OY, CS, ROWS * CS);
+  }
+  // blocks stack from the top down like the original ad game (gravity pulls up)
+  for (let x = 0; x < COLS; x++) grid[x].forEach((v, y) => { if (v != null) block(OX + x * CS + CS / 2, OY + y * CS + CS / 2, v); });
+  pops.forEach(p => { p.t += 16; ctx.globalAlpha = Math.max(0, 1 - p.t / 200); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(OX + p.x * CS + CS / 2, OY + p.y * CS + CS / 2, CS * 0.4 * (1 + p.t / 200), 0, 7); ctx.fill(); ctx.globalAlpha = 1; });
+  pops = pops.filter(p => p.t < 200);
+  if (falling) {
+    falling.y -= 0.6;
+    if (falling.y <= falling.to) {
+      const { c, v } = falling;
+      falling = null;
+      if (grid[c].length >= ROWS) { grid[c][ROWS - 1] = v * 2; score += v * 2; hud(); resolve(c, ROWS - 1); }
+      else { grid[c].push(v); resolve(c, grid[c].length - 1); }
+    } else block(OX + falling.c * CS + CS / 2, OY + falling.y * CS + CS / 2, falling.v);
+  }
+  // next blocks: the one about to drop and the one after
+  block(OX + aimCol * CS + CS / 2, OY + ROWS * CS + 52, next, 0.9);
+  ctx.fillStyle = '#9ca3af'; ctx.font = '13px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText('then', 14, 40);
+  block(70, 40, after, 0.55);
+  ctx.textAlign = 'center';
+  ctx.fillText('Blocks rise to the top — tap a column', cv.width / 2, 76);
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointermove', e => { const p = canvasPoint(cv, e); const c = Math.floor((p.x - OX) / CS); if (c >= 0 && c < COLS) aimCol = c; });
+cv.addEventListener('pointerdown', e => { const p = canvasPoint(cv, e); const c = Math.floor((p.x - OX) / CS); if (c >= 0 && c < COLS) { aimCol = c; drop(c); } });
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') aimCol = Math.max(0, aimCol - 1);
+  else if (e.key === 'ArrowRight') aimCol = Math.min(COLS - 1, aimCol + 1);
+  else if (e.key === ' ' || e.key === 'ArrowDown') drop(aimCol);
+});
+document.getElementById('new').onclick = newGame;
+newGame();
+draw();
+</script>
+</body>
+</html>

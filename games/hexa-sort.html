@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hexa Sort</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⬢ Hexa Sort</h1>
+  <div class="stats">Score <b id="score">0</b> Goal <b id="goal">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="new">New game</button></div>
+<div class="stage">
+  <canvas id="c" class="game" width="520" height="680"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Drag a stack from the bottom onto an empty hex (or tap a stack, then tap a hex). Neighbouring stacks with the same top colour slide together. Ten or more of one colour on top clears for points. Run out of space and it's over.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const COLS = ['#ef4444', '#3b82f6', '#22c55e', '#facc15', '#a855f7', '#f97316', '#06b6d4'];
+const R = 3, HS = 37, CX = 260, CY = 290, LAYER = 4, CLEAR = 10;
+let cells, hand, score, goal, nColors, best = Store.get('hexasort-best', 0), drag = null, sel = -1, busy = false, over = false, pops = [];
+
+// axial coordinates of a hexagon-shaped board
+function newGame() {
+  cells = [];
+  for (let q = -R; q <= R; q++) for (let r = Math.max(-R, -q - R); r <= Math.min(R, -q + R); r++) cells.push({ q, r, stack: [] });
+  score = 0; goal = 120; nColors = 4; over = false; busy = false; pops = [];
+  // a few starting stacks
+  shuffle(cells.slice()).slice(0, 5).forEach(c => { c.stack = makeStack(); });
+  dealHand();
+  overlay(ov, null);
+  hud();
+}
+
+const pos = c => ({ x: CX + HS * 1.5 * c.q, y: CY + HS * Math.sqrt(3) * (c.r + c.q / 2) });
+
+function makeStack() {
+  const out = [], runs = randInt(1, 3);
+  let prev = -1;
+  for (let i = 0; i < runs; i++) {
+    let col;
+    do { col = randInt(0, nColors - 1); } while (col === prev);
+    prev = col;
+    for (let k = randInt(1, 4); k > 0; k--) out.push(col);
+  }
+  return out;
+}
+
+function dealHand() { hand = [0, 1, 2].map(() => makeStack()); }
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('goal').textContent = goal;
+  document.getElementById('best').textContent = best;
+}
+
+const neighbours = c => [[1, 0], [-1, 0], [0, 1], [0, -1], [1, -1], [-1, 1]].map(([dq, dr]) => cells.find(o => o.q === c.q + dq && o.r === c.r + dr)).filter(Boolean);
+const topOf = s => s[s.length - 1];
+function topRun(s) { let n = 0; for (let i = s.length - 1; i >= 0 && s[i] === topOf(s); i--) n++; return n; }
+
+function place(hi, cell) {
+  if (busy || over || cell.stack.length || !hand[hi]) return;
+  cell.stack = hand[hi];
+  hand[hi] = null;
+  Sound.beep(420, 0.05, 'triangle', 0.04);
+  if (hand.every(h => !h)) dealHand();
+  busy = true;
+  resolve([cell]);
+}
+
+// Same-colour tops flow into the stack that was just touched; ten of a kind on top clears.
+function resolve(queue) {
+  while (queue.length) {
+    const c = queue.shift();
+    if (!c.stack.length) continue;
+    const col = topOf(c.stack);
+    const same = neighbours(c).filter(n => n.stack.length && topOf(n.stack) === col);
+    if (same.length) {
+      // pull from the neighbour, then revisit both: the neighbour's new top may match something else
+      const n = same[0], k = topRun(n.stack);
+      const moved = n.stack.splice(n.stack.length - k, k);
+      c.stack.push(...moved);
+      Sound.beep(500 + c.stack.length * 12, 0.04, 'sine', 0.03);
+      setTimeout(() => resolve([c, n, ...neighbours(n), ...queue]), 170);
+      return;
+    }
+    if (topRun(c.stack) >= CLEAR) {
+      const k = topRun(c.stack);
+      c.stack.splice(c.stack.length - k, k);
+      score += k;
+      if (score > best) { best = score; Store.set('hexasort-best', best); }
+      pops.push({ ...pos(c), t: 0, col: COLS[col] });
+      Sound.beep(880, 0.2, 'triangle', 0.05);
+      if (score >= goal) { goal += 150; nColors = Math.min(COLS.length, nColors + 1); }
+      hud();
+      setTimeout(() => resolve([c, ...neighbours(c), ...queue]), 220);
+      return;
+    }
+  }
+  busy = false;
+  if (cells.every(c => c.stack.length)) {
+    over = true;
+    Sound.beep(130, 0.5, 'sawtooth', 0.05);
+    overlay(ov, `<h2>Board full</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Play again</button>`);
+  }
+}
+
+function hex(x, y, s, fill, stroke) {
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) { const a = Math.PI / 3 * i; ctx.lineTo(x + Math.cos(a) * s, y + Math.sin(a) * s); }
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
+}
+
+function drawStack(x, y, s, stack, scale = 1) {
+  stack.forEach((col, i) => {
+    hex(x, y - i * LAYER * scale, s * 0.92 * scale, COLS[col], 'rgba(0,0,0,.25)');
+  });
+  if (stack.length) {
+    ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.font = `bold ${13 * scale}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(topRun(stack), x, y - (stack.length - 1) * LAYER * scale);
+  }
+}
+
+const handPos = i => ({ x: 110 + i * 150, y: 620 });
+
+function draw() {
+  ctx.fillStyle = '#1e1b4b';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!cells) return requestAnimationFrame(draw);
+  const target = drag ? nearestEmpty(drag.x, drag.y) : null;
+  cells.forEach(c => { const p = pos(c); hex(p.x, p.y, HS * 0.95, c === target ? '#4c1d95' : '#312e81', '#4338ca'); });
+  cells.slice().sort((a, b) => pos(a).y - pos(b).y).forEach(c => { const p = pos(c); drawStack(p.x, p.y, HS, c.stack); });
+  pops.forEach(p => { p.t += 16; ctx.globalAlpha = Math.max(0, 1 - p.t / 400); hex(p.x, p.y - p.t / 10, HS * (1 + p.t / 400), p.col); ctx.globalAlpha = 1; });
+  pops = pops.filter(p => p.t < 400);
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.beginPath(); ctx.roundRect(20, 560, 480, 110, 16); ctx.fill();
+  hand.forEach((h, i) => {
+    if (!h) return;
+    const p = drag && drag.i === i ? drag : handPos(i);
+    if (sel === i && !drag) { ctx.strokeStyle = '#fde047'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(p.x, p.y - 10, 46, 0, 7); ctx.stroke(); }
+    drawStack(p.x, p.y + (drag && drag.i === i ? 0 : 20), HS, h, 0.95);
+  });
+  requestAnimationFrame(draw);
+}
+
+function nearestEmpty(x, y) {
+  let best = null, bd = HS * 1.2;
+  cells.forEach(c => { if (c.stack.length) return; const p = pos(c), d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = c; } });
+  return best;
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (busy || over) return;
+  const p = canvasPoint(cv, e);
+  const i = hand.findIndex((h, k) => h && Math.hypot(p.x - handPos(k).x, p.y - handPos(k).y) < 60);
+  if (i >= 0) { drag = { i, x: p.x, y: p.y - 40, sx: p.x, sy: p.y }; cv.setPointerCapture(e.pointerId); return; }
+  if (sel >= 0) { const c = nearestEmpty(p.x, p.y); if (c) { place(sel, c); sel = -1; } }
+});
+cv.addEventListener('pointermove', e => { if (!drag) return; const p = canvasPoint(cv, e); drag.x = p.x; drag.y = p.y - 40; });
+cv.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const p = canvasPoint(cv, e), d = drag;
+  drag = null;
+  if (Math.hypot(p.x - d.sx, p.y - d.sy) < 12) { sel = sel === d.i ? -1 : d.i; return; }
+  const c = nearestEmpty(d.x, d.y);
+  if (c) { place(d.i, c); sel = -1; }
+});
+document.getElementById('new').onclick = newGame;
+newGame();
+draw();
+</script>
+</body>
+</html>

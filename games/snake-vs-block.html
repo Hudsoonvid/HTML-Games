@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake vs Block</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐛 Snake vs Block</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="400" height="680"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Drag left and right (or use <kbd>←</kbd><kbd>→</kbd>) to steer. Eat the numbered dots to grow. Ramming a block costs one segment per point on it — pick the weakest block in each row!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, LANES = 5, LW = W / LANES, HEADY = H - 220, SR = 10;
+let snake, len, rows, pellets, walls, dist, speed, score, best = Store.get('snakeblock-best', 0), state = 'ready', last = 0, targetX = W / 2, keys = {}, chewing = null, trail = [];
+
+function newGame() {
+  snake = { x: W / 2 }; len = 5; rows = []; pellets = []; walls = []; dist = 0; speed = 4; score = 0; chewing = null; trail = [];
+  for (let y = HEADY - 300; y > -1200; y -= 340) spawnRow(y);
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+// a row of blocks always leaves at least one block small enough to get through
+function spawnRow(y) {
+  const cells = [];
+  const easy = randInt(0, LANES - 1);
+  for (let i = 0; i < LANES; i++) {
+    if (Math.random() < 0.25 && i !== easy) continue;
+    cells.push({ lane: i, y, hp: i === easy ? randInt(1, Math.max(2, Math.floor(len / 2))) : randInt(1, Math.max(4, len + score / 10)) });
+  }
+  rows.push(...cells);
+  for (let k = 0; k < 3; k++) pellets.push({ x: rand(20, W - 20), y: y + rand(80, 260), n: randInt(1, 5) });
+  if (Math.random() < 0.5) { const lx = randInt(1, LANES - 1) * LW; walls.push({ x: lx, y1: y + 40, y2: y + rand(140, 260) }); }
+}
+
+function hud() { document.getElementById('score').textContent = score; document.getElementById('best').textContent = best; }
+
+function end() {
+  state = 'over';
+  if (recordBest('snakeblock-best', score)) best = score;
+  hud();
+  Sound.beep(110, 0.5, 'sawtooth', 0.05);
+  overlay(ov, `<h2>Out of snake!</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Play again</button>`);
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  if (keys.ArrowLeft) targetX -= 7 * f;
+  if (keys.ArrowRight) targetX += 7 * f;
+  targetX = clamp(targetX, SR, W - SR);
+  // steer toward the target, blocked by side walls
+  let nx = snake.x + clamp(targetX - snake.x, -12 * f, 12 * f);
+  for (const w of walls) if (HEADY > w.y1 && HEADY < w.y2) {
+    if (snake.x <= w.x - SR && nx > w.x - SR) nx = w.x - SR - 0.5;
+    if (snake.x >= w.x + SR && nx < w.x + SR) nx = w.x + SR + 0.5;
+  }
+  snake.x = nx;
+  trail.unshift(snake.x);
+  if (trail.length > 400) trail.pop();
+  // chewing through a block stops the snake
+  if (chewing) {
+    chewing.t -= dt;
+    if (chewing.t <= 0) {
+      chewing.t = 70;
+      chewing.b.hp--; len--; score++;
+      Sound.beep(300 + chewing.b.hp * 20, 0.03, 'square', 0.03);
+      hud();
+      if (len <= 0) return end();
+      if (chewing.b.hp <= 0) { rows = rows.filter(r => r !== chewing.b); chewing = null; }
+    }
+    return;
+  }
+  const v = speed * f;
+  dist += v;
+  speed = Math.min(8, 4 + dist / 6000);
+  [rows, pellets].forEach(list => list.forEach(o => { o.y += v; }));
+  walls.forEach(w => { w.y1 += v; w.y2 += v; });
+  for (const b of rows) {
+    const bx = b.lane * LW;
+    if (snake.x > bx && snake.x < bx + LW && HEADY - SR < b.y + LW - 4 && HEADY - SR > b.y + LW - 4 - v - 2) { chewing = { b, t: 0 }; break; }
+  }
+  // blocks you slide past from the side push you out
+  for (const b of rows) {
+    const bx = b.lane * LW;
+    if (HEADY > b.y && HEADY < b.y + LW) { if (snake.x > bx - SR && snake.x < bx + LW / 2) snake.x = Math.min(snake.x, bx - SR); else if (snake.x < bx + LW + SR && snake.x >= bx + LW / 2) snake.x = Math.max(snake.x, bx + LW + SR); }
+  }
+  pellets = pellets.filter(p => {
+    if (Math.hypot(p.x - snake.x, p.y - HEADY) < 20) { len += p.n; Sound.beep(800, 0.05, 'triangle', 0.03); return false; }
+    return p.y < H + 20;
+  });
+  rows = rows.filter(b => b.y < H + 20);
+  walls = walls.filter(w => w.y1 < H);
+  const top = Math.min(...rows.map(b => b.y), 0);
+  if (top > -500) spawnRow(top - 340);
+}
+
+function draw() {
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, W, H);
+  if (!snake) return;
+  walls.forEach(w => { ctx.fillStyle = '#e2e8f0'; ctx.fillRect(w.x - 3, w.y1, 6, w.y2 - w.y1); });
+  rows.forEach(b => {
+    const t = Math.min(1, b.hp / 40);
+    ctx.fillStyle = `hsl(${140 - t * 140}, 75%, 55%)`;
+    ctx.beginPath(); ctx.roundRect(b.lane * LW + 3, b.y + 3, LW - 6, LW - 6, 10); ctx.fill();
+    ctx.fillStyle = '#0f172a'; ctx.font = 'bold 26px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(b.hp, b.lane * LW + LW / 2, b.y + LW / 2 + 1);
+  });
+  pellets.forEach(p => {
+    ctx.fillStyle = '#facc15'; ctx.beginPath(); ctx.arc(p.x, p.y, 9, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center'; ctx.fillText(p.n, p.x, p.y - 18);
+  });
+  // body follows the head's recent x positions
+  const segs = Math.min(len, 40);
+  for (let i = segs - 1; i >= 0; i--) {
+    const x = trail[Math.min(trail.length - 1, i * 3)] || snake.x;
+    ctx.fillStyle = i ? '#fbbf24' : '#f59e0b';
+    ctx.beginPath(); ctx.arc(x, HEADY + i * SR * 1.6, SR, 0, 7); ctx.fill();
+  }
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 15px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText(len, snake.x, HEADY - 22);
+}
+
+function loop(t) {
+  const dt = Math.min(34, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+let dragX = null, startSnake = 0;
+cv.addEventListener('pointerdown', e => { dragX = canvasPoint(cv, e).x; startSnake = targetX = snake ? snake.x : W / 2; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (dragX != null) targetX = startSnake + (canvasPoint(cv, e).x - dragX) * 1.3; else if (e.pointerType === 'mouse') targetX = canvasPoint(cv, e).x; });
+cv.addEventListener('pointerup', () => { dragX = null; });
+document.addEventListener('keydown', e => { keys[e.key] = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') newGame(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+hud();
+overlay(ov, '<h2>🐛 Snake vs Block</h2><p>Grow, then smash through the weakest blocks.</p><button class="btn" onclick="newGame()">Play</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knife Hit</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔪 Knife Hit</h1>
+  <div class="stats">Stage <b id="stage">1</b> Score <b id="score">0</b> 🍎 <b id="apples">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="680"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Tap, click or press <kbd>Space</kbd> to throw. Stick every knife into the spinning log without hitting a knife that's already there. Slice apples for bonus points. Every fifth stage is a boss log.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, CX = W / 2, CY = 230, R = 92, KL = 70;
+let stage, score, apples = Store.get('knifehit-apples', 0), best = Store.get('knifehit-best', 0), log, knivesLeft, flying, state = 'ready', last = 0, chips = [], shake = 0;
+
+function newGame() { stage = 1; score = 0; startStage(); state = 'play'; overlay(ov, null); }
+
+// rotation patterns get trickier: steady, speeding up and slowing down, and reversing
+function startStage() {
+  const boss = stage % 5 === 0;
+  const kinds = ['steady', 'wobble', 'reverse'];
+  log = { ang: 0, speed: 1.6 + stage * 0.12, pattern: stage < 3 ? 'steady' : kinds[stage % 3], t: 0, stuck: [], apples: [], boss };
+  const pre = boss ? 3 : Math.min(Math.floor(stage / 2), 4);
+  for (let i = 0; i < pre; i++) log.stuck.push(rand(0, Math.PI * 2));
+  if (Math.random() < 0.6) log.apples.push({ a: rand(0, Math.PI * 2) });
+  knivesLeft = boss ? 10 : 5 + Math.min(stage, 4);
+  flying = null;
+  hud();
+}
+
+function hud() {
+  document.getElementById('stage').textContent = stage + (log && log.boss ? ' 👑' : '');
+  document.getElementById('score').textContent = score;
+  document.getElementById('apples').textContent = apples;
+  document.getElementById('best').textContent = best;
+}
+
+function speedAt(t) {
+  const s = log.speed;
+  if (log.pattern === 'wobble') return s * (0.4 + Math.abs(Math.sin(t * 0.9)) * 1.3);
+  if (log.pattern === 'reverse') return Math.sin(t * 0.6) > -0.3 ? s : -s * 1.2;
+  return s;
+}
+
+function angDiff(a, b) { let d = (a - b) % (Math.PI * 2); if (d < -Math.PI) d += Math.PI * 2; if (d > Math.PI) d -= Math.PI * 2; return Math.abs(d); }
+
+function throwKnife() {
+  if (state !== 'play' || flying || knivesLeft <= 0) return;
+  flying = { y: H - 110, vy: -42 };
+  Sound.beep(900, 0.03, 'square', 0.02);
+}
+
+function fail() {
+  state = 'over';
+  shake = 12;
+  Sound.beep(110, 0.4, 'sawtooth', 0.06);
+  if (recordBest('knifehit-best', score)) best = score;
+  hud();
+  setTimeout(() => overlay(ov, `<h2>Clang! 💥</h2><p>Stage ${stage} · Score ${score}</p><button class="btn" onclick="newGame()">Play again</button>`), 600);
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  log.t += s;
+  log.ang += speedAt(log.t) * s;
+  chips.forEach(c => { c.x += c.vx * s; c.y += c.vy * s; c.vy += 900 * s; c.r += c.vr * s; });
+  chips = chips.filter(c => c.y < H + 40);
+  if (shake) shake = Math.max(0, shake - dt * 0.03);
+  if (state !== 'play' || !flying) return;
+  flying.y += flying.vy * dt / 16.67;
+  if (flying.y - KL / 2 <= CY + R) {
+    // the knife hits the log at the bottom (angle PI/2 in screen space)
+    const hitAng = Math.PI / 2 - log.ang;
+    if (log.stuck.some(a => angDiff(a, hitAng) < 0.17)) {
+      chips.push({ x: CX, y: CY + R + KL / 2, vx: rand(-200, 200), vy: -300, r: 0, vr: 12, knife: true });
+      flying = null;
+      return fail();
+    }
+    log.stuck.push(hitAng);
+    log.apples = log.apples.filter(ap => {
+      if (angDiff(ap.a, hitAng) < 0.25) { apples++; Store.set('knifehit-apples', apples); score += 2; Sound.beep(1200, 0.08, 'triangle', 0.04); for (let i = 0; i < 2; i++) chips.push({ x: CX, y: CY + R, vx: rand(-150, 150), vy: -250, r: 0, vr: 6, apple: true }); return false; }
+      return true;
+    });
+    flying = null;
+    knivesLeft--;
+    score++;
+    shake = 3;
+    Sound.beep(240, 0.05, 'triangle', 0.05);
+    hud();
+    if (knivesLeft === 0) {
+      // the log bursts into pieces and the next stage begins
+      for (let i = 0; i < 8; i++) chips.push({ x: CX + rand(-40, 40), y: CY + rand(-40, 40), vx: rand(-260, 260), vy: rand(-400, -100), r: 0, vr: rand(-8, 8), wood: true });
+      Sound.beep(660, 0.2, 'triangle');
+      state = 'between';
+      setTimeout(() => { stage++; startStage(); state = 'play'; }, 900);
+    }
+  }
+}
+
+function drawKnife(x, y, rot) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.fillStyle = '#e5e7eb';
+  ctx.beginPath(); ctx.moveTo(0, -KL / 2); ctx.lineTo(7, -KL / 2 + 14); ctx.lineTo(6, 6); ctx.lineTo(-6, 6); ctx.lineTo(-7, -KL / 2 + 14); ctx.fill();
+  ctx.fillStyle = '#1f2937';
+  ctx.beginPath(); ctx.roundRect(-6, 6, 12, KL / 2 - 6, 4); ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  ctx.save();
+  if (shake) ctx.translate(rand(-shake, shake), rand(-shake, shake));
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1e1b4b'); g.addColorStop(1, '#0f172a');
+  ctx.fillStyle = g;
+  ctx.fillRect(-20, -20, W + 40, H + 40);
+  if (log && state !== 'between') {
+    // stuck knives point outward from the log
+    log.stuck.forEach(a => {
+      const ang = a + log.ang;
+      drawKnife(CX + Math.cos(ang) * (R + KL / 2 - 10), CY + Math.sin(ang) * (R + KL / 2 - 10), ang - Math.PI / 2);
+    });
+    log.apples.forEach(ap => {
+      const ang = ap.a + log.ang;
+      ctx.font = '30px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('🍎', CX + Math.cos(ang) * (R + 16), CY + Math.sin(ang) * (R + 16));
+    });
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.rotate(log.ang);
+    ctx.fillStyle = log.boss ? '#7c2d12' : '#a16207';
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, 7); ctx.fill();
+    ctx.strokeStyle = log.boss ? '#9a3412' : '#ca8a04';
+    ctx.lineWidth = 4;
+    [0.75, 0.5, 0.25].forEach(k => { ctx.beginPath(); ctx.arc(0, 0, R * k, 0, 7); ctx.stroke(); });
+    ctx.fillStyle = '#713f12';
+    for (let i = 0; i < 6; i++) { ctx.beginPath(); ctx.arc(Math.cos(i) * R * 0.6, Math.sin(i) * R * 0.6, 4, 0, 7); ctx.fill(); }
+    if (log.boss) { ctx.font = '40px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('👑', 0, 0); }
+    ctx.restore();
+  }
+  chips.forEach(c => {
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r);
+    if (c.knife) drawKnife(0, 0, 0);
+    else if (c.apple) { ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI); ctx.fill(); }
+    else { ctx.fillStyle = '#a16207'; ctx.fillRect(-20, -12, 40, 24); }
+    ctx.restore();
+  });
+  if (flying) drawKnife(CX, flying.y, 0);
+  else if (state === 'play' && knivesLeft > 0) drawKnife(CX, H - 110, 0);
+  // knives remaining
+  for (let i = 0; i < knivesLeft; i++) {
+    ctx.fillStyle = i < knivesLeft - (flying ? 1 : 0) ? '#e5e7eb' : '#475569';
+    ctx.fillRect(20, H - 40 - i * 22, 8, 16);
+  }
+  ctx.restore();
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (log) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', throwKnife);
+document.addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'Enter') { if (state === 'play') throwKnife(); else if (state === 'ready' || state === 'over') newGame(); } });
+hud();
+overlay(ov, `<h2>🔪 Knife Hit</h2><p>Tap to throw. Don't hit the other knives!</p><button class="btn" onclick="newGame()">Play</button>`);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fruit Merge</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🍉 Fruit Merge</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="new">New game</button></div>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="640"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Move left and right, then release (or tap / press <kbd>Space</kbd>) to drop a fruit. Two of the same fruit merge into the next bigger one. Keep the pile below the red line and try to grow a watermelon 🍉.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, LEFT = 20, RIGHT = W - 20, FLOOR = H - 20, LINE = 120;
+const FRUITS = [
+  { e: '🍒', r: 15, c: '#dc2626' }, { e: '🍓', r: 20, c: '#ef4444' }, { e: '🍇', r: 27, c: '#7c3aed' },
+  { e: '🍊', r: 33, c: '#f97316' }, { e: '🍎', r: 40, c: '#e11d48' }, { e: '🍐', r: 48, c: '#a3e635' },
+  { e: '🍑', r: 56, c: '#fb923c' }, { e: '🍍', r: 65, c: '#facc15' }, { e: '🥥', r: 75, c: '#a16207' },
+  { e: '🍈', r: 86, c: '#86efac' }, { e: '🍉', r: 98, c: '#16a34a' }
+];
+let balls, held, nextK, aimX = W / 2, score, best = Store.get('fruitmerge-best', 0), over, cool = 0, overT = 0, last = 0, pops = [];
+
+function newGame() {
+  balls = []; pops = []; score = 0; over = false; cool = 0; overT = 0;
+  held = randInt(0, 2); nextK = randInt(0, 3);
+  overlay(ov, null);
+  hud();
+}
+
+function hud() { document.getElementById('score').textContent = score; document.getElementById('best').textContent = best; }
+
+function dropFruit() {
+  if (over || cool > 0) return;
+  const r = FRUITS[held].r;
+  balls.push({ x: clamp(aimX, LEFT + r, RIGHT - r), y: 70, vx: 0, vy: 0, k: held, born: performance.now() });
+  held = nextK; nextK = randInt(0, 4);
+  cool = 450;
+  Sound.beep(400, 0.04, 'triangle', 0.03);
+}
+
+function step(dt) {
+  const g = 0.0016 * dt * dt / 16.67;
+  for (const b of balls) { b.vy += 0.5 * dt / 16.67; b.x += b.vx * dt / 16.67; b.y += b.vy * dt / 16.67; }
+  // several relaxation passes keep the pile stable
+  for (let it = 0; it < 6; it++) {
+    for (let i = 0; i < balls.length; i++) {
+      const a = balls[i], ra = FRUITS[a.k].r;
+      if (a.x < LEFT + ra) { a.x = LEFT + ra; a.vx *= -0.3; }
+      if (a.x > RIGHT - ra) { a.x = RIGHT - ra; a.vx *= -0.3; }
+      if (a.y > FLOOR - ra) { a.y = FLOOR - ra; a.vy *= -0.2; a.vx *= 0.96; }
+      for (let j = i + 1; j < balls.length; j++) {
+        const b = balls[j], rb = FRUITS[b.k].r;
+        const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy), min = ra + rb;
+        if (d >= min || d === 0) continue;
+        if (a.k === b.k && !a.dead && !b.dead && a.k < FRUITS.length - 1) { merge(a, b); continue; }
+        const nx = dx / d, ny = dy / d, push = (min - d) / 2;
+        const ma = ra * ra, mb = rb * rb, ta = mb / (ma + mb), tb = ma / (ma + mb);
+        a.x -= nx * push * 2 * ta; a.y -= ny * push * 2 * ta;
+        b.x += nx * push * 2 * tb; b.y += ny * push * 2 * tb;
+        const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+        if (rv < 0) {
+          const imp = rv * 0.6;
+          a.vx += nx * imp * ta * 2; a.vy += ny * imp * ta * 2;
+          b.vx -= nx * imp * tb * 2; b.vy -= ny * imp * tb * 2;
+        }
+      }
+    }
+    balls = balls.filter(b => !b.dead);
+  }
+  for (const b of balls) { b.vx *= 0.995; }
+}
+
+function merge(a, b) {
+  a.dead = b.dead = true;
+  const k = a.k + 1;
+  const nb = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, vx: 0, vy: -1, k, born: performance.now() };
+  balls.push(nb);
+  pops.push({ x: nb.x, y: nb.y, r: FRUITS[k].r, t: 0 });
+  score += (k + 1) * (k + 2) / 2;
+  if (score > best) { best = score; Store.set('fruitmerge-best', best); }
+  hud();
+  Sound.beep(300 + k * 70, 0.12, 'triangle', 0.05);
+  if (k === FRUITS.length - 1) Sound.beep(1200, 0.5, 'triangle', 0.05);
+}
+
+function update(dt) {
+  if (over) return;
+  cool = Math.max(0, cool - dt);
+  for (let s = 0; s < 2; s++) step(dt / 2);
+  // game over when settled fruit stay above the line for two seconds
+  const now = performance.now();
+  const above = balls.some(b => now - b.born > 1500 && b.y - FRUITS[b.k].r < LINE && Math.abs(b.vy) < 1.5);
+  overT = above ? overT + dt : 0;
+  if (overT > 2000) {
+    over = true;
+    Sound.beep(140, 0.5, 'sawtooth', 0.05);
+    overlay(ov, `<h2>Over the line!</h2><p>Score ${score} · biggest ${FRUITS[Math.max(...balls.map(b => b.k))].e}</p><button class="btn" onclick="newGame()">Play again</button>`);
+  }
+}
+
+function fruit(x, y, k) {
+  const f = FRUITS[k];
+  ctx.fillStyle = f.c;
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath(); ctx.arc(x, y, f.r, 0, 7); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.font = `${f.r * 1.7}px system-ui`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(f.e, x, y + f.r * 0.08);
+}
+
+function draw() {
+  ctx.fillStyle = '#fef3c7';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fde68a';
+  ctx.fillRect(LEFT, LINE, RIGHT - LEFT, FLOOR - LINE);
+  ctx.strokeStyle = '#b45309';
+  ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(LEFT - 3, LINE - 20); ctx.lineTo(LEFT - 3, FLOOR + 3); ctx.lineTo(RIGHT + 3, FLOOR + 3); ctx.lineTo(RIGHT + 3, LINE - 20); ctx.stroke();
+  ctx.strokeStyle = overT > 0 ? '#dc2626' : 'rgba(220,38,38,.4)';
+  ctx.setLineDash([8, 6]); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(LEFT, LINE); ctx.lineTo(RIGHT, LINE); ctx.stroke();
+  ctx.setLineDash([]);
+  if (!balls) return;
+  if (!over) {
+    const r = FRUITS[held].r, x = clamp(aimX, LEFT + r, RIGHT - r);
+    ctx.strokeStyle = 'rgba(0,0,0,.12)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x, 70); ctx.lineTo(x, FLOOR); ctx.stroke();
+    if (cool <= 0) fruit(x, 70, held);
+  }
+  balls.forEach(b => fruit(b.x, b.y, b.k));
+  pops.forEach(p => { p.t += 16; ctx.strokeStyle = `rgba(255,255,255,${1 - p.t / 250})`; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (1 + p.t / 250), 0, 7); ctx.stroke(); });
+  pops = pops.filter(p => p.t < 250);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = '14px system-ui';
+  ctx.fillText(FRUITS.map(f => f.e).join(''), 10, 18);
+  ctx.fillStyle = '#92400e'; ctx.font = '13px system-ui'; ctx.textAlign = 'right';
+  ctx.fillText('next', W - 44, 18);
+  const nk = FRUITS[nextK];
+  ctx.font = '22px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText(nk.e, W - 22, 20);
+}
+
+function loop(t) {
+  const dt = Math.min(33, t - last);
+  last = t;
+  if (balls) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+let dragging = false;
+cv.addEventListener('pointerdown', e => { dragging = true; aimX = canvasPoint(cv, e).x; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { aimX = canvasPoint(cv, e).x; });
+cv.addEventListener('pointerup', () => { if (dragging) { dragging = false; dropFruit(); } });
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') aimX = Math.max(LEFT, aimX - 18);
+  else if (e.key === 'ArrowRight') aimX = Math.min(RIGHT, aimX + 18);
+  else if (e.key === ' ' || e.key === 'ArrowDown') dropFruit();
+});
+document.getElementById('new').onclick = newGame;
+newGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

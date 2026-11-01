@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Color Switch</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔵 Color Switch</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="400" height="680"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Tap, click or press <kbd>Space</kbd> to hop. Pass only through parts that match your ball's colour. Touch a colour wheel to switch colour; stars score points.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, COLS = ['#22d3ee', '#f472b6', '#facc15', '#a855f7'];
+let ball, obs, cam, score, best = Store.get('colorswitch-best', 0), state = 'ready', last = 0, bits = [];
+
+function newGame() {
+  ball = { y: H - 120, vy: 0, c: randInt(0, 3), r: 11 };
+  cam = 0; score = 0; obs = []; bits = [];
+  let y = H - 380;
+  for (let i = 0; i < 4; i++) { addObstacle(y); y -= 330; }
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+// ring, bar, cross or double ring; each obstacle is followed by a star and a colour wheel
+function addObstacle(y) {
+  const kind = pick(score < 3 ? ['ring', 'bar'] : ['ring', 'bar', 'cross', 'double']);
+  const sp = (1.2 + Math.min(obs.length * 0.04, 1.6)) * (Math.random() < 0.5 ? 1 : -1);
+  obs.push({ kind, y, a: rand(0, 6.28), sp, star: true, wheel: true });
+}
+
+function hud() { document.getElementById('score').textContent = score; document.getElementById('best').textContent = best; }
+
+function hop() { if (state === 'play') { ball.vy = -8.6; Sound.beep(520, 0.03, 'triangle', 0.02); } }
+
+function die() {
+  state = 'over';
+  Sound.beep(120, 0.4, 'sawtooth', 0.06);
+  for (let i = 0; i < 24; i++) bits.push({ x: W / 2, y: ball.y, vx: rand(-6, 6), vy: rand(-9, 2), c: COLS[i % 4] });
+  if (recordBest('colorswitch-best', score)) best = score;
+  hud();
+  setTimeout(() => overlay(ov, `<h2>Game over</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Play again</button>`), 700);
+}
+
+// colour index at angle a (radians) for a 4-part ring rotated by rot
+const segAt = (a, rot) => Math.floor(((((a - rot) % 6.2832) + 6.2832) % 6.2832) / (Math.PI / 2)) % 4;
+
+function hits(o) {
+  const by = ball.y, r = ball.r;
+  if (o.kind === 'ring' || o.kind === 'double') {
+    const rings = o.kind === 'ring' ? [[110, 1]] : [[110, 1], [80, -1]];
+    for (const [rad, dir] of rings) {
+      const thick = 14;
+      // top and bottom crossing points of the ring on the ball's column
+      for (const [cy, ang] of [[o.y - rad, -Math.PI / 2], [o.y + rad, Math.PI / 2]]) {
+        if (Math.abs(by - cy) < thick / 2 + r && segAt(ang, o.a * dir) !== ball.c) return true;
+      }
+    }
+  } else if (o.kind === 'bar') {
+    // a bar of four colours scrolling sideways
+    if (Math.abs(by - o.y) < 7 + r) {
+      const seg = Math.floor(((((W / 2 - o.a * 60) % (W * 1.0)) + W) % W) / (W / 4));
+      if (seg !== ball.c) return true;
+    }
+  } else if (o.kind === 'cross') {
+    // a spinning cross to the left of the column: its arms sweep through the middle
+    const cx = W / 2 - 70, len = 110;
+    for (let k = 0; k < 4; k++) {
+      const ang = o.a + k * Math.PI / 2, ex = cx + Math.cos(ang) * len, ey = o.y + Math.sin(ang) * len;
+      // distance from ball centre to the arm segment
+      const t = clamp(((W / 2 - cx) * (ex - cx) + (by - o.y) * (ey - o.y)) / (len * len), 0, 1);
+      const px = cx + (ex - cx) * t, py = o.y + (ey - o.y) * t;
+      if (Math.hypot(W / 2 - px, by - py) < r + 7 && k !== ball.c) return true;
+    }
+  }
+  return false;
+}
+
+function update(dt) {
+  const f = dt / 16.67;
+  bits.forEach(b => { b.x += b.vx * f; b.y += b.vy * f; b.vy += 0.4 * f; });
+  if (state !== 'play') return;
+  ball.vy += 0.42 * f;
+  ball.y += ball.vy * f;
+  if (ball.y - cam < H * 0.45) cam = ball.y - H * 0.45;
+  if (ball.y - cam > H + 20) return die();
+  for (const o of obs) {
+    o.a += o.sp * dt / 1000;
+    if (o.star && Math.abs(ball.y - o.y) < 22) { o.star = false; score++; hud(); Sound.beep(1000, 0.08, 'triangle', 0.04); }
+    if (o.wheel && Math.abs(ball.y - (o.y - 175)) < 20) {
+      o.wheel = false;
+      let c;
+      do { c = randInt(0, 3); } while (c === ball.c);
+      ball.c = c;
+      Sound.beep(700, 0.06, 'sine', 0.04);
+    }
+    if (hits(o)) return die();
+  }
+  if (obs[0].y - cam > H + 160) obs.shift();
+  while (obs[obs.length - 1].y - cam > -400) addObstacle(obs[obs.length - 1].y - 330);
+}
+
+function draw() {
+  ctx.fillStyle = '#16161d';
+  ctx.fillRect(0, 0, W, H);
+  if (!ball) return;
+  ctx.save();
+  ctx.translate(0, -cam);
+  ctx.lineCap = 'butt';
+  for (const o of obs) {
+    if (o.kind === 'ring' || o.kind === 'double') {
+      const rings = o.kind === 'ring' ? [[110, 1]] : [[110, 1], [80, -1]];
+      for (const [rad, dir] of rings) {
+        ctx.lineWidth = 14;
+        for (let k = 0; k < 4; k++) { ctx.strokeStyle = COLS[k]; ctx.beginPath(); ctx.arc(W / 2, o.y, rad, o.a * dir + k * Math.PI / 2, o.a * dir + (k + 1) * Math.PI / 2); ctx.stroke(); }
+      }
+    } else if (o.kind === 'bar') {
+      const off = ((o.a * 60) % W + W) % W;
+      for (let k = -1; k < 5; k++) { ctx.fillStyle = COLS[((k % 4) + 4) % 4]; ctx.fillRect(k * W / 4 + off - W, o.y - 7, W / 4 + 1, 14); ctx.fillRect(k * W / 4 + off, o.y - 7, W / 4 + 1, 14); }
+    } else {
+      const cx = W / 2 - 70;
+      ctx.lineWidth = 14;
+      ctx.lineCap = 'round';
+      for (let k = 0; k < 4; k++) { const ang = o.a + k * Math.PI / 2; ctx.strokeStyle = COLS[k]; ctx.beginPath(); ctx.moveTo(cx, o.y); ctx.lineTo(cx + Math.cos(ang) * 110, o.y + Math.sin(ang) * 110); ctx.stroke(); }
+      ctx.lineCap = 'butt';
+    }
+    if (o.star) { ctx.font = '26px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('⭐', W / 2, o.y); }
+    if (o.wheel) for (let k = 0; k < 4; k++) { ctx.fillStyle = COLS[k]; ctx.beginPath(); ctx.moveTo(W / 2, o.y - 175); ctx.arc(W / 2, o.y - 175, 13, k * Math.PI / 2, (k + 1) * Math.PI / 2); ctx.fill(); }
+  }
+  if (state === 'play' || state === 'ready') { ctx.fillStyle = COLS[ball.c]; ctx.beginPath(); ctx.arc(W / 2, ball.y, ball.r, 0, 7); ctx.fill(); }
+  bits.forEach(b => { ctx.fillStyle = b.c; ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, 7); ctx.fill(); });
+  ctx.restore();
+}
+
+function loop(t) {
+  const dt = Math.min(34, t - last);
+  last = t;
+  if (ball) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', hop);
+document.addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'ArrowUp') { if (state === 'play') hop(); else if (state !== 'over') newGame(); } });
+hud();
+overlay(ov, '<h2>🔵 Color Switch</h2><p>Tap to hop through your own colour.</p><button class="btn" onclick="newGame()">Play</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

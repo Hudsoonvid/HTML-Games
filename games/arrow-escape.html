@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arrow Escape</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>➡️ Arrow Escape</h1>
+  <div class="stats">Level <b id="level">1</b> Left <b id="left">0</b> Lives <b id="lives">❤❤❤</b></div>
+</header>
+<div class="controls">
+  <button class="btn alt" id="restart">↺ Restart</button>
+  <button class="btn alt" id="hint">💡 Hint</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="540" height="540"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Tap an arrow to slide it off the board the way it points. If another arrow is in the way it bounces back and you lose a life. Clear the board to win the level.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const DIRS = { r: [1, 0, 0], d: [0, 1, Math.PI / 2], l: [-1, 0, Math.PI], u: [0, -1, -Math.PI / 2] };
+const COLORS = ['#38bdf8', '#f472b6', '#facc15', '#4ade80', '#a78bfa', '#fb923c'];
+let level = Store.get('arrowescape-level', 1), N, arrows, startArrows, lives, CS, OX, OY, anims = [], hintA = null;
+
+const at = (x, y) => arrows.find(a => !a.gone && !a.leaving && a.x === x && a.y === y);
+function blockerOf(a, list) {
+  const [dx, dy] = DIRS[a.dir];
+  let x = a.x + dx, y = a.y + dy, n = 0;
+  while (x >= 0 && y >= 0 && x < N && y < N) {
+    const b = list.find(o => !o.gone && !o.leaving && o !== a && o.x === x && o.y === y);
+    if (b) return { b, n };
+    x += dx; y += dy; n++;
+  }
+  return null;
+}
+
+// each arrow is placed with a clear way out, so removing in reverse order always works
+function generate() {
+  N = Math.min(5 + Math.floor(level / 3), 10);
+  const target = Math.floor(N * N * Math.min(0.5 + level * 0.03, 0.85));
+  const list = [];
+  let tries = 0;
+  while (list.length < target && tries++ < 5000) {
+    const x = randInt(0, N - 1), y = randInt(0, N - 1);
+    if (list.some(o => o.x === x && o.y === y)) continue;
+    const a = { x, y, dir: pick(['r', 'l', 'u', 'd']), color: pick(COLORS) };
+    if (blockerOf(a, list)) continue;
+    list.push(a);
+  }
+  return list;
+}
+
+function startLevel(fresh) {
+  if (fresh || !startArrows) startArrows = generate();
+  arrows = startArrows.map(a => ({ ...a, gone: false, off: 0 }));
+  lives = 3; anims = []; hintA = null;
+  CS = Math.floor((cv.width - 40) / N);
+  OX = (cv.width - CS * N) / 2; OY = (cv.height - CS * N) / 2;
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('level').textContent = level;
+  document.getElementById('left').textContent = arrows.filter(a => !a.gone).length;
+  document.getElementById('lives').textContent = '❤'.repeat(lives) + '♡'.repeat(3 - lives);
+}
+
+function tap(a) {
+  if (a.gone || anims.some(m => m.a === a)) return;
+  hintA = null;
+  const bl = blockerOf(a, arrows);
+  if (!bl) { a.leaving = true; anims.push({ a, kind: 'out', t: 0 }); Sound.beep(620, 0.06, 'triangle', 0.04); }
+  else {
+    anims.push({ a, kind: 'bump', t: 0, n: bl.n });
+    lives--;
+    Sound.beep(150, 0.2, 'square', 0.05);
+    hud();
+    if (lives <= 0) setTimeout(() => overlay(ov, '<h2>Out of lives</h2><p>Plan your taps from the edges inward.</p><button class="btn" onclick="startLevel(false)">Try again</button>'), 500);
+  }
+}
+
+let last = 0;
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  for (const m of anims) {
+    m.t += dt;
+    if (m.kind === 'out') { m.a.off = (m.t / 1000) * 16; if (m.a.off > N + 2) { m.a.gone = true; m.done = true; hud(); } }
+    else { const half = 120 + m.n * 40, reach = m.n + 0.25; m.a.off = m.t < half ? reach * m.t / half : Math.max(0, reach * (2 - m.t / half)); if (m.t > half * 2) { m.a.off = 0; m.done = true; } }
+  }
+  anims = anims.filter(m => !m.done);
+  if (arrows && arrows.every(a => a.gone) && ov.classList.contains('hidden') && lives > 0) {
+    level++;
+    Store.set('arrowescape-level', level);
+    Sound.beep(880, 0.3, 'triangle');
+    overlay(ov, `<h2>Board cleared! ✨</h2><p>${'❤'.repeat(lives)} left</p><button class="btn" onclick="startLevel(true)">Level ${level}</button>`);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function draw() {
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!arrows) return;
+  ctx.fillStyle = '#1e293b';
+  ctx.beginPath(); ctx.roundRect(OX - 8, OY - 8, CS * N + 16, CS * N + 16, 14); ctx.fill();
+  ctx.fillStyle = '#334155';
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { ctx.beginPath(); ctx.arc(OX + x * CS + CS / 2, OY + y * CS + CS / 2, 3, 0, 7); ctx.fill(); }
+  arrows.forEach(a => {
+    if (a.gone) return;
+    const [dx, dy, ang] = DIRS[a.dir];
+    const cx = OX + (a.x + dx * a.off) * CS + CS / 2, cy = OY + (a.y + dy * a.off) * CS + CS / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(ang);
+    const s = CS * 0.4;
+    ctx.fillStyle = a === hintA && Math.floor(performance.now() / 250) % 2 ? '#fff' : a.color;
+    ctx.beginPath();
+    ctx.moveTo(s, 0); ctx.lineTo(0, -s * 0.85); ctx.lineTo(0, -s * 0.35); ctx.lineTo(-s, -s * 0.35);
+    ctx.lineTo(-s, s * 0.35); ctx.lineTo(0, s * 0.35); ctx.lineTo(0, s * 0.85); ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  });
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (!ov.classList.contains('hidden') || lives <= 0) return;
+  const p = canvasPoint(cv, e);
+  const a = at(Math.floor((p.x - OX) / CS), Math.floor((p.y - OY) / CS));
+  if (a) tap(a);
+});
+document.getElementById('restart').onclick = () => startLevel(false);
+document.getElementById('hint').onclick = () => { hintA = arrows.find(a => !a.gone && !a.leaving && !blockerOf(a, arrows)) || null; };
+startLevel(true);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

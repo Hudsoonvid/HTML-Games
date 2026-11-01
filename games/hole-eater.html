@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hole Eater</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🕳️ Hole Eater</h1>
+  <div class="stats">Time <b id="time">90</b> Size <b id="size">1</b> Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="560" height="640"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Drag (or use the arrow keys) to move the hole around the city. Anything smaller than the hole falls in and makes it grow, so start with cones and benches, then work up to cars, trees and buildings. You have 90 seconds.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, MAP = 1600;
+const KINDS = [
+  { e: '🔶', s: 9, pts: 1 }, { e: '🪑', s: 12, pts: 2 }, { e: '🧍', s: 13, pts: 3 }, { e: '🛴', s: 15, pts: 3 }, { e: '🌳', s: 22, pts: 6 },
+  { e: '🚗', s: 28, pts: 10 }, { e: '🚌', s: 40, pts: 18 }, { e: '🏠', s: 56, pts: 30 }, { e: '🏢', s: 80, pts: 60 }, { e: '🏬', s: 110, pts: 100 }
+];
+let hole, things, falling, cam, time, score, best = Store.get('holeeater-best', 0), state = 'ready', last = 0, target = null, keys = {}, bonus = 0;
+
+function newGame() {
+  hole = { x: MAP / 2, y: MAP / 2, r: 18, grow: 0 };
+  cam = { x: hole.x - W / 2, y: hole.y - H / 2 };
+  things = []; falling = []; score = 0; time = 90; bonus = 0;
+  // a grid of city blocks with roads; small things everywhere, big things on the blocks
+  for (let bx = 0; bx < MAP; bx += 200) for (let by = 0; by < MAP; by += 200) {
+    const big = pick([5, 6, 7, 7, 8, 8, 9]);
+    things.push(mk(big, bx + 100 + rand(-20, 20), by + 100 + rand(-20, 20)));
+    for (let i = 0; i < 6; i++) things.push(mk(randInt(0, 4), bx + rand(10, 190), by + rand(10, 190)));
+  }
+  for (let i = 0; i < 60; i++) things.push(mk(pick([5, 5, 6, 3, 2]), rand(20, MAP - 20), rand(20, MAP - 20)));
+  things = things.filter(t => Math.hypot(t.x - hole.x, t.y - hole.y) > 60 || t.k < 3);
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+const mk = (k, x, y) => ({ k, x, y, rot: rand(-0.2, 0.2) });
+
+function hud() {
+  document.getElementById('time').textContent = Math.ceil(time);
+  document.getElementById('size').textContent = (hole ? hole.r / 18 : 1).toFixed(1);
+  document.getElementById('score').textContent = score;
+  document.getElementById('best').textContent = best;
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  time -= s;
+  if (time <= 0) {
+    time = 0;
+    state = 'over';
+    if (recordBest('holeeater-best', score)) best = score;
+    hud();
+    Sound.beep(660, 0.4, 'triangle');
+    overlay(ov, `<h2>Time's up!</h2><p>You swallowed ${score} points of city. Hole size ${(hole.r / 18).toFixed(1)}×</p><button class="btn" onclick="newGame()">Play again</button>`);
+    return;
+  }
+  const sp = 260 * s;
+  let dx = 0, dy = 0;
+  if (keys.ArrowLeft || keys.a) dx--;
+  if (keys.ArrowRight || keys.d) dx++;
+  if (keys.ArrowUp || keys.w) dy--;
+  if (keys.ArrowDown || keys.s) dy++;
+  if (dx || dy) { const d = Math.hypot(dx, dy); hole.x += dx / d * sp; hole.y += dy / d * sp; }
+  else if (target) {
+    const tx = target.x + cam.x, ty = target.y + cam.y, d = Math.hypot(tx - hole.x, ty - hole.y);
+    if (d > 4) { hole.x += (tx - hole.x) / d * Math.min(sp, d); hole.y += (ty - hole.y) / d * Math.min(sp, d); }
+  }
+  hole.x = clamp(hole.x, hole.r, MAP - hole.r);
+  hole.y = clamp(hole.y, hole.r, MAP - hole.r);
+  if (hole.grow > 0) { const g = Math.min(hole.grow, 20 * s); hole.r += g; hole.grow -= g; }
+  things = things.filter(t => {
+    const K = KINDS[t.k], d = Math.hypot(t.x - hole.x, t.y - hole.y);
+    if (K.s < hole.r * 0.92 && d < hole.r - K.s * 0.3) {
+      falling.push({ ...t, t: 0, fx: hole.x, fy: hole.y });
+      score += K.pts;
+      hole.grow += K.pts * 0.35 / Math.sqrt(hole.r / 18);
+      Sound.beep(200 + t.k * 60, 0.08, 'triangle', 0.04);
+      return false;
+    }
+    // too big: it gets nudged aside instead
+    if (d < hole.r + K.s * 0.3 && K.s >= hole.r * 0.92) {
+      const ang = Math.atan2(t.y - hole.y, t.x - hole.x);
+      t.wobble = 8;
+      if (d < hole.r) { t.x = hole.x + Math.cos(ang) * hole.r; t.y = hole.y + Math.sin(ang) * hole.r; }
+    }
+    return true;
+  });
+  falling.forEach(f => { f.t += dt; });
+  falling = falling.filter(f => f.t < 500);
+  cam = { x: clamp(hole.x - W / 2, 0, MAP - W), y: clamp(hole.y - H / 2, 0, MAP - H) };
+  hud();
+}
+
+function draw() {
+  ctx.fillStyle = '#4b5563';
+  ctx.fillRect(0, 0, W, H);
+  if (!hole) return;
+  cam = cam || { x: hole.x - W / 2, y: hole.y - H / 2 };
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+  // city blocks
+  for (let bx = 0; bx < MAP; bx += 200) for (let by = 0; by < MAP; by += 200) {
+    ctx.fillStyle = (bx / 200 + by / 200) % 3 ? '#86efac' : '#bbf7d0';
+    ctx.fillRect(bx + 18, by + 18, 164, 164);
+    ctx.fillStyle = '#d1d5db';
+    ctx.fillRect(bx + 18, by + 18, 164, 6);
+  }
+  ctx.strokeStyle = '#fde047'; ctx.setLineDash([14, 14]); ctx.lineWidth = 2;
+  for (let x = 0; x <= MAP; x += 200) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, MAP); ctx.stroke(); ctx.beginPath(); ctx.moveTo(0, x); ctx.lineTo(MAP, x); ctx.stroke(); }
+  ctx.setLineDash([]);
+  // hole
+  const g = ctx.createRadialGradient(hole.x, hole.y, hole.r * 0.2, hole.x, hole.y, hole.r);
+  g.addColorStop(0, '#000'); g.addColorStop(0.85, '#0b0b12'); g.addColorStop(1, '#312e81');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(hole.x, hole.y, hole.r, 0, 7); ctx.fill();
+  falling.forEach(f => {
+    const k = 1 - f.t / 500, K = KINDS[f.k];
+    ctx.globalAlpha = k;
+    ctx.font = `${K.s * 1.6 * k}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(K.e, f.x + (f.fx - f.x) * (1 - k), f.y + (f.fy - f.y) * (1 - k));
+    ctx.globalAlpha = 1;
+  });
+  things.forEach(t => {
+    if (t.x < cam.x - 120 || t.x > cam.x + W + 120 || t.y < cam.y - 120 || t.y > cam.y + H + 120) return;
+    const K = KINDS[t.k];
+    ctx.save();
+    ctx.translate(t.x + (t.wobble ? rand(-2, 2) : 0), t.y);
+    if (t.wobble) t.wobble--;
+    ctx.rotate(t.rot);
+    ctx.font = `${K.s * 1.6}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.globalAlpha = K.s < hole.r * 0.92 ? 1 : 0.85;
+    ctx.fillText(K.e, 0, 0);
+    ctx.restore();
+  });
+  ctx.restore();
+  // minimap
+  ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.fillRect(W - 90, 10, 80, 80);
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(W - 90 + hole.x / MAP * 80, 10 + hole.y / MAP * 80, 3, 0, 7); ctx.fill();
+}
+
+function loop(t) {
+  const dt = Math.min(34, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', e => { target = canvasPoint(cv, e); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (target || e.pointerType === 'mouse') target = canvasPoint(cv, e); });
+cv.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') target = null; });
+document.addEventListener('keydown', e => { keys[e.key] = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') newGame(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+hud();
+overlay(ov, '<h2>🕳️ Hole Eater</h2><p>Swallow small things first, then the whole city.</p><button class="btn" onclick="newGame()">Play</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

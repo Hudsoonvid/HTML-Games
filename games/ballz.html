@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ballz</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⚾ Ballz</h1>
+  <div class="stats">Round <b id="round">1</b> Balls <b id="balls">1</b> Best <b id="best">0</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="fast">⏩ Speed up</button><button class="btn alt" id="new">New game</button></div>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="640"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Drag back from the ball (or anywhere) to aim, release to fire the whole volley. Each hit knocks one off a block's number. Grab the ⊕ rings for extra balls. If a block reaches the bottom, it's over.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, COLS = 7, CS = W / COLS, TOP = 50, FLOOR = H - 40, BR = 7, SPEED = 11;
+let blocks, shots, nBalls, round, originX, nextOrigin, aim = null, firing = false, queue = 0, qT = 0, best = Store.get('ballz-best', 0), fast = 1, over = false;
+
+function newGame() {
+  blocks = []; shots = []; nBalls = 1; round = 0; originX = W / 2; nextOrigin = null; firing = false; over = false; fast = 1;
+  nextRound();
+  overlay(ov, null);
+}
+
+// every round the rows move down and a new row appears at the top
+function nextRound() {
+  round++;
+  blocks.forEach(b => { b.row++; });
+  const cols = shuffle([0, 1, 2, 3, 4, 5, 6]);
+  const n = randInt(2, Math.min(6, 2 + Math.floor(round / 4)));
+  for (let i = 0; i < n; i++) blocks.push({ row: 1, col: cols[i], hp: Math.random() < 0.2 ? round * 2 : round });
+  blocks.push({ row: 1, col: cols[n], ring: true });
+  if (blocks.some(b => !b.ring && b.row >= Math.floor((FLOOR - TOP) / CS))) {
+    over = true;
+    if (recordBest('ballz-best', round - 1)) best = round - 1;
+    Sound.beep(120, 0.5, 'sawtooth', 0.05);
+    overlay(ov, `<h2>Game over</h2><p>You reached round ${round - 1}</p><button class="btn" onclick="newGame()">Play again</button>`);
+  }
+  blocks = blocks.filter(b => !(b.ring && b.row >= Math.floor((FLOOR - TOP) / CS)));
+  hud();
+}
+
+function hud() {
+  document.getElementById('round').textContent = round;
+  document.getElementById('balls').textContent = nBalls;
+  document.getElementById('best').textContent = best;
+}
+
+const rectOf = b => ({ x: b.col * CS + 2, y: TOP + b.row * CS + 2, w: CS - 4, h: CS - 4 });
+
+function fire(dx, dy) {
+  const d = Math.hypot(dx, dy);
+  if (d < 10 || dy > -0.15 * d) return;
+  firing = { vx: dx / d * SPEED, vy: dy / d * SPEED };
+  queue = nBalls; qT = 0; nextOrigin = null;
+}
+
+function stepBall(b) {
+  b.x += b.vx; b.y += b.vy;
+  if (b.x < BR) { b.x = BR; b.vx = Math.abs(b.vx); }
+  if (b.x > W - BR) { b.x = W - BR; b.vx = -Math.abs(b.vx); }
+  if (b.y < TOP + BR) { b.y = TOP + BR; b.vy = Math.abs(b.vy); }
+  if (b.y >= FLOOR - BR && b.vy > 0) { b.done = true; if (nextOrigin == null) nextOrigin = b.x; return; }
+  for (const k of blocks) {
+    const r = rectOf(k);
+    if (k.ring) {
+      if (Math.hypot(b.x - (r.x + r.w / 2), b.y - (r.y + r.h / 2)) < 16) { k.got = true; }
+      continue;
+    }
+    if (b.x + BR < r.x || b.x - BR > r.x + r.w || b.y + BR < r.y || b.y - BR > r.y + r.h) continue;
+    // push out along the shallowest side and reflect
+    const ox = Math.min(b.x + BR - r.x, r.x + r.w - (b.x - BR)), oy = Math.min(b.y + BR - r.y, r.y + r.h - (b.y - BR));
+    if (ox < oy) { b.vx = b.x < r.x + r.w / 2 ? -Math.abs(b.vx) : Math.abs(b.vx); b.x += b.vx > 0 ? ox : -ox; }
+    else { b.vy = b.y < r.y + r.h / 2 ? -Math.abs(b.vy) : Math.abs(b.vy); b.y += b.vy > 0 ? oy : -oy; }
+    k.hp--;
+    k.flash = 6;
+    Sound.beep(400 + Math.min(k.hp, 40) * 10, 0.02, 'square', 0.015);
+    break;
+  }
+  blocks.forEach(k => { if (k.got) { nBalls++; k.gone = true; Sound.beep(900, 0.06, 'triangle', 0.04); hud(); } });
+  blocks = blocks.filter(k => !k.gone && (k.ring || k.hp > 0));
+  // avoid endless horizontal bouncing
+  if (Math.abs(b.vy) < 0.6) b.vy = b.vy < 0 ? -0.8 : 0.8;
+}
+
+function update() {
+  if (!firing) return;
+  for (let s = 0; s < fast; s++) {
+    if (queue > 0 && --qT <= 0) { shots.push({ x: originX, y: FLOOR - BR, vx: firing.vx, vy: firing.vy }); queue--; qT = 4; }
+    shots.forEach(stepBall);
+    shots = shots.filter(b => !b.done);
+    if (!queue && !shots.length) {
+      firing = false;
+      originX = clamp(nextOrigin == null ? originX : nextOrigin, BR, W - BR);
+      fast = 1;
+      nextRound();
+      return;
+    }
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#1f2937';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#111827';
+  ctx.fillRect(0, 0, W, TOP);
+  ctx.fillRect(0, FLOOR, W, H - FLOOR);
+  if (!blocks) return;
+  blocks.forEach(k => {
+    const r = rectOf(k);
+    if (k.ring) {
+      ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(r.x + r.w / 2, r.y + r.h / 2, 13 + Math.sin(performance.now() / 200) * 2, 0, 7); ctx.stroke();
+      ctx.fillStyle = '#4ade80'; ctx.beginPath(); ctx.arc(r.x + r.w / 2, r.y + r.h / 2, 6, 0, 7); ctx.fill();
+      return;
+    }
+    const t = Math.min(1, k.hp / (round * 1.5));
+    ctx.fillStyle = k.flash ? '#fff' : `hsl(${50 - t * 50 + 300 * (1 - t) * 0}, 90%, ${60 - t * 15}%)`;
+    ctx.fillStyle = k.flash ? '#fff' : `hsl(${(1 - t) * 160 + 340}, 85%, 58%)`;
+    if (k.flash) k.flash--;
+    ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 6); ctx.fill();
+    ctx.fillStyle = '#111827'; ctx.font = 'bold 20px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(k.hp, r.x + r.w / 2, r.y + r.h / 2 + 1);
+  });
+  ctx.fillStyle = '#fff';
+  shots.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, BR, 0, 7); ctx.fill(); });
+  if (!firing && !over) {
+    ctx.beginPath(); ctx.arc(originX, FLOOR - BR, BR, 0, 7); ctx.fill();
+    ctx.fillStyle = '#9ca3af'; ctx.font = '13px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('×' + nBalls, originX, FLOOR + 22);
+    if (aim) {
+      const dx = aim.sx - aim.x, dy = aim.sy - aim.y, d = Math.hypot(dx, dy);
+      if (d > 10 && dy < -0.15 * d) {
+        ctx.fillStyle = 'rgba(255,255,255,.6)';
+        for (let i = 1; i < 16; i++) { ctx.beginPath(); ctx.arc(originX + dx / d * i * 24, FLOOR - BR + dy / d * i * 24, 3, 0, 7); ctx.fill(); }
+      }
+    }
+  } else if (queue > 0) {
+    ctx.beginPath(); ctx.arc(originX, FLOOR - BR, BR, 0, 7); ctx.fill();
+  }
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+
+cv.addEventListener('pointerdown', e => { if (firing || over) return; const p = canvasPoint(cv, e); aim = { sx: p.x, sy: p.y, x: p.x, y: p.y }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (!aim) return; const p = canvasPoint(cv, e); aim.x = p.x; aim.y = p.y; });
+cv.addEventListener('pointerup', () => {
+  if (!aim) return;
+  // drag down-and-back to aim up-and-forward (like a slingshot); a plain tap above aims at that point
+  let dx = aim.sx - aim.x, dy = aim.sy - aim.y;
+  if (Math.hypot(dx, dy) < 10) { dx = aim.x - originX; dy = aim.y - (FLOOR - BR); }
+  aim = null;
+  fire(dx, dy);
+});
+document.getElementById('fast').onclick = () => { if (firing) fast = Math.min(fast * 2, 8); };
+document.getElementById('new').onclick = newGame;
+newGame();
+loop();
+</script>
+</body>
+</html>
