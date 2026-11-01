@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pizza Tycoon</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #shop { width: min(620px, calc(100vw - 16px)); margin: 0 auto; display: grid; gap: 10px; }
+  #queue { display: flex; gap: 8px; min-height: 104px; overflow-x: auto; padding: 4px; }
+  .cust { flex: 0 0 120px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 6px; text-align: center; cursor: pointer; position: relative; }
+  .cust.sel { outline: 3px solid #facc15; }
+  .cust .face { font-size: 28px; }
+  .cust .order { font-size: 18px; letter-spacing: 1px; min-height: 24px; }
+  .cust .pat { height: 5px; background: rgba(255,255,255,.1); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+  .cust .pat i { display: block; height: 100%; background: #22c55e; }
+  #counter { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .panel h3 { margin: 0 0 6px; font-size: 15px; }
+  #pizza { font-size: 22px; min-height: 120px; display: flex; align-items: center; justify-content: center; position: relative; }
+  #pizza .dough { width: 110px; height: 110px; border-radius: 50%; background: #fde68a; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; align-content: center; gap: 2px; padding: 12px; box-sizing: border-box; box-shadow: inset 0 0 0 8px #f59e0b; }
+  #pizza .dough.sauce { background: #dc2626; }
+  #pizza .dough.cheese { background: radial-gradient(#fef08a 55%, #dc2626 56%); }
+  #ings { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  #ings button { font-size: 22px; padding: 8px 0; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: inherit; cursor: pointer; }
+  #ings button small { display: block; font-size: 10px; color: var(--muted); }
+  #ovens { display: flex; gap: 8px; flex-wrap: wrap; }
+  .oven { flex: 1 1 80px; background: #292524; border: 1px solid #57534e; border-radius: 10px; padding: 6px; text-align: center; cursor: pointer; min-height: 60px; }
+  .oven.ready { background: #14532d; border-color: #22c55e; }
+  .oven.burnt { background: #450a0a; }
+  .oven .pbar { height: 5px; background: rgba(255,255,255,.1); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+  .oven .pbar i { display: block; height: 100%; background: #f97316; }
+  #ups { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  #ups .btn { font-size: 13px; padding: 7px 10px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🍕 Pizza Tycoon</h1>
+  <div class="stats">Day <b id="day">1</b> 💵 <b id="cash">0</b> ⭐ <b id="rep">5.0</b></div>
+</header>
+<div class="msg" id="msg">Tap a customer, build their pizza, bake it, then tap the ready pizza to serve.</div>
+<div id="shop">
+  <div id="queue"></div>
+  <div id="counter">
+    <div class="panel"><h3>Make it</h3><div id="pizza"></div><div class="controls" style="margin:6px 0 0"><button class="btn alt" id="trash">🗑 Bin</button><button class="btn" id="bake">🔥 Bake</button></div></div>
+    <div class="panel"><h3>Ingredients</h3><div id="ings"></div></div>
+  </div>
+  <div class="panel"><h3>Ovens</h3><div id="ovens"></div></div>
+  <div id="ups"></div>
+</div>
+<p class="help">Each order lists toppings in any order — but the base always goes dough → sauce → cheese first. Pizzas burn if you leave them in the oven too long. Happy customers tip; slow service hurts your rating. Spend your takings on more ovens, faster baking and a bigger menu.</p>
+<script src="shared.js"></script>
+<script>
+const ALL = [
+  { k: 'pep', e: '🍕', name: 'Pepperoni' }, { k: 'mush', e: '🍄', name: 'Mushroom' }, { k: 'olive', e: '🫒', name: 'Olive' }, { k: 'pep2', e: '🫑', name: 'Pepper' },
+  { k: 'pine', e: '🍍', name: 'Pineapple' }, { k: 'onion', e: '🧅', name: 'Onion' }, { k: 'basil', e: '🌿', name: 'Basil' }, { k: 'tom', e: '🍅', name: 'Tomato' }
+];
+const FACES = ['😀', '🧑', '👩', '👨‍🦰', '👵', '🧔', '👧', '🧑‍🎓', '👮', '🧑‍🍳', '👩‍🚀', '🤠'];
+let S = Store.get('pizzatycoon', null) || { cash: 0, day: 1, rep: 5, ovens: 1, bakeLvl: 0, menu: 3, patience: 0 };
+let queue = [], selected = null, pizza = null, ovens = [], spawnT = 0, served = 0, dayT = 0;
+const $ = id => document.getElementById(id);
+const bakeMs = () => 6000 * Math.pow(0.82, S.bakeLvl);
+const menu = () => ALL.slice(0, S.menu);
+
+function newCustomer() {
+  const n = randInt(1, Math.min(3, 1 + Math.floor(S.day / 2)));
+  const tops = shuffle(menu().slice()).slice(0, n).map(t => t.k);
+  const pat = (32000 + S.patience * 6000) * rand(0.85, 1.15);
+  queue.push({ face: pick(FACES), tops, pat, left: pat, id: Math.random() });
+}
+
+// rebuild only when the line changes, otherwise just move the patience bars (so taps aren't lost)
+let qKey = '';
+function renderQueue() {
+  const q = $('queue');
+  const key = queue.map(c => c.id).join() + '|' + (selected ? selected.id : '');
+  if (key === qKey) {
+    [...q.children].forEach((d, i) => { const c = queue[i], bar = d.querySelector('.pat i'); bar.style.width = (c.left / c.pat) * 100 + '%'; bar.style.background = c.left / c.pat < 0.3 ? '#ef4444' : '#22c55e'; });
+    return;
+  }
+  qKey = key;
+  q.innerHTML = '';
+  queue.forEach(c => {
+    const d = document.createElement('div');
+    d.className = 'cust' + (selected === c ? ' sel' : '');
+    d.innerHTML = `<div class="face">${c.face}</div><div class="order">${c.tops.map(k => ALL.find(a => a.k === k).e).join('')}</div><div class="pat"><i style="width:${(c.left / c.pat) * 100}%;background:${c.left / c.pat < 0.3 ? '#ef4444' : '#22c55e'}"></i></div>`;
+    d.onclick = () => { selected = c; if (!pizza) pizza = { stage: 0, tops: [] }; renderAll(); };
+    q.appendChild(d);
+  });
+}
+
+function renderPizza() {
+  const el = $('pizza');
+  if (!pizza) { el.innerHTML = '<span style="color:var(--muted);font-size:14px">Tap 🫓 to start a pizza</span>'; return; }
+  const cls = ['', '', 'sauce', 'cheese'][Math.min(pizza.stage, 3)];
+  el.innerHTML = pizza.stage === 0 ? '<span style="color:var(--muted);font-size:14px">Add dough 🫓</span>' : `<div class="dough ${cls}">${pizza.tops.map(k => ALL.find(a => a.k === k).e).join('')}</div>`;
+}
+
+function renderIngs() {
+  const el = $('ings');
+  el.innerHTML = '';
+  [{ k: 'dough', e: '🫓', name: 'Dough' }, { k: 'sauce', e: '🥫', name: 'Sauce' }, { k: 'cheese', e: '🧀', name: 'Cheese' }].concat(menu()).forEach(it => {
+    const b = document.createElement('button');
+    b.innerHTML = `${it.e}<small>${it.name}</small>`;
+    b.onclick = () => addIng(it.k);
+    el.appendChild(b);
+  });
+}
+
+function addIng(k) {
+  if (!pizza) pizza = { stage: 0, tops: [] };
+  const order = ['dough', 'sauce', 'cheese'];
+  if (order.includes(k)) {
+    if (order.indexOf(k) !== pizza.stage) return say('Dough, then sauce, then cheese!');
+    pizza.stage++;
+  } else {
+    if (pizza.stage < 3) return say('Finish the base first: dough → sauce → cheese.');
+    if (pizza.tops.includes(k) || pizza.tops.length >= 4) return;
+    pizza.tops.push(k);
+  }
+  Sound.beep(500 + pizza.stage * 60 + pizza.tops.length * 40, 0.04, 'triangle', 0.03);
+  renderPizza();
+}
+
+function say(t) { $('msg').textContent = t; }
+
+let oKey = '';
+function renderOvens() {
+  const el = $('ovens');
+  const ms = bakeMs();
+  const st = o => (!o.p ? 'empty' : o.t < ms ? 'baking' : o.t < ms * 1.8 ? 'ready' : 'burnt');
+  const key = ovens.map(o => st(o) + (o.p ? o.p.tops.join('') : '')).join();
+  if (key === oKey) { [...el.children].forEach((d, i) => { const bar = d.querySelector('.pbar i'); if (bar) bar.style.width = Math.min(100, (ovens[i].t / ms) * 100) + '%'; }); return; }
+  oKey = key;
+  el.innerHTML = '';
+  ovens.forEach((o, i) => {
+    const d = document.createElement('div');
+    const state = st(o);
+    d.className = 'oven' + (state === 'ready' ? ' ready' : state === 'burnt' ? ' burnt' : '');
+    d.innerHTML = !o.p ? '<div style="font-size:24px">🔥</div><div class="small" style="font-size:11px;color:var(--muted)">empty</div>' : `<div style="font-size:24px">${state === 'burnt' ? '🔥⚫' : '🍕'}</div><div style="font-size:11px">${o.p.tops.map(k => ALL.find(a => a.k === k).e).join('') || 'cheese'}</div><div class="pbar"><i style="width:${Math.min(100, (o.t / ms) * 100)}%;background:${state === 'ready' ? '#22c55e' : state === 'burnt' ? '#7f1d1d' : '#f97316'}"></i></div>`;
+    d.onclick = () => serveFrom(i, state);
+    el.appendChild(d);
+  });
+}
+
+function serveFrom(i, state) {
+  const o = ovens[i];
+  if (!o.p) return;
+  if (state === 'baking') return say('Still baking…');
+  if (state === 'burnt') { o.p = null; say('Burnt! Into the bin it goes.'); Sound.beep(150, 0.2, 'sawtooth', 0.04); return renderOvens(); }
+  // give it to the selected customer, or anyone whose order it matches
+  const match = c => c.tops.length === o.p.tops.length && c.tops.every(k => o.p.tops.includes(k));
+  const c = (selected && match(selected)) ? selected : queue.find(match);
+  if (!c) return say("Nobody ordered that one — tap a customer whose order matches.");
+  const pay = 8 + c.tops.length * 4, tip = Math.round(pay * (c.left / c.pat) * (S.rep / 5));
+  S.cash += pay + tip;
+  S.rep = clamp(S.rep * 0.9 + (3 + 2 * c.left / c.pat) * 0.1, 1, 5);
+  queue = queue.filter(x => x !== c);
+  if (selected === c) selected = null;
+  o.p = null;
+  served++;
+  say(`Served! +$${pay} and a $${tip} tip.`);
+  Sound.beep(880, 0.12, 'triangle', 0.05);
+  renderAll();
+}
+
+const UPS = [
+  { name: 'Extra oven', cost: () => 60 * Math.pow(2.2, S.ovens - 1), ok: () => S.ovens < 4, buy: () => { S.ovens++; ovens.push({ p: null, t: 0 }); } },
+  { name: 'Hotter ovens', cost: () => 50 * Math.pow(1.9, S.bakeLvl), ok: () => S.bakeLvl < 6, buy: () => { S.bakeLvl++; } },
+  { name: 'New topping', cost: () => 40 * Math.pow(1.8, S.menu - 3), ok: () => S.menu < ALL.length, buy: () => { S.menu++; renderIngs(); } },
+  { name: 'Comfy chairs (+patience)', cost: () => 70 * Math.pow(1.8, S.patience), ok: () => S.patience < 5, buy: () => { S.patience++; } }
+];
+let uKey = '';
+function renderUps() {
+  const el = $('ups');
+  const key = UPS.map(u => (u.ok() ? Math.round(u.cost()) + (S.cash >= Math.round(u.cost()) ? 'y' : 'n') : '-')).join();
+  if (key === uKey) return;
+  uKey = key;
+  el.innerHTML = '';
+  UPS.forEach(u => {
+    if (!u.ok()) return;
+    const b = document.createElement('button');
+    const c = Math.round(u.cost());
+    b.className = 'btn' + (S.cash >= c ? '' : ' alt');
+    b.textContent = `${u.name} · $${c}`;
+    b.disabled = S.cash < c;
+    b.onclick = () => { if (S.cash >= c) { S.cash -= c; u.buy(); Sound.beep(988, 0.15, 'triangle'); renderAll(); } };
+    el.appendChild(b);
+  });
+}
+
+function renderAll() {
+  renderQueue(); renderPizza(); renderOvens(); renderUps();
+  $('day').textContent = S.day; $('cash').textContent = Math.floor(S.cash); $('rep').textContent = S.rep.toFixed(1);
+  Store.set('pizzatycoon', S);
+}
+
+$('bake').onclick = () => {
+  if (!pizza || pizza.stage < 3) return say('Make a pizza first: dough → sauce → cheese → toppings.');
+  const o = ovens.find(x => !x.p);
+  if (!o) return say('All ovens are busy!');
+  o.p = pizza; o.t = 0; pizza = null;
+  Sound.beep(300, 0.1, 'sawtooth', 0.03);
+  renderAll();
+};
+$('trash').onclick = () => { pizza = null; renderPizza(); };
+
+for (let i = 0; i < S.ovens; i++) ovens.push({ p: null, t: 0 });
+renderIngs();
+newCustomer();
+renderAll();
+let last = performance.now(), uiT = 0;
+setInterval(() => {
+  const now = performance.now(), dt = now - last;
+  last = now;
+  ovens.forEach(o => { if (o.p) o.t += dt; });
+  queue.forEach(c => { c.left -= dt; });
+  const gone = queue.filter(c => c.left <= 0);
+  if (gone.length) {
+    S.rep = clamp(S.rep - 0.4 * gone.length, 1, 5);
+    say(`${gone.map(c => c.face).join('')} left hungry… your rating dropped.`);
+    Sound.beep(180, 0.2, 'square', 0.04);
+    queue = queue.filter(c => c.left > 0);
+    if (gone.includes(selected)) selected = null;
+  }
+  spawnT -= dt;
+  if (spawnT <= 0 && queue.length < 5) { newCustomer(); spawnT = Math.max(5000, 15000 - S.day * 700) / (0.6 + S.rep / 10); }
+  // a day is two minutes long
+  dayT += dt;
+  if (dayT > 120000) { dayT = 0; S.day++; say(`Day ${S.day}! Customers order more toppings now.`); }
+  uiT += dt;
+  if (uiT > 250) { uiT = 0; renderQueue(); renderOvens(); renderUps(); $('cash').textContent = Math.floor(S.cash); $('rep').textContent = S.rep.toFixed(1); $('day').textContent = S.day; }
+}, 100);
+setInterval(() => Store.set('pizzatycoon', S), 3000);
+</script>
+</body>
+</html>

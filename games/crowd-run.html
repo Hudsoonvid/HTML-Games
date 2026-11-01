@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crowd Run</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏃 Crowd Run</h1>
+  <div class="stats">Level <b id="level">1</b> Crowd <b id="crowd">1</b> 💰 <b id="coins">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="680"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Drag left and right (or <kbd>←</kbd><kbd>→</kbd>) to steer your crowd through the best gates: <b>+</b> and <b>×</b> grow it, <b>−</b> and <b>÷</b> shrink it. Dodge the saws. At the end, your crowd fights the enemy army — bring more people than they have!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, HALF = 2.4, F = 360, HORIZON = 200, CAM_H = 3.2, CAM_BACK = 4;
+let level = Store.get('crowdrun-level', 1), coins = Store.get('crowdrun-coins', 0), run, state = 'ready', last = 0, keys = {}, pointerX = null;
+
+function project(x, y, z) {
+  const dz = z - (run.z - CAM_BACK);
+  if (dz < 0.4) return null;
+  const k = F / dz;
+  return { x: W / 2 + x * k, y: HORIZON + (CAM_H - y) * k, k };
+}
+
+const OPS = { '+': (n, v) => n + v, '-': (n, v) => n - v, '×': (n, v) => n * v, '÷': (n, v) => Math.floor(n / v) };
+function gatePair(z) {
+  const good = () => (Math.random() < 0.5 ? ['+', randInt(5, 10 + level * 4)] : ['×', randInt(2, 3)]);
+  const bad = () => (Math.random() < 0.6 ? ['-', randInt(5, 10 + level * 3)] : ['÷', 2]);
+  const pairKind = z < 20 ? 0.5 : Math.random();
+  const a = pairKind < 0.35 ? [good(), bad()] : pairKind < 0.7 ? [good(), good()] : [bad(), good()];
+  return a.map(([op, v], i) => ({ z, side: i ? 1 : -1, op, v, done: false }));
+}
+
+function newRun() {
+  const len = 90 + level * 12;
+  run = { z: 0, x: 0, n: 5, len, gates: [], saws: [], enemy: 0, fight: null, speed: 9, bump: 0 };
+  for (let z = 18; z < len - 15; z += 16) {
+    run.gates.push(...gatePair(z));
+    if (Math.random() < 0.4 + level * 0.03) run.saws.push({ z: z + 8, x: rand(-HALF + 0.6, HALF - 0.6), dir: Math.random() < 0.5 ? -1 : 1 });
+  }
+  // the enemy army is sized from what a good route could reach
+  let best = 5;
+  for (let i = 0; i < run.gates.length; i += 2) { const [a, b] = [run.gates[i], run.gates[i + 1]]; best = Math.max(OPS[a.op](best, a.v), OPS[b.op](best, b.v)); }
+  run.enemy = Math.max(5, Math.round(best * (0.35 + Math.min(level, 10) * 0.035)));
+  state = 'run';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('level').textContent = level;
+  document.getElementById('crowd').textContent = run ? Math.max(0, run.n) : 1;
+  document.getElementById('coins').textContent = coins;
+}
+
+function lose(msg) {
+  state = 'over';
+  Sound.beep(120, 0.5, 'sawtooth', 0.05);
+  setTimeout(() => overlay(ov, `<h2>${msg}</h2><p>Level ${level}</p><button class="btn" onclick="newRun()">Try again</button>`), 500);
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  if (state === 'run') {
+    let steer = 0;
+    if (keys.ArrowLeft || keys.a) steer -= 1;
+    if (keys.ArrowRight || keys.d) steer += 1;
+    if (steer) run.x += steer * 5 * s;
+    if (pointerX != null) run.x += clamp((pointerX - run.x) * 10 * s, -7 * s, 7 * s);
+    const crowdW = Math.min(1.6, 0.25 + Math.sqrt(run.n) * 0.08);
+    run.x = clamp(run.x, -HALF + crowdW / 2, HALF - crowdW / 2);
+    run.z += run.speed * s;
+    for (const g of run.gates) {
+      if (!g.done && run.z >= g.z) {
+        g.done = true;
+        if (Math.sign(run.x || 0.01) === g.side) {
+          run.n = OPS[g.op](run.n, g.v);
+          g.hit = true;
+          Sound.beep(g.op === '+' || g.op === '×' ? 760 : 220, 0.12, 'triangle', 0.05);
+          if (run.n <= 0) return lose('Your crowd vanished!');
+        }
+      }
+    }
+    for (const w of run.saws) {
+      w.x += w.dir * 1.6 * s;
+      if (Math.abs(w.x) > HALF - 0.4) w.dir *= -1;
+      if (Math.abs(w.z - run.z) < 0.4 && Math.abs(w.x - run.x) < crowdW / 2 + 0.3 && !w.cd) {
+        w.cd = true;
+        const lost = Math.max(1, Math.ceil(run.n * 0.2));
+        run.n -= lost;
+        run.bump = 300;
+        Sound.beep(150, 0.15, 'square', 0.05);
+        if (run.n <= 0) return lose('Sliced up by the saws!');
+      }
+    }
+    run.bump = Math.max(0, run.bump - dt);
+    if (run.z >= run.len) { state = 'fight'; run.fight = { t: 0, a: run.n, b: run.enemy }; }
+    hud();
+  } else if (state === 'fight') {
+    // both sides lose people at the same pace until one side is gone
+    const f = run.fight;
+    f.t += dt;
+    if (f.t > 40) {
+      f.t = 0;
+      const k = Math.max(1, Math.round(Math.min(f.a, f.b) / 25));
+      f.a -= k; f.b -= k;
+      Sound.beep(300 + Math.random() * 200, 0.02, 'square', 0.02);
+      run.n = Math.max(0, f.a);
+      hud();
+      if (f.b <= 0 && f.a > 0) {
+        state = 'over';
+        const reward = 10 + f.a + level * 5;
+        coins += reward;
+        Store.set('crowdrun-coins', coins);
+        level++;
+        Store.set('crowdrun-level', level);
+        hud();
+        Sound.beep(880, 0.3, 'triangle');
+        overlay(ov, `<h2>Victory! 🏆</h2><p>${f.a} survivors · +${reward} 💰</p><button class="btn" onclick="newRun()">Level ${level}</button>`);
+      } else if (f.a <= 0) lose(`Outnumbered! They had ${run.enemy}.`);
+    }
+  }
+}
+
+function people(cx, cy, n, k, col) {
+  const shown = Math.min(n, 120), rad = Math.sqrt(shown) * 0.09;
+  for (let i = 0; i < shown; i++) {
+    const a = i * 2.4, r = Math.sqrt(i / shown) * rad;
+    const p = project(cx + Math.cos(a) * r, 0, cy + Math.sin(a) * r * 0.7);
+    if (!p) continue;
+    const s = Math.max(2, 0.12 * p.k);
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(p.x, p.y - s * 2.4, s * 0.7, 0, 7); ctx.fill();
+    ctx.fillRect(p.x - s * 0.55, p.y - s * 1.8, s * 1.1, s * 1.8);
+  }
+}
+
+function draw() {
+  const sky = ctx.createLinearGradient(0, 0, 0, HORIZON);
+  sky.addColorStop(0, '#7dd3fc'); sky.addColorStop(1, '#e0f2fe');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, HORIZON);
+  ctx.fillStyle = '#60a5fa'; ctx.fillRect(0, HORIZON, W, H - HORIZON);
+  if (!run) return;
+  const nl = project(-HALF, 0, run.z - CAM_BACK + 0.5), nr = project(HALF, 0, run.z - CAM_BACK + 0.5), fl = project(-HALF, 0, run.z + 150), fr = project(HALF, 0, run.z + 150);
+  if (nl && fl) { ctx.fillStyle = '#f1f5f9'; ctx.beginPath(); ctx.moveTo(nl.x, H); ctx.lineTo(fl.x, fl.y); ctx.lineTo(fr.x, fr.y); ctx.lineTo(nr.x, H); ctx.fill(); }
+  for (let z = Math.ceil(run.z - 3); z < run.z + 90; z += 3) {
+    if (Math.floor(z / 3) % 2) continue;
+    const a = project(-HALF, 0, z), b = project(HALF, 0, z + 1.5);
+    if (a && b) { ctx.fillStyle = '#e2e8f0'; ctx.fillRect(a.x, b.y, b.x - a.x, a.y - b.y); }
+  }
+  // finish area with the enemy crowd
+  const fin = project(-HALF, 0, run.len), fin2 = project(HALF, 0, run.len + 6);
+  if (fin && fin2) { ctx.fillStyle = '#fecaca'; ctx.fillRect(fin.x, fin2.y, fin2.x - fin.x, fin.y - fin2.y); }
+  const objs = [];
+  run.gates.forEach(g => { if (g.z > run.z - 1 && g.z < run.z + 80) objs.push({ z: g.z, draw: () => {
+    const x0 = g.side < 0 ? -HALF : 0.06, x1 = g.side < 0 ? -0.06 : HALF;
+    const a = project(x0, 1.7, g.z), b = project(x1, 0, g.z);
+    if (!a || !b) return;
+    const good = g.op === '+' || g.op === '×';
+    ctx.fillStyle = g.hit ? 'rgba(255,255,255,.5)' : good ? 'rgba(59,130,246,.55)' : 'rgba(239,68,68,.55)';
+    ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.max(10, a.k * 0.5)}px system-ui`;
+    ctx.fillText(`${g.op}${g.v}`, (a.x + b.x) / 2, (a.y + b.y) / 2);
+  } }); });
+  run.saws.forEach(w => { if (w.z > run.z - 1 && w.z < run.z + 80) objs.push({ z: w.z, draw: () => {
+    const p = project(w.x, 0.35, w.z);
+    if (!p) return;
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(performance.now() / 80);
+    ctx.fillStyle = '#94a3b8';
+    ctx.beginPath(); for (let i = 0; i < 16; i++) { const r = i % 2 ? 0.28 : 0.38; ctx.lineTo(Math.cos(i * Math.PI / 8) * r * p.k, Math.sin(i * Math.PI / 8) * r * p.k); } ctx.fill();
+    ctx.restore();
+  } }); });
+  if (run.len - run.z < 90) objs.push({ z: run.len + 3, draw: () => people(0, run.len + 3, state === 'fight' ? Math.max(0, run.fight.b) : run.enemy, 1, '#dc2626') });
+  objs.push({ z: run.z, draw: () => people(run.x, run.z, Math.max(0, run.n), 1, run.bump ? '#fff' : '#2563eb') });
+  objs.sort((a, b) => b.z - a.z).forEach(o => o.draw());
+  const me = project(run.x, 0, run.z);
+  if (me) { ctx.fillStyle = '#1e3a8a'; ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center'; ctx.fillText(Math.max(0, run.n), me.x, me.y - 70); }
+  if (run.len - run.z < 40) { const e = project(0, 0, run.len + 3); if (e) { ctx.fillStyle = '#991b1b'; ctx.font = `bold ${Math.max(14, e.k * 0.5)}px system-ui`; ctx.fillText(state === 'fight' ? Math.max(0, run.fight.b) : run.enemy, e.x, e.y - e.k * 1.3); } }
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'run' || state === 'fight') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+const toWorldX = px => ((px - W / 2) / (W / 2)) * HALF;
+cv.addEventListener('pointerdown', e => { pointerX = toWorldX(canvasPoint(cv, e).x); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (pointerX != null || e.pointerType === 'mouse') pointerX = toWorldX(canvasPoint(cv, e).x); });
+cv.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') pointerX = null; });
+document.addEventListener('keydown', e => { keys[e.key] = true; if ((e.key === ' ' || e.key === 'Enter') && (state === 'ready' || state === 'over')) newRun(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+hud();
+run = { z: 0, x: 0, n: 1, len: 100, gates: [], saws: [], enemy: 0 };
+overlay(ov, `<h2>🏃 Crowd Run</h2><p>Grow your crowd through the gates, then beat the army at the end.</p><button class="btn" onclick="newRun()">Play level ${level}</button>`);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

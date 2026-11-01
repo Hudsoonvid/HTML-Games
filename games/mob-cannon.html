@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mob Cannon</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>💥 Mob Cannon</h1>
+  <div class="stats">Level <b id="level">1</b> Army <b id="army">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="700"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Hold and drag to aim the cannon (or use <kbd>←</kbd><kbd>→</kbd> and hold <kbd>Space</kbd>). Your little mob runs up the field — send it through the sliding ×2/×3 gates to multiply it. Smash the enemy castle before their army breaks your base. Every 25 shots the cannon fires a giant.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, BASE_Y = H - 60, CASTLE_Y = 70, MR = 5;
+let level = Store.get('mobcannon-level', 1), mobs, foes, gates, cannon, castle, base, state = 'ready', last = 0, firing = false, keys = {}, shots, fireT, spawnT, fx = [];
+
+function newGame() {
+  mobs = []; foes = []; fx = [];
+  cannon = { x: W / 2 }; shots = 0; fireT = 0; spawnT = 1500;
+  castle = { hp: 300 + level * 120, max: 300 + level * 120 };
+  base = { hp: 100 };
+  gates = [];
+  const rows = [420, 300, 190];
+  rows.forEach((y, i) => {
+    const kinds = i === 0 ? [['×', 2], ['+', 5]] : i === 1 ? [['×', 2], ['×', 3]] : [['×', 2], ['+', 8]];
+    const g = pick(kinds);
+    gates.push({ y, x: rand(80, W - 80), w: 110 - i * 8, op: g[0], v: g[1], dir: Math.random() < 0.5 ? -1 : 1, speed: 50 + level * 6 + i * 15, used: new Set() });
+  });
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() { document.getElementById('level').textContent = level; document.getElementById('army').textContent = mobs ? mobs.length : 0; }
+
+let mobId = 0;
+function addMob(x, y, giant) { mobs.push({ id: mobId++, x, y, vx: rand(-15, 15), giant, hp: giant ? 12 : 1 }); }
+
+function update(dt) {
+  const s = dt / 1000;
+  if (keys.ArrowLeft) cannon.x -= 260 * s;
+  if (keys.ArrowRight) cannon.x += 260 * s;
+  cannon.x = clamp(cannon.x, 30, W - 30);
+  fireT -= dt;
+  if ((firing || keys[' ']) && fireT <= 0) {
+    fireT = 110;
+    shots++;
+    addMob(cannon.x, BASE_Y - 20, shots % 25 === 0);
+    Sound.beep(shots % 25 === 0 ? 180 : 600, 0.02, 'square', 0.015);
+  }
+  // gates slide; a mob passing through one is copied
+  gates.forEach(g => {
+    g.x += g.dir * g.speed * s;
+    if (g.x < g.w / 2 + 10 || g.x > W - g.w / 2 - 10) g.dir *= -1;
+  });
+  const born = [];
+  mobs.forEach(m => {
+    m.y -= (m.giant ? 70 : 120) * s;
+    m.x = clamp(m.x + m.vx * s, 8, W - 8);
+    for (const g of gates) {
+      if (!g.used.has(m.id) && Math.abs(m.y - g.y) < 6 && Math.abs(m.x - g.x) < g.w / 2) {
+        g.used.add(m.id);
+        if (m.giant) continue;
+        const extra = g.op === '×' ? g.v - 1 : 0;
+        for (let k = 0; k < extra; k++) born.push([m.x + rand(-12, 12), m.y - 8, g]);
+        if (g.op === '+' && Math.random() < 0.6) for (let k = 0; k < 2; k++) born.push([m.x + rand(-14, 14), m.y - 8, g]);
+      }
+    }
+  });
+  born.slice(0, 600 - mobs.length).forEach(([x, y, g]) => { addMob(x, y, false); g.used.add(mobId - 1); });
+  if (born.length) Sound.beep(900, 0.02, 'triangle', 0.015);
+  // enemy army walks down
+  spawnT -= dt;
+  if (spawnT <= 0) {
+    spawnT = Math.max(220, 900 - level * 60);
+    const n = randInt(1, 2 + Math.floor(level / 2));
+    for (let k = 0; k < n; k++) foes.push({ x: W / 2 + rand(-90, 90), y: CASTLE_Y + 50, hp: Math.random() < 0.08 + level * 0.01 ? 8 : 1 });
+  }
+  foes.forEach(f => { f.y += (f.hp > 1 ? 45 : 70) * s; f.x += Math.sign(cannon.x - f.x) * 12 * s; });
+  // clashes: each pair knocks off one hit point
+  for (const f of foes) {
+    if (f.hp <= 0) continue;
+    for (const m of mobs) {
+      if (m.hp <= 0) continue;
+      if (Math.abs(m.x - f.x) < (m.giant ? 18 : 8) + (f.hp > 1 ? 10 : 5) && Math.abs(m.y - f.y) < 12) {
+        const hit = Math.min(m.hp, f.hp);
+        m.hp -= hit; f.hp -= hit;
+        if (Math.random() < 0.15) fx.push({ x: f.x, y: f.y, t: 0 });
+        if (f.hp <= 0) break;
+      }
+    }
+  }
+  // mobs reaching the castle damage it; foes reaching the base damage you
+  mobs.forEach(m => { if (m.hp > 0 && m.y < CASTLE_Y + 30) { castle.hp -= m.giant ? 15 : 1; m.hp = 0; fx.push({ x: m.x, y: CASTLE_Y + 30, t: 0 }); } });
+  foes.forEach(f => { if (f.hp > 0 && f.y > BASE_Y - 20) { base.hp -= f.hp > 1 ? 10 : 3; f.hp = 0; Sound.beep(160, 0.08, 'square', 0.04); } });
+  mobs = mobs.filter(m => m.hp > 0);
+  foes = foes.filter(f => f.hp > 0);
+  fx.forEach(e => { e.t += dt; });
+  fx = fx.filter(e => e.t < 250);
+  if (castle.hp <= 0) {
+    state = 'over';
+    level++;
+    Store.set('mobcannon-level', level);
+    Sound.beep(880, 0.4, 'triangle');
+    overlay(ov, `<h2>Castle smashed! 🏰💥</h2><button class="btn" onclick="newGame()">Level ${level}</button>`);
+  } else if (base.hp <= 0) {
+    state = 'over';
+    Sound.beep(120, 0.5, 'sawtooth', 0.05);
+    overlay(ov, `<h2>Your base fell</h2><p>Aim through the ×3 gate to build a bigger army.</p><button class="btn" onclick="newGame()">Try again</button>`);
+  }
+  hud();
+}
+
+function draw() {
+  ctx.fillStyle = '#65a30d';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#4d7c0f';
+  for (let y = 0; y < H; y += 40) ctx.fillRect(0, y, W, 20);
+  if (!mobs) return;
+  // castle
+  ctx.fillStyle = '#7f1d1d';
+  ctx.fillRect(W / 2 - 90, CASTLE_Y - 40, 180, 70);
+  ctx.fillStyle = '#991b1b';
+  for (let i = 0; i < 6; i++) ctx.fillRect(W / 2 - 90 + i * 32, CASTLE_Y - 56, 20, 18);
+  ctx.font = '30px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('🏰', W / 2, CASTLE_Y - 8);
+  ctx.fillStyle = '#111827'; ctx.fillRect(W / 2 - 90, CASTLE_Y + 36, 180, 8);
+  ctx.fillStyle = '#ef4444'; ctx.fillRect(W / 2 - 90, CASTLE_Y + 36, 180 * Math.max(0, castle.hp) / castle.max, 8);
+  gates.forEach(g => {
+    const good = g.op === '×';
+    ctx.fillStyle = good ? 'rgba(59,130,246,.55)' : 'rgba(34,197,94,.55)';
+    ctx.fillRect(g.x - g.w / 2, g.y - 14, g.w, 28);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(g.x - g.w / 2, g.y - 14, g.w, 28);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 18px system-ui'; ctx.fillText(`${g.op}${g.v}`, g.x, g.y + 1);
+  });
+  foes.forEach(f => { ctx.fillStyle = '#dc2626'; ctx.beginPath(); ctx.arc(f.x, f.y, f.hp > 1 ? 10 : MR, 0, 7); ctx.fill(); });
+  mobs.forEach(m => { ctx.fillStyle = m.giant ? '#1e40af' : '#2563eb'; ctx.beginPath(); ctx.arc(m.x, m.y, m.giant ? 14 : MR, 0, 7); ctx.fill(); });
+  fx.forEach(e => { ctx.fillStyle = `rgba(255,255,255,${1 - e.t / 250})`; ctx.beginPath(); ctx.arc(e.x, e.y, 6 + e.t / 20, 0, 7); ctx.fill(); });
+  // your base and cannon
+  ctx.fillStyle = '#1e3a8a'; ctx.fillRect(0, BASE_Y + 10, W, H - BASE_Y - 10);
+  ctx.fillStyle = '#111827'; ctx.fillRect(10, H - 16, W - 20, 8);
+  ctx.fillStyle = '#22c55e'; ctx.fillRect(10, H - 16, (W - 20) * Math.max(0, base.hp) / 100, 8);
+  ctx.fillStyle = '#334155';
+  ctx.beginPath(); ctx.roundRect(cannon.x - 20, BASE_Y - 30, 40, 36, 8); ctx.fill();
+  ctx.fillStyle = '#0f172a'; ctx.fillRect(cannon.x - 8, BASE_Y - 46, 16, 22);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px system-ui';
+  ctx.fillText(`giant in ${25 - (shots % 25)}`, cannon.x, BASE_Y + 22);
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', e => { firing = true; cannon && (cannon.x = canvasPoint(cv, e).x); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (firing || e.pointerType === 'mouse') cannon && (cannon.x = canvasPoint(cv, e).x); });
+cv.addEventListener('pointerup', () => { firing = false; });
+cv.addEventListener('pointercancel', () => { firing = false; });
+document.addEventListener('keydown', e => { keys[e.key] = true; if (e.key === 'Enter' && state !== 'play') newGame(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+overlay(ov, `<h2>💥 Mob Cannon</h2><p>Hold to fire your mob through the gates and storm the castle.</p><button class="btn" onclick="newGame()">Play level ${level}</button>`);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

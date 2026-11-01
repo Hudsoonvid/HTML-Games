@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Helix Drop 3D</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🍥 Helix Drop 3D</h1>
+  <div class="stats">Level <b id="level">1</b> Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="680"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Drag left and right (or hold <kbd>←</kbd><kbd>→</kbd>) to spin the tower so the bouncing ball drops through the gaps. Don't land on red. Fall through three floors in a row and the ball turns into a fireball that smashes anything.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, CX = W / 2, RIN = 34, ROUT = 150, TILT = 0.36, GAP = 120, THICK = 16, SEGS = 12;
+let level = Store.get('helix-level', 1), best = Store.get('helix-best', 0), rings, rot, ball, cam, score, streak, state = 'ready', last = 0, keys = {}, bits = [], hue;
+
+function newLevel() {
+  const n = 20 + level * 2;
+  hue = (level * 47) % 360;
+  rings = [];
+  for (let i = 0; i < n; i++) {
+    // each ring: 12 slices, some missing (gap), some red
+    const segs = Array(SEGS).fill('ok');
+    const gapAt = randInt(0, SEGS - 1), gapW = i === 0 ? 3 : randInt(1, 2);
+    for (let k = 0; k < gapW; k++) segs[(gapAt + k) % SEGS] = 'gap';
+    if (i > 0) {
+      const reds = Math.min(1 + Math.floor(level / 2) + Math.floor(i / 8), 6);
+      for (let k = 0; k < reds; k++) { const at = randInt(0, SEGS - 1); if (segs[at] === 'ok' && Math.random() < 0.8) segs[at] = 'red'; }
+    }
+    rings.push({ y: 160 + i * GAP, segs, broken: false, t: 0 });
+  }
+  rings.push({ y: 160 + n * GAP, segs: Array(SEGS).fill('goal'), broken: false, t: 0 });
+  rot = 0;
+  ball = { y: 100, vy: 0, r: 13 };
+  cam = 0; streak = 0; bits = [];
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function newGame() { score = 0; newLevel(); }
+
+function hud() {
+  document.getElementById('level').textContent = level;
+  document.getElementById('score').textContent = score;
+  document.getElementById('best').textContent = best;
+}
+
+// which slice of a ring sits in front of the camera (where the ball is)
+function frontSeg(r) {
+  const a = ((Math.PI / 2 - rot) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+  return r.segs[Math.floor(a / (Math.PI * 2 / SEGS)) % SEGS];
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  if (keys.ArrowLeft) rot -= 3.2 * s;
+  if (keys.ArrowRight) rot += 3.2 * s;
+  ball.vy += 1500 * s;
+  const ny = ball.y + ball.vy * s;
+  for (const r of rings) {
+    if (r.broken) continue;
+    const top = r.y - ball.r;
+    if (ball.y <= top && ny > top) {
+      const seg = frontSeg(r);
+      if (seg === 'gap') {
+        // falling through a floor
+        r.broken = true;
+        streak++;
+        score += streak;
+        Sound.beep(400 + streak * 60, 0.05, 'triangle', 0.04);
+        for (let k = 0; k < 6; k++) bits.push({ x: CX + rand(-120, 120), y: r.y, vx: rand(-200, 200), vy: rand(-300, -50), c: `hsl(${hue},70%,55%)` });
+        continue;
+      }
+      if (seg === 'goal') {
+        state = 'over';
+        score += 10;
+        level++;
+        Store.set('helix-level', level);
+        if (recordBest('helix-best', score)) best = score;
+        hud();
+        Sound.beep(988, 0.3, 'triangle');
+        overlay(ov, `<h2>Level complete! 🎉</h2><p>Score ${score}</p><button class="btn" onclick="newLevel()">Level ${level}</button>`);
+        return;
+      }
+      if (streak >= 3) {
+        // fireball smashes this floor, red or not
+        r.broken = true;
+        score += streak * 2;
+        Sound.beep(160, 0.2, 'sawtooth', 0.05);
+        for (let k = 0; k < 14; k++) bits.push({ x: CX + rand(-140, 140), y: r.y, vx: rand(-260, 260), vy: rand(-400, -80), c: '#f97316' });
+        streak = 0;
+        ball.y = top; ball.vy = -480;
+        hud();
+        return;
+      }
+      if (seg === 'red') {
+        state = 'over';
+        if (recordBest('helix-best', score)) best = score;
+        hud();
+        Sound.beep(110, 0.5, 'sawtooth', 0.06);
+        overlay(ov, `<h2>Splat! 💥</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Play again</button>`);
+        return;
+      }
+      ball.y = top; ball.vy = -520; streak = 0;
+      Sound.beep(300, 0.03, 'sine', 0.03);
+      hud();
+      return;
+    }
+  }
+  ball.y = ny;
+  if (ball.y - cam > H * 0.38) cam = ball.y - H * 0.38;
+  bits.forEach(b => { b.x += b.vx * s; b.y += b.vy * s; b.vy += 900 * s; });
+  bits = bits.filter(b => b.y - cam < H + 50);
+  hud();
+}
+
+const P = (a, rad, y) => ({ x: CX + Math.cos(a) * rad, y: y - cam + Math.sin(a) * rad * TILT });
+
+function slice(r, k, front) {
+  const seg = r.segs[k];
+  if (seg === 'gap' || r.broken) return;
+  const a0 = k * Math.PI * 2 / SEGS + rot, a1 = a0 + Math.PI * 2 / SEGS;
+  const mid = (a0 + a1) / 2;
+  if ((Math.sin(mid) > 0) !== front) return;
+  const col = seg === 'red' ? '#ef4444' : seg === 'goal' ? '#facc15' : `hsl(${hue},70%,${55 + Math.sin(mid) * 8}%)`;
+  const side = seg === 'red' ? '#991b1b' : seg === 'goal' ? '#ca8a04' : `hsl(${hue},60%,35%)`;
+  // side wall of the outer edge (only visible on the front half)
+  if (front) {
+    ctx.fillStyle = side;
+    ctx.beginPath();
+    for (let i = 0; i <= 6; i++) { const a = a0 + (a1 - a0) * i / 6, p = P(a, ROUT, r.y); ctx.lineTo(p.x, p.y); }
+    for (let i = 6; i >= 0; i--) { const a = a0 + (a1 - a0) * i / 6, p = P(a, ROUT, r.y + THICK); ctx.lineTo(p.x, p.y); }
+    ctx.fill();
+  }
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  for (let i = 0; i <= 6; i++) { const a = a0 + (a1 - a0) * i / 6, p = P(a, ROUT, r.y); ctx.lineTo(p.x, p.y); }
+  for (let i = 6; i >= 0; i--) { const a = a0 + (a1 - a0) * i / 6, p = P(a, RIN, r.y); ctx.lineTo(p.x, p.y); }
+  ctx.fill();
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, `hsl(${hue || 200},50%,88%)`); g.addColorStop(1, `hsl(${hue || 200},45%,70%)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  if (!rings) return;
+  const vis = rings.filter(r => r.y - cam > -60 && r.y - cam < H + 80);
+  // back halves, then the pillar, then the front halves, ring by ring from the top down
+  vis.forEach(r => { for (let k = 0; k < SEGS; k++) slice(r, k, false); });
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(CX - RIN, 0, RIN * 2, H);
+  ctx.fillStyle = 'rgba(0,0,0,.06)';
+  ctx.fillRect(CX + RIN * 0.3, 0, RIN * 0.7, H);
+  vis.forEach(r => { for (let k = 0; k < SEGS; k++) slice(r, k, true); });
+  const by = ball.y - cam + ((ROUT + RIN) / 2) * TILT;
+  ctx.fillStyle = 'rgba(0,0,0,.15)';
+  ctx.beginPath(); ctx.ellipse(CX, by + ball.r, ball.r, ball.r * 0.3, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = streak >= 3 ? '#f97316' : '#ec4899';
+  if (streak >= 3) { ctx.shadowColor = '#f97316'; ctx.shadowBlur = 20; }
+  ctx.beginPath(); ctx.arc(CX, by, ball.r, 0, 7); ctx.fill();
+  ctx.shadowBlur = 0;
+  bits.forEach(b => { ctx.fillStyle = b.c; ctx.fillRect(b.x - 6, b.y - cam - 3, 12, 6); });
+  // progress bar
+  const done = rings.filter(r => r.broken).length / (rings.length - 1);
+  ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.fillRect(60, 14, W - 120, 8);
+  ctx.fillStyle = '#fff'; ctx.fillRect(60, 14, (W - 120) * done, 8);
+}
+
+function loop(t) {
+  const dt = Math.min(33, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+let dragX = null;
+cv.addEventListener('pointerdown', e => { dragX = canvasPoint(cv, e).x; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (dragX == null) return; const x = canvasPoint(cv, e).x; rot -= (x - dragX) * 0.012; dragX = x; });
+cv.addEventListener('pointerup', () => { dragX = null; });
+document.addEventListener('keydown', e => { keys[e.key] = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') { if (state === 'ready') newGame(); } });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+score = 0;
+hud();
+overlay(ov, '<h2>🍥 Helix Drop</h2><p>Spin the tower and drop the ball through the gaps.</p><button class="btn" onclick="newGame()">Play</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

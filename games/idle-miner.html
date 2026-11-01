@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Idle Miner</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #mine { width: min(560px, calc(100vw - 16px)); margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+  .row { display: grid; grid-template-columns: 58px 1fr auto; gap: 10px; align-items: center; background: linear-gradient(90deg, #3f2a14, #2a1a0b); border: 1px solid #5b3a1a; border-radius: 12px; padding: 8px 10px; }
+  .row.top { background: linear-gradient(90deg, #1e3a5f, #0f2540); border-color: #2c5282; }
+  .icon { font-size: 30px; text-align: center; cursor: pointer; user-select: none; position: relative; }
+  .icon:active { transform: scale(.9); }
+  .info { min-width: 0; }
+  .info b { color: #fde68a; }
+  .bar { height: 7px; background: rgba(0,0,0,.4); border-radius: 4px; overflow: hidden; margin-top: 5px; }
+  .bar i { display: block; height: 100%; background: #facc15; width: 0; }
+  .btns { display: flex; flex-direction: column; gap: 4px; }
+  .btns .btn { padding: 5px 9px; font-size: 13px; }
+  .small { font-size: 12px; color: var(--muted); }
+  .float { position: absolute; left: 50%; top: -6px; transform: translateX(-50%); color: #fde047; font-weight: 800; font-size: 14px; pointer-events: none; animation: up .8s forwards; }
+  @keyframes up { to { top: -40px; opacity: 0; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⛏️ Idle Miner</h1>
+  <div class="stats">💰 <b id="cash">0</b> <span id="rate"></span></div>
+</header>
+<div class="msg" id="msg">Tap a miner to dig. Hire a manager to dig for you — even while you're away.</div>
+<div id="mine"></div>
+<p class="help">Each shaft digs ore worth cash. Tap ⛏️ to dig a load by hand, upgrade shafts to dig more, and hire managers so they dig automatically. Open deeper shafts for richer ore. Progress is saved, and managers keep earning (up to 8 hours) while you're gone.</p>
+<script src="shared.js"></script>
+<script>
+const ORES = [
+  { name: 'Coal', e: '🪨', base: 1, cost: 0 }, { name: 'Copper', e: '🟠', base: 6, cost: 150 }, { name: 'Iron', e: '⚙️', base: 30, cost: 1500 },
+  { name: 'Silver', e: '🥈', base: 140, cost: 16000 }, { name: 'Gold', e: '🥇', base: 700, cost: 180000 }, { name: 'Ruby', e: '♦️', base: 3600, cost: 2.2e6 },
+  { name: 'Emerald', e: '💚', base: 19000, cost: 3e7 }, { name: 'Diamond', e: '💎', base: 1e5, cost: 4e8 }
+];
+const DIG_MS = [2000, 2600, 3200, 3800, 4400, 5000, 5600, 6200];
+let save = Store.get('idleminer', null) || { cash: 0, shafts: [{ lvl: 1, mgr: false }], last: Date.now(), prestige: 0 };
+const els = [];
+const fmt = n => { if (n < 1000) return Math.floor(n).toString(); const u = ['K', 'M', 'B', 'T', 'Qa', 'Qi']; let i = -1; while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; } return n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0) + u[i]; };
+const loadValue = (i, lvl) => ORES[i].base * lvl * Math.pow(1.08, lvl) * (1 + save.prestige * 0.5);
+const upCost = (i, lvl) => Math.ceil((ORES[i].base * 12 + 8) * Math.pow(1.17, lvl));
+const mgrCost = i => Math.ceil(ORES[i].base * 120 + 60);
+
+function build() {
+  const mine = document.getElementById('mine');
+  mine.innerHTML = '<div class="row top"><div class="icon">🏭</div><div class="info"><b>Surface warehouse</b><div class="small" id="prestigeInfo"></div></div><div class="btns"><button class="btn alt" id="prestige">✨ Prestige</button></div></div>';
+  els.length = 0;
+  save.shafts.forEach((sh, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<div class="icon">⛏️</div><div class="info"><b>${ORES[i].e} ${ORES[i].name} shaft</b> <span class="small">lvl <span class="lvl"></span></span><div class="small"><span class="val"></span> per load · <span class="mg"></span></div><div class="bar"><i></i></div></div><div class="btns"><button class="btn up"></button><button class="btn alt hire"></button></div>`;
+    mine.appendChild(row);
+    const e = { row, icon: row.querySelector('.icon'), lvl: row.querySelector('.lvl'), val: row.querySelector('.val'), mg: row.querySelector('.mg'), bar: row.querySelector('.bar i'), up: row.querySelector('.up'), hire: row.querySelector('.hire'), t: 0, digging: false };
+    e.icon.onclick = () => { if (!e.digging) { e.digging = true; e.t = 0; Sound.beep(300, 0.04, 'square', 0.03); } };
+    e.up.onclick = () => { const c = upCost(i, sh.lvl); if (save.cash >= c) { save.cash -= c; sh.lvl++; Sound.beep(700, 0.06, 'triangle', 0.04); refresh(); } };
+    e.hire.onclick = () => { const c = mgrCost(i); if (!sh.mgr && save.cash >= c) { save.cash -= c; sh.mgr = true; Sound.beep(880, 0.1, 'triangle', 0.04); refresh(); } };
+    els.push(e);
+  });
+  if (save.shafts.length < ORES.length) {
+    const i = save.shafts.length, row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<div class="icon">🔒</div><div class="info"><b>${ORES[i].e} ${ORES[i].name} shaft</b><div class="small">Dig deeper for richer ore</div></div><div class="btns"><button class="btn" id="open">Open · 💰${fmt(ORES[i].cost)}</button></div>`;
+    mine.appendChild(row);
+    row.querySelector('#open').onclick = () => { if (save.cash >= ORES[i].cost) { save.cash -= ORES[i].cost; save.shafts.push({ lvl: 1, mgr: false }); Sound.beep(988, 0.2, 'triangle'); build(); } };
+  }
+  document.getElementById('prestige').onclick = () => {
+    if (save.shafts.length < 5) return alertMsg('Open the Gold shaft to prestige.');
+    save = { cash: 0, shafts: [{ lvl: 1, mgr: false }], last: Date.now(), prestige: save.prestige + 1 };
+    alertMsg(`Prestige ${save.prestige}! All ore is now worth ×${(1 + save.prestige * 0.5).toFixed(1)}.`);
+    build();
+  };
+  refresh();
+}
+
+function alertMsg(t) { document.getElementById('msg').textContent = t; }
+
+function refresh() {
+  save.shafts.forEach((sh, i) => {
+    const e = els[i];
+    if (!e) return;
+    e.lvl.textContent = sh.lvl;
+    e.val.textContent = '💰' + fmt(loadValue(i, sh.lvl));
+    e.mg.textContent = sh.mgr ? '👷 manager working' : 'dig by hand';
+    e.up.textContent = `⬆ 💰${fmt(upCost(i, sh.lvl))}`;
+    e.up.disabled = save.cash < upCost(i, sh.lvl);
+    e.hire.textContent = sh.mgr ? '👷 Hired' : `👷 💰${fmt(mgrCost(i))}`;
+    e.hire.disabled = sh.mgr || save.cash < mgrCost(i);
+  });
+  document.getElementById('cash').textContent = fmt(save.cash);
+  const rate = save.shafts.reduce((a, sh, i) => a + (sh.mgr ? loadValue(i, sh.lvl) / (DIG_MS[i] / 1000) : 0), 0);
+  document.getElementById('rate').textContent = rate ? `(+${fmt(rate)}/s)` : '';
+  document.getElementById('prestigeInfo').textContent = `Prestige ${save.prestige} · ore value ×${(1 + save.prestige * 0.5).toFixed(1)}`;
+  const open = document.getElementById('open');
+  if (open) open.disabled = save.cash < ORES[save.shafts.length].cost;
+}
+
+function earn(i, amt) {
+  save.cash += amt;
+  const f = document.createElement('div');
+  f.className = 'float';
+  f.textContent = '+' + fmt(amt);
+  els[i].icon.appendChild(f);
+  setTimeout(() => f.remove(), 800);
+}
+
+// offline earnings from managers
+(function offline() {
+  const away = Math.min(8 * 3600, (Date.now() - save.last) / 1000);
+  const rate = save.shafts.reduce((a, sh, i) => a + (sh.mgr ? loadValue(i, sh.lvl) / (DIG_MS[i] / 1000) : 0), 0);
+  if (away > 30 && rate > 0) { save.cash += rate * away; alertMsg(`Welcome back! Your managers earned 💰${fmt(rate * away)} while you were away.`); }
+})();
+
+let last = performance.now(), saveT = 0;
+function loop(t) {
+  const dt = Math.min(1000, t - last);
+  last = t;
+  save.shafts.forEach((sh, i) => {
+    const e = els[i];
+    if (!e) return;
+    if (sh.mgr && !e.digging) { e.digging = true; e.t = 0; }
+    if (e.digging) {
+      e.t += dt;
+      e.bar.style.width = Math.min(100, (e.t / DIG_MS[i]) * 100) + '%';
+      if (e.t >= DIG_MS[i]) { e.digging = false; e.bar.style.width = '0%'; earn(i, loadValue(i, sh.lvl)); }
+    }
+  });
+  saveT += dt;
+  if (saveT > 1000) { saveT = 0; save.last = Date.now(); Store.set('idleminer', save); refresh(); }
+  requestAnimationFrame(loop);
+}
+window.addEventListener('pagehide', () => { save.last = Date.now(); Store.set('idleminer', save); });
+build();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
