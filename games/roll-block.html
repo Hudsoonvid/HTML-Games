@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roll Block</title>
+<link rel="stylesheet" href="shared.css">
+<style>#c { width: min(760px, calc(100vw - 24px)); aspect-ratio: 4 / 3; height: auto; }</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🟧 Roll Block</h1>
+  <div class="stats">Level <b id="level">1</b> Moves <b id="moves">0</b> Falls <b id="falls">0</b></div>
+</header>
+<div class="controls"><select id="pick"></select><button class="btn alt" id="restart">↺ Restart</button></div>
+<div class="stage">
+  <canvas id="c" class="game"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<div class="touchpad"><button id="bl">◀</button><button id="bu">▲</button><button id="bd">▼</button><button id="br">▶</button></div>
+<p class="help">Roll the 1×1×2 block with the arrow keys / <kbd>WASD</kbd> or by swiping. Get it to drop into the dark hole — it only fits standing upright. Don't roll off the edge, and don't stand upright on the orange tiles: they're too weak!</p>
+<script src="shared.js"></script>
+<script src="gl3d.js"></script>
+<script>
+const cv = document.getElementById('c'), ov = document.getElementById('ov');
+// # tile, o fragile tile, S start (standing), G goal hole
+const LEVELS = [
+  ['###', '#S####', '#########', '.#########', '.....##G##', '......###'],
+  ['####', '#S######', '####..##', '......##', '......#####', '.......##G#', '.......####'],
+  ['###########', '#S##ooo##G#', '###########'],
+  ['######.....', '#S##########', '######...###', '.........#G#', '.........###'],
+  ['..####', '..#G##', '..####', '..##', '..##', '######', '#S####', '######'],
+  ['#####.######', '#S###o###G##', '#####.######', '...#ooo#', '...#####']
+];
+let R, M = {}, level = Store.get('rollblock-level', 0) % LEVELS.length, grid, B, moves = 0, falls = 0, anim = null, state = 'play', last = 0, tileMesh;
+
+function parse() {
+  const rows = LEVELS[level];
+  grid = rows.map(r => r.split(''));
+  let s = null;
+  grid.forEach((r, y) => r.forEach((c, x) => { if (c === 'S') s = { x, y }; }));
+  B = { x: s.x, y: s.y, o: 'up' };
+  moves = 0; anim = null; state = 'play';
+  buildTiles();
+  overlay(ov, null);
+  hud();
+}
+
+const tile = (x, y) => (grid[y] && grid[y][x] && grid[y][x] !== '.' ? grid[y][x] : null);
+// cells covered by the block: 'up' = standing, 'x' = lying along x, 'z' = lying along rows
+const cells = b => (b.o === 'up' ? [[b.x, b.y]] : b.o === 'x' ? [[b.x, b.y], [b.x + 1, b.y]] : [[b.x, b.y], [b.x, b.y + 1]]);
+
+function roll(b, dx, dy) {
+  const { x, y, o } = b;
+  if (o === 'up') return dx ? { x: dx > 0 ? x + 1 : x - 2, y, o: 'x' } : { x, y: dy > 0 ? y + 1 : y - 2, o: 'z' };
+  if (o === 'x') return dx ? { x: dx > 0 ? x + 2 : x - 1, y, o: 'up' } : { x, y: y + dy, o: 'x' };
+  return dy ? { x, y: dy > 0 ? y + 2 : y - 1, o: 'up' } : { x: x + dx, y, o: 'z' };
+}
+
+function hud() {
+  document.getElementById('level').textContent = level + 1;
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('falls').textContent = falls;
+}
+
+function move(dx, dy) {
+  if (state !== 'play' || anim) return;
+  const nb = roll(B, dx, dy);
+  anim = { from: B, to: nb, dx, dy, t: 0 };
+  moves++;
+  Sound.beep(300 + Math.random() * 60, 0.05, 'triangle', 0.04);
+  hud();
+}
+
+function settle() {
+  const c = cells(B);
+  if (c.some(([x, y]) => !tile(x, y))) return fall('Off the edge!');
+  if (B.o === 'up' && tile(B.x, B.y) === 'o') return fall('The orange tile gave way!');
+  if (B.o === 'up' && tile(B.x, B.y) === 'G') {
+    state = 'win';
+    Sound.beep(880, 0.3, 'triangle');
+    anim = { drop: true, t: 0 };
+    setTimeout(() => {
+      level = (level + 1) % LEVELS.length;
+      Store.set('rollblock-level', Math.max(Store.get('rollblock-level', 0), level));
+      fillPick();
+      overlay(ov, `<h2>Level complete! 🟧</h2><p>${moves} moves</p><button class="btn" onclick="parse()">${level ? 'Next level' : 'Back to level 1'}</button>`);
+    }, 700);
+  }
+}
+
+function fall(why) {
+  state = 'fall';
+  falls++;
+  hud();
+  anim = { drop: true, t: 0 };
+  Sound.beep(150, 0.4, 'sawtooth', 0.05);
+  setTimeout(() => { overlay(ov, `<h2>${why}</h2><button class="btn" onclick="parse()">Try again</button>`); }, 600);
+}
+
+function buildTiles() {
+  const b = GL3D.builder();
+  grid.forEach((r, y) => r.forEach((c, x) => {
+    if (c === '.' || !c) return;
+    if (c === 'G') { b.box(x + 0.05, -0.3, y + 0.05, 0.9, 0.05, 0.9, [0.05, 0.05, 0.07]); return; }
+    const col = c === 'o' ? [1, 0.55, 0.15] : (x + y) % 2 ? [0.7, 0.72, 0.78] : [0.62, 0.64, 0.7];
+    b.box(x + 0.03, -0.3, y + 0.03, 0.94, 0.3, 0.94, col);
+  }));
+  if (tileMesh) R.update(tileMesh, b); else tileMesh = R.mesh(b);
+}
+
+// the block pivots about the edge it rolls over
+function blockMatrix() {
+  const base = b => {
+    const w = b.o === 'x' ? 2 : 1, d = b.o === 'z' ? 2 : 1, h = b.o === 'up' ? 2 : 1;
+    return M4.chain(M4.translate(b.x + w / 2, h / 2, b.y + d / 2), M4.scale(w, h, d));
+  };
+  if (!anim || anim.drop) {
+    const m = base(B);
+    if (anim && anim.drop) return M4.mul(M4.translate(0, -anim.t * anim.t * 8, 0), m);
+    return m;
+  }
+  const { from, dx, dy } = anim, k = Math.min(1, anim.t);
+  const c = cells(from);
+  // pivot edge on the ground in the direction of travel
+  const px = dx > 0 ? Math.max(...c.map(q => q[0])) + 1 : dx < 0 ? Math.min(...c.map(q => q[0])) : 0;
+  const pz = dy > 0 ? Math.max(...c.map(q => q[1])) + 1 : dy < 0 ? Math.min(...c.map(q => q[1])) : 0;
+  const ang = k * Math.PI / 2;
+  const rot = dx ? M4.rotZ(-dx * ang) : M4.rotX(dy * ang);
+  const T = dx ? M4.translate(px, 0, 0) : M4.translate(0, 0, pz), Ti = dx ? M4.translate(-px, 0, 0) : M4.translate(0, 0, -pz);
+  return M4.chain(T, rot, Ti, base(from));
+}
+
+function render(dt) {
+  R.resize();
+  const w = Math.max(...grid.map(r => r.length)), h = grid.length;
+  R.camera([w / 2 - 3, 9, h + 6], [w / 2, 0, h / 2]);
+  R.begin();
+  R.draw(tileMesh);
+  if (anim) {
+    anim.t += dt / (anim.drop ? 600 : 180);
+    if (!anim.drop && anim.t >= 1) { B = anim.to; anim = null; settle(); }
+  }
+  R.draw(M.block, blockMatrix());
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (R) render(dt);
+  requestAnimationFrame(loop);
+}
+
+function fillPick() {
+  const max = Store.get('rollblock-level', 0);
+  document.getElementById('pick').innerHTML = LEVELS.map((_, i) => `<option value="${i}" ${i > max ? 'disabled' : ''}>Level ${i + 1}${i > max ? ' 🔒' : ''}</option>`).join('');
+  document.getElementById('pick').value = level;
+}
+
+if (!GL3D.supported()) overlay(ov, '<h2>3D not available</h2><p>This game needs WebGL, which your browser or device has turned off.</p>');
+else {
+  R = GL3D.create(cv, { fog: [0.1, 0.12, 0.2], fogNear: 30, fogFar: 60, ambient: 0.55, light: [-0.5, -1, -0.4], fov: 50 });
+  const b = GL3D.builder();
+  b.box(-0.5, -0.5, -0.5, 1, 1, 1, [[0.85, 0.45, 0.15], [0.85, 0.45, 0.15], [0.95, 0.6, 0.25], [0.6, 0.3, 0.1], [0.9, 0.5, 0.2], [0.9, 0.5, 0.2]]);
+  M.block = R.mesh(b);
+  fillPick();
+  parse();
+  requestAnimationFrame(loop);
+}
+const KEYS = { ArrowLeft: [-1, 0], a: [-1, 0], ArrowRight: [1, 0], d: [1, 0], ArrowUp: [0, -1], w: [0, -1], ArrowDown: [0, 1], s: [0, 1] };
+document.addEventListener('keydown', e => { if (KEYS[e.key]) { e.preventDefault(); move(...KEYS[e.key]); } });
+document.getElementById('restart').onclick = () => parse();
+document.getElementById('pick').onchange = e => { level = +e.target.value; parse(); e.target.blur(); };
+[['bl', -1, 0], ['br', 1, 0], ['bu', 0, -1], ['bd', 0, 1]].forEach(([id, dx, dy]) => document.getElementById(id).addEventListener('pointerdown', ev => { ev.preventDefault(); move(dx, dy); }));
+let sw = null;
+cv.addEventListener('pointerdown', e => { sw = { x: e.clientX, y: e.clientY }; });
+cv.addEventListener('pointerup', e => {
+  if (!sw) return;
+  const dx = e.clientX - sw.x, dy = e.clientY - sw.y;
+  sw = null;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+  if (Math.abs(dx) > Math.abs(dy)) move(dx > 0 ? 1 : -1, 0); else move(0, dy > 0 ? 1 : -1);
+});
+</script>
+</body>
+</html>
