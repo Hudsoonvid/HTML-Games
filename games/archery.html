@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archery</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🥇 Archery</h1>
+  <div class="stats">Round <b id="round">1</b>/5 Arrows <b id="arrows">3</b> Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="640" height="520"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Look down the range at the target. Your sight sways — and the wind pushes the arrow sideways, more at longer distances. Press and hold to steady your aim (it calms the sway for a moment), and let go to shoot. Bullseye = 10. Five rounds of three arrows; the target moves further away each round.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, TX = W / 2, TY = 230;
+let round, arrows, score, wind, dist, hits, state = 'ready', last = 0, holding = false, holdT = 0, aim = { x: TX, y: TY }, best = Store.get('archery-best', 0), flight = null, msgT = 0, msgTxt = '';
+
+function newGame() { round = 1; score = 0; startRound(); state = 'aim'; overlay(ov, null); }
+function startRound() { arrows = 3; dist = 20 + (round - 1) * 15; wind = Math.round(rand(-12, 12)); hits = []; hud(); }
+
+function hud() {
+  document.getElementById('round').textContent = round || 1;
+  document.getElementById('arrows').textContent = arrows ?? 3;
+  document.getElementById('score').textContent = score || 0;
+  document.getElementById('best').textContent = best;
+}
+
+// target radius shrinks with distance
+const tr = () => 170 * 20 / (dist || 20);
+
+function sway(t) {
+  // sway gets bigger the longer you hold beyond the steady period
+  const calm = holding ? (holdT < 1500 ? 0.25 : 0.25 + (holdT - 1500) / 1500) : 1;
+  const a = 26 * Math.min(1.6, calm) * (1 + dist / 80);
+  return { x: Math.sin(t * 1.3) * a + Math.sin(t * 2.7) * a * 0.4, y: Math.cos(t * 1.7) * a * 0.8 + Math.sin(t * 3.3) * a * 0.3 };
+}
+
+function shoot() {
+  const t = performance.now() / 1000, sw = sway(t);
+  const x = aim.x + sw.x, y = aim.y + sw.y;
+  // wind drift scales with distance; a little drop too
+  const drift = wind * dist / 25, drop = dist / 8;
+  flight = { x0: W / 2, y0: H + 20, x1: x + drift, y1: y + drop, t: 0 };
+  arrows--;
+  holding = false; holdT = 0;
+  state = 'fly';
+  Sound.beep(700, 0.05, 'triangle', 0.04);
+  hud();
+}
+
+function land() {
+  const { x1, y1 } = flight;
+  flight = null;
+  const d = Math.hypot(x1 - TX, y1 - TY) / tr();
+  const pts = d > 1 ? 0 : Math.max(1, 10 - Math.floor(d * 10));
+  score += pts;
+  hits.push({ x: x1, y: y1 });
+  msgTxt = pts === 10 ? 'BULLSEYE! 10' : pts ? `${pts}` : 'Miss';
+  msgT = 1100;
+  Sound.beep(pts >= 9 ? 990 : pts ? 500 : 160, 0.12, 'triangle', 0.05);
+  hud();
+  state = 'aim';
+  if (arrows === 0) {
+    state = 'wait';
+    setTimeout(() => {
+      if (round === 5) {
+        state = 'over';
+        if (recordBest('archery-best', score)) best = score;
+        hud();
+        overlay(ov, `<h2>Tournament over 🏹</h2><p>Final score ${score} / 150</p><button class="btn" onclick="newGame()">Shoot again</button>`);
+      } else { round++; startRound(); state = 'aim'; }
+    }, 1300);
+  }
+}
+
+function drawTarget() {
+  const r = tr();
+  // stand
+  ctx.fillStyle = '#78350f'; ctx.fillRect(TX - r * 0.08, TY + r * 0.6, r * 0.16, H);
+  const rings = ['#f8fafc', '#f8fafc', '#111827', '#111827', '#2563eb', '#2563eb', '#dc2626', '#dc2626', '#facc15', '#facc15'];
+  for (let i = 0; i < 10; i++) { ctx.fillStyle = rings[i]; ctx.beginPath(); ctx.arc(TX, TY, r * (1 - i / 10), 0, 7); ctx.fill(); ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.lineWidth = 1; ctx.stroke(); }
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(TX, TY, 2, 0, 7); ctx.fill();
+}
+
+function draw(t) {
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#7dd3fc'); sky.addColorStop(0.55, '#bae6fd'); sky.addColorStop(0.56, '#65a30d'); sky.addColorStop(1, '#3f6212');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+  drawTarget();
+  (hits || []).forEach(h => { ctx.strokeStyle = '#78350f'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(h.x, h.y); ctx.lineTo(h.x + 8, h.y + 10); ctx.stroke(); ctx.fillStyle = '#ef4444'; ctx.fillRect(h.x + 6, h.y + 8, 5, 5); });
+  if (flight) {
+    flight.t += 16;
+    const k = Math.min(1, flight.t / 380);
+    const x = flight.x0 + (flight.x1 - flight.x0) * k, y = flight.y0 + (flight.y1 - flight.y0) * k - Math.sin(k * Math.PI) * 40;
+    const sc = 1.6 - k * 1.3;
+    ctx.strokeStyle = '#78350f'; ctx.lineWidth = 4 * sc; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 6 * sc, y + 40 * sc); ctx.stroke();
+    if (k >= 1) land();
+  }
+  // wind flag
+  ctx.fillStyle = '#334155'; ctx.fillRect(40, 120, 4, 160);
+  ctx.fillStyle = '#ef4444';
+  const fl = Math.abs(wind || 0) * 3;
+  ctx.beginPath(); ctx.moveTo(44 - (wind < 0 ? 4 : 0), 124); ctx.lineTo(44 + Math.sign(wind || 0) * (10 + fl) + Math.sin(t * 8) * 3, 134); ctx.lineTo(44 - (wind < 0 ? 4 : 0), 146); ctx.fill();
+  ctx.fillStyle = '#0f172a'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText(`Wind ${Math.abs(wind || 0)} ${wind < 0 ? '◀' : wind > 0 ? '▶' : ''}  ·  ${dist || 20} m`, 56, 116);
+  if (state === 'aim') {
+    const sw = sway(t), x = aim.x + sw.x, y = aim.y + sw.y;
+    ctx.strokeStyle = holding ? '#22c55e' : '#111827'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 16, 0, 7); ctx.moveTo(x - 24, y); ctx.lineTo(x + 24, y); ctx.moveTo(x, y - 24); ctx.lineTo(x, y + 24); ctx.stroke();
+    if (holding) { ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(W / 2 - 60, H - 30, 120, 10); ctx.fillStyle = holdT < 1500 ? '#22c55e' : '#ef4444'; ctx.fillRect(W / 2 - 60, H - 30, 120 * Math.min(1, holdT / 3000), 10); }
+  }
+  if (msgT > 0) { msgT -= 16; ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 4; ctx.font = 'bold 34px system-ui'; ctx.textAlign = 'center'; ctx.strokeText(msgTxt, W / 2, 70); ctx.fillText(msgTxt, W / 2, 70); }
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (holding) holdT += dt;
+  draw(t / 1000);
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointermove', e => { const p = canvasPoint(cv, e); if (e.pointerType === 'mouse' || holding) aim = { x: clamp(p.x, 40, W - 40), y: clamp(p.y, 40, H - 60) }; });
+cv.addEventListener('pointerdown', e => { if (state !== 'aim') return; const p = canvasPoint(cv, e); if (e.pointerType !== 'mouse') aim = { x: p.x, y: p.y }; holding = true; holdT = 0; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointerup', () => { if (state === 'aim' && holding) shoot(); });
+document.addEventListener('keydown', e => { if (e.key === ' ' && state === 'aim' && !holding) { holding = true; holdT = 0; } });
+document.addEventListener('keyup', e => { if (e.key === ' ' && state === 'aim' && holding) shoot(); });
+hud();
+overlay(ov, '<h2>🥇 Archery</h2><p>Hold to steady, release to shoot. Mind the wind!</p><button class="btn" onclick="newGame()">Start</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

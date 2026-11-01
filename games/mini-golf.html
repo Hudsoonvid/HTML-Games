@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini Golf</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⛳ Mini Golf</h1>
+  <div class="stats">Hole <b id="hole">1</b>/9 Par <b id="par">2</b> Strokes <b id="strokes">0</b> Total <b id="total">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="520" height="680"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Drag back from the ball (like pulling a slingshot) and let go to putt — the further you pull, the harder the shot. Bank shots off the walls, avoid the water and slow sand, and watch out for moving blockers. Sink it in as few strokes as you can.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, BR = 8, CUP = 13;
+// each hole: outline (polygon), blocks [x,y,w,h], sand/water [x,y,w,h], movers [x,y,w,h,axis,range,speed], tee, cup, par
+const HOLES = [
+  { poly: [[160, 60], [360, 60], [360, 620], [160, 620]], tee: [260, 560], cup: [260, 120], par: 2 },
+  { poly: [[60, 60], [460, 60], [460, 260], [260, 260], [260, 620], [60, 620]], tee: [160, 560], cup: [400, 140], par: 3 },
+  { poly: [[120, 60], [400, 60], [400, 620], [120, 620]], blocks: [[120, 300, 180, 24], [220, 420, 180, 24]], tee: [180, 570], cup: [330, 120], par: 3 },
+  { poly: [[80, 60], [440, 60], [440, 620], [80, 620]], sand: [[80, 250, 360, 70]], water: [[200, 380, 240, 70]], tee: [140, 570], cup: [380, 120], par: 3 },
+  { poly: [[60, 60], [460, 60], [460, 620], [60, 620]], movers: [[150, 330, 120, 22, 'x', 130, 1.4]], blocks: [[60, 330, 60, 22], [400, 330, 60, 22]], tee: [260, 560], cup: [260, 130], par: 3 },
+  { poly: [[60, 360], [200, 360], [200, 60], [460, 60], [460, 620], [60, 620]], water: [[200, 360, 140, 140]], tee: [120, 560], cup: [400, 120], par: 3 },
+  { poly: [[90, 60], [430, 60], [430, 620], [90, 620]], blocks: [[90, 200, 120, 20], [310, 200, 120, 20], [200, 360, 120, 20], [90, 480, 100, 20], [330, 480, 100, 20]], tee: [260, 580], cup: [260, 110], par: 4 },
+  { poly: [[60, 60], [460, 60], [460, 620], [60, 620]], sand: [[60, 60, 140, 120], [320, 60, 140, 120]], water: [[160, 260, 200, 60]], movers: [[60, 430, 100, 20, 'x', 300, 1.1]], tee: [260, 580], cup: [260, 110], par: 4 },
+  { poly: [[60, 60], [460, 60], [460, 620], [60, 620]], blocks: [[160, 140, 200, 20], [160, 140, 20, 160], [340, 140, 20, 160]], water: [[60, 420, 160, 60], [300, 420, 160, 60]], movers: [[200, 250, 120, 18, 'y', 60, 1.6]], tee: [260, 590], cup: [260, 210], par: 4 }
+];
+let hole = 0, H0, ball, aim = null, strokes = 0, total = 0, card = [], state = 'aim', last = 0, t0 = 0, sinkT = 0, lastSafe;
+
+function load() {
+  H0 = HOLES[hole];
+  ball = { x: H0.tee[0], y: H0.tee[1], vx: 0, vy: 0 };
+  lastSafe = { x: ball.x, y: ball.y };
+  strokes = 0; state = 'aim'; sinkT = 0;
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('hole').textContent = hole + 1;
+  document.getElementById('par').textContent = H0.par;
+  document.getElementById('strokes').textContent = strokes;
+  document.getElementById('total').textContent = total + strokes;
+}
+
+// walls: polygon edges, block rectangle edges and moving blocker edges
+function segments(time) {
+  const segs = [];
+  const p = H0.poly;
+  for (let i = 0; i < p.length; i++) segs.push([...p[i], ...p[(i + 1) % p.length]]);
+  const rect = ([x, y, w, h]) => segs.push([x, y, x + w, y], [x + w, y, x + w, y + h], [x + w, y + h, x, y + h], [x, y + h, x, y]);
+  (H0.blocks || []).forEach(rect);
+  (H0.movers || []).forEach(m => rect(moverRect(m, time)));
+  return segs;
+}
+function moverRect([x, y, w, h, axis, range, speed], time) {
+  const o = (Math.sin(time * speed) + 1) / 2 * range;
+  return axis === 'x' ? [x + o, y, w, h] : [x, y + o, w, h];
+}
+const inRect = (x, y, [rx, ry, rw, rh]) => x > rx && x < rx + rw && y > ry && y < ry + rh;
+
+function inside(x, y) {
+  // point-in-polygon for the course outline
+  const p = H0.poly;
+  let c = false;
+  for (let i = 0, j = p.length - 1; i < p.length; j = i++) if ((p[i][1] > y) !== (p[j][1] > y) && x < (p[j][0] - p[i][0]) * (y - p[i][1]) / (p[j][1] - p[i][1]) + p[i][0]) c = !c;
+  return c;
+}
+
+function step(dt, time) {
+  const s = dt / 1000;
+  const sand = (H0.sand || []).some(r => inRect(ball.x, ball.y, r));
+  const fr = Math.pow(sand ? 0.08 : 0.42, s);
+  ball.vx *= fr; ball.vy *= fr;
+  ball.x += ball.vx * s; ball.y += ball.vy * s;
+  for (const [x1, y1, x2, y2] of segments(time)) {
+    const dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy, t = clamp(((ball.x - x1) * dx + (ball.y - y1) * dy) / l2, 0, 1);
+    const px = x1 + dx * t, py = y1 + dy * t, ex = ball.x - px, ey = ball.y - py, d = Math.hypot(ex, ey);
+    if (d < BR && d > 0) {
+      const nx = ex / d, ny = ey / d;
+      ball.x = px + nx * BR; ball.y = py + ny * BR;
+      const vn = ball.vx * nx + ball.vy * ny;
+      if (vn < 0) { ball.vx -= 1.8 * vn * nx; ball.vy -= 1.8 * vn * ny; Sound.beep(300, 0.02, 'square', 0.02); }
+    }
+  }
+  if (!inside(ball.x, ball.y)) { ball.x = lastSafe.x; ball.y = lastSafe.y; ball.vx = ball.vy = 0; }
+  if ((H0.water || []).some(r => inRect(ball.x, ball.y, r))) {
+    Sound.beep(200, 0.25, 'sine', 0.05);
+    strokes++;
+    ball.x = lastSafe.x; ball.y = lastSafe.y; ball.vx = ball.vy = 0;
+    flash = 'Splash! +1 stroke';
+    flashT = 1200;
+  }
+  // the cup catches slow-enough balls
+  const dc = Math.hypot(ball.x - H0.cup[0], ball.y - H0.cup[1]), sp = Math.hypot(ball.vx, ball.vy);
+  if (dc < CUP - 2 && sp < 420) { state = 'sunk'; Sound.beep(880, 0.3, 'triangle'); sinkT = 0; return; }
+  if (dc < CUP + 6 && sp < 420) { ball.vx += (H0.cup[0] - ball.x) * 3 * s; ball.vy += (H0.cup[1] - ball.y) * 3 * s; }
+  if (sp < 6) { ball.vx = ball.vy = 0; state = 'aim'; lastSafe = { x: ball.x, y: ball.y }; }
+}
+let flash = '', flashT = 0;
+
+function sunk() {
+  total += strokes;
+  card.push(strokes);
+  const diff = strokes - H0.par;
+  const name = strokes === 1 ? 'Hole in one! 🎉' : diff <= -2 ? 'Eagle! 🦅' : diff === -1 ? 'Birdie! 🐦' : diff === 0 ? 'Par' : diff === 1 ? 'Bogey' : `+${diff}`;
+  if (hole === HOLES.length - 1) {
+    const par = HOLES.reduce((a, h) => a + h.par, 0);
+    if (recordBest('minigolf-best', total, true)) {}
+    const bestNow = Store.get('minigolf-best', total);
+    overlay(ov, `<h2>Round complete! ⛳</h2><p>${total} strokes (par ${par}, ${total - par >= 0 ? '+' : ''}${total - par}) · best ${bestNow}</p><p style="font-size:13px">${card.map((c, i) => `${i + 1}: ${c}`).join(' · ')}</p><button class="btn" onclick="hole=0;total=0;card=[];load()">Play again</button>`);
+  } else overlay(ov, `<h2>${name}</h2><p>${strokes} stroke${strokes > 1 ? 's' : ''} on a par ${H0.par}</p><button class="btn" onclick="hole++;load()">Hole ${hole + 2}</button>`);
+}
+
+function draw(time) {
+  ctx.fillStyle = '#14532d';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#4ade80';
+  ctx.beginPath(); H0.poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.04)';
+  for (let y = 60; y < 620; y += 40) ctx.fillRect(0, y, W, 20);
+  (H0.sand || []).forEach(([x, y, w, h]) => { ctx.fillStyle = '#fde68a'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 18); ctx.fill(); });
+  (H0.water || []).forEach(([x, y, w, h]) => { ctx.fillStyle = '#38bdf8'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 18); ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.beginPath(); ctx.moveTo(x + 20, y + h / 2 + Math.sin(time * 3) * 3); ctx.lineTo(x + w - 20, y + h / 2 + Math.sin(time * 3 + 1) * 3); ctx.stroke(); });
+  ctx.strokeStyle = '#78350f'; ctx.lineWidth = 8; ctx.lineJoin = 'round';
+  ctx.beginPath(); H0.poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); ctx.stroke();
+  ctx.fillStyle = '#92400e';
+  (H0.blocks || []).forEach(([x, y, w, h]) => ctx.fillRect(x, y, w, h));
+  ctx.fillStyle = '#7c3aed';
+  (H0.movers || []).forEach(m => { const [x, y, w, h] = moverRect(m, time); ctx.fillRect(x, y, w, h); });
+  // cup and flag
+  ctx.fillStyle = '#052e16'; ctx.beginPath(); ctx.arc(H0.cup[0], H0.cup[1], CUP, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(H0.cup[0], H0.cup[1]); ctx.lineTo(H0.cup[0], H0.cup[1] - 44); ctx.stroke();
+  ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.moveTo(H0.cup[0], H0.cup[1] - 44); ctx.lineTo(H0.cup[0] + 24, H0.cup[1] - 37); ctx.lineTo(H0.cup[0], H0.cup[1] - 30); ctx.fill();
+  if (aim && state === 'aim') {
+    const dx = aim.sx - aim.x, dy = aim.sy - aim.y, pw = Math.min(160, Math.hypot(dx, dy));
+    const a = Math.atan2(dy, dx);
+    ctx.strokeStyle = `hsl(${120 - pw * 0.75},90%,55%)`; ctx.lineWidth = 4; ctx.setLineDash([8, 6]);
+    ctx.beginPath(); ctx.moveTo(ball.x, ball.y); ctx.lineTo(ball.x + Math.cos(a) * pw * 1.2, ball.y + Math.sin(a) * pw * 1.2); ctx.stroke(); ctx.setLineDash([]);
+  }
+  if (state !== 'sunk' || sinkT < 300) {
+    const k = state === 'sunk' ? 1 - sinkT / 300 : 1;
+    ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.arc(ball.x + 2, ball.y + 3, BR * k, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ball.x, ball.y, BR * k, 0, 7); ctx.fill();
+  }
+  if (flashT > 0) { ctx.fillStyle = '#0c4a6e'; ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center'; ctx.fillText(flash, W / 2, 40); }
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'left'; ctx.fillText(`Hole ${hole + 1} · Par ${H0.par}`, 12, 24);
+}
+
+function loop(t) {
+  const dt = Math.min(33, t - last);
+  last = t;
+  const time = t / 1000;
+  if (state === 'roll') for (let k = 0; k < 4 && state === 'roll'; k++) step(dt / 4, time);
+  if (state === 'sunk') { sinkT += dt; if (sinkT > 400 && ov.classList.contains('hidden')) { sinkT = -1e9; sunk(); } }
+  flashT = Math.max(0, flashT - dt);
+  hud();
+  draw(time);
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', e => { if (state !== 'aim') return; const p = canvasPoint(cv, e); aim = { sx: p.x, sy: p.y, x: p.x, y: p.y }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (aim) { const p = canvasPoint(cv, e); aim.x = p.x; aim.y = p.y; } });
+cv.addEventListener('pointerup', () => {
+  if (!aim || state !== 'aim') { aim = null; return; }
+  const dx = aim.sx - aim.x, dy = aim.sy - aim.y, pw = Math.min(160, Math.hypot(dx, dy));
+  aim = null;
+  if (pw < 6) return;
+  const a = Math.atan2(dy, dx);
+  ball.vx = Math.cos(a) * pw * 7.5; ball.vy = Math.sin(a) * pw * 7.5;
+  strokes++;
+  state = 'roll';
+  Sound.beep(500, 0.05, 'triangle', 0.04);
+});
+load();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

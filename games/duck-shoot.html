@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Duck Shoot</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🦆 Duck Shoot</h1>
+  <div class="stats">Time <b id="time">60</b> Score <b id="score">0</b> Ammo <b id="ammo">6</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="720" height="460"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Click or tap to shoot. Ducks are worth points (golden ducks are worth lots), but hitting a 🎯 decoy costs you. You have six shots — tap the reload box at the bottom right (or press <kbd>R</kbd> / <kbd>Space</kbd>) to reload. 60 seconds on the clock!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, ROWS = [150, 250, 350];
+let targets, score, ammo, time, state = 'ready', last = 0, best = Store.get('duck-best', 0), spawnT, holes = [], pops = [], reloading = 0, cross = { x: W / 2, y: H / 2 }, combo = 0;
+
+function newGame() { targets = []; holes = []; pops = []; score = 0; ammo = 6; time = 60; spawnT = 0; reloading = 0; combo = 0; state = 'play'; overlay(ov, null); hud(); }
+
+function hud() {
+  document.getElementById('time').textContent = Math.ceil(Math.max(0, time ?? 60));
+  document.getElementById('score').textContent = score || 0;
+  document.getElementById('ammo').textContent = reloading ? '…' : ammo ?? 6;
+  document.getElementById('best').textContent = best;
+}
+
+function spawn() {
+  const row = randInt(0, 2), dir = row % 2 ? -1 : 1, r = Math.random();
+  const kind = r < 0.08 ? 'gold' : r < 0.25 ? 'decoy' : 'duck';
+  targets.push({ row, x: dir > 0 ? -40 : W + 40, dir, kind, sp: (90 + row * 30) * (kind === 'gold' ? 1.8 : 1) * (1 + (60 - time) / 90), bob: rand(0, 6), hit: 0 });
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  time -= s;
+  if (time <= 0) {
+    state = 'over';
+    if (recordBest('duck-best', score)) best = score;
+    hud();
+    Sound.beep(300, 0.5, 'square', 0.04);
+    overlay(ov, `<h2>Time! 🦆</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Play again</button>`);
+    return;
+  }
+  spawnT -= dt;
+  if (spawnT <= 0) { spawn(); spawnT = Math.max(280, 900 - (60 - time) * 8); }
+  targets.forEach(t => { if (t.hit) { t.hit += dt; return; } t.x += t.dir * t.sp * s; });
+  targets = targets.filter(t => (t.hit ? t.hit < 500 : t.x > -60 && t.x < W + 60));
+  if (reloading) { reloading -= dt; if (reloading <= 0) { reloading = 0; ammo = 6; Sound.beep(600, 0.05, 'square', 0.03); } }
+  pops.forEach(p => { p.t += dt; });
+  pops = pops.filter(p => p.t < 700);
+  hud();
+}
+
+function shoot(x, y) {
+  if (state !== 'play') return;
+  if (x > W - 120 && y > H - 60) return reload();
+  if (reloading || ammo <= 0) { Sound.beep(120, 0.05, 'square', 0.03); return; }
+  ammo--;
+  Sound.beep(180, 0.08, 'sawtooth', 0.05);
+  holes.push({ x, y, t: 0 });
+  if (holes.length > 12) holes.shift();
+  const t = targets.find(t => !t.hit && Math.abs(t.x - x) < 30 && Math.abs(ROWS[t.row] + Math.sin(performance.now() / 300 + t.bob) * 4 - y) < 30);
+  if (t) {
+    t.hit = 1;
+    if (t.kind === 'decoy') { score = Math.max(0, score - 20); combo = 0; pops.push({ x, y, t: 0, txt: '-20', col: '#ef4444' }); Sound.beep(140, 0.2, 'square', 0.04); }
+    else { combo++; const pts = (t.kind === 'gold' ? 50 : 10 + t.row * 5) * (combo >= 5 ? 2 : 1); score += pts; pops.push({ x, y, t: 0, txt: `+${pts}${combo >= 5 ? ' x2' : ''}`, col: '#fde047' }); Sound.beep(t.kind === 'gold' ? 1200 : 800, 0.1, 'triangle', 0.05); }
+  } else combo = 0;
+  if (ammo === 0) reload();
+  hud();
+}
+function reload() { if (!reloading && ammo < 6) { reloading = 900; Sound.beep(300, 0.1, 'square', 0.03); hud(); } }
+
+function draw() {
+  ctx.fillStyle = '#7f1d1d'; ctx.fillRect(0, 0, W, H);
+  // curtains and booth
+  ctx.fillStyle = '#991b1b'; for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.ellipse(x + 20, 30, 22, 50, 0, 0, Math.PI); ctx.fill(); }
+  ctx.fillStyle = '#1e3a8a'; ctx.fillRect(0, 90, W, 320);
+  ROWS.forEach((y, i) => {
+    ctx.fillStyle = i % 2 ? '#2563eb' : '#1d4ed8';
+    ctx.beginPath(); ctx.moveTo(0, y + 26);
+    for (let x = 0; x <= W; x += 20) ctx.lineTo(x, y + 26 + Math.sin(x / 30 + performance.now() / (400 + i * 100)) * 5);
+    ctx.lineTo(W, y + 60); ctx.lineTo(0, y + 60); ctx.fill();
+  });
+  if (!targets) return;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  targets.forEach(t => {
+    const y = ROWS[t.row] + Math.sin(performance.now() / 300 + t.bob) * 4 + (t.hit ? t.hit / 6 : 0);
+    ctx.save(); ctx.translate(t.x, y); if (t.dir < 0) ctx.scale(-1, 1); if (t.hit) ctx.rotate(t.hit / 200);
+    ctx.globalAlpha = t.hit ? 1 - t.hit / 500 : 1;
+    ctx.font = '46px system-ui';
+    ctx.fillText(t.kind === 'decoy' ? '🎯' : '🦆', 0, 0);
+    if (t.kind === 'gold') { ctx.globalCompositeOperation = 'source-atop'; ctx.fillStyle = 'rgba(250,204,21,.6)'; ctx.fillRect(-26, -26, 52, 52); ctx.globalCompositeOperation = 'source-over'; }
+    ctx.restore();
+  });
+  ctx.fillStyle = '#78350f'; ctx.fillRect(0, H - 50, W, 50);
+  holes.forEach(h => { ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(h.x, h.y, 3, 0, 7); ctx.fill(); });
+  pops.forEach(p => { ctx.fillStyle = p.col; ctx.globalAlpha = 1 - p.t / 700; ctx.font = 'bold 22px system-ui'; ctx.fillText(p.txt, p.x, p.y - 30 - p.t / 20); ctx.globalAlpha = 1; });
+  // ammo and reload box
+  for (let i = 0; i < 6; i++) { ctx.fillStyle = i < ammo && !reloading ? '#fbbf24' : '#451a03'; ctx.fillRect(16 + i * 18, H - 38, 10, 26); }
+  ctx.fillStyle = reloading ? '#a16207' : '#ca8a04'; ctx.fillRect(W - 116, H - 44, 104, 36);
+  ctx.fillStyle = '#111'; ctx.font = 'bold 15px system-ui'; ctx.fillText(reloading ? 'Reloading…' : 'RELOAD', W - 64, H - 26);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cross.x, cross.y, 14, 0, 7); ctx.moveTo(cross.x - 20, cross.y); ctx.lineTo(cross.x + 20, cross.y); ctx.moveTo(cross.x, cross.y - 20); ctx.lineTo(cross.x, cross.y + 20); ctx.stroke();
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointermove', e => { cross = canvasPoint(cv, e); });
+cv.addEventListener('pointerdown', e => { cross = canvasPoint(cv, e); shoot(cross.x, cross.y); });
+document.addEventListener('keydown', e => { if ((e.key === 'r' || e.key === ' ') && state === 'play') reload(); });
+hud();
+overlay(ov, '<h2>🦆 Duck Shoot</h2><p>Shoot the ducks, spare the decoys.</p><button class="btn" onclick="newGame()">Play</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
