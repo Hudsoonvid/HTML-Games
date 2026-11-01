@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Penguin Knockout</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐧 Penguin Knockout</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn" id="go">✅ Go!</button><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="600" height="600"></canvas>
+</div>
+<p class="help">Both teams plan at the same time. Drag from each of your penguins to set which way and how hard it slides (longer arrow = harder), then press <b>Go!</b> Everyone slides at once — bump the other team off the ice and stay on yourself. The ice shrinks every round.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const W = cv.width, H = cv.height, CX = W / 2, CY = H / 2, PR = 20, MAXV = 520, FIX = 1 / 120;
+const TEAM = ['#38bdf8', '#f472b6'];
+let S, me, pengs, ice, rnd, aims, ready, phase, drag = null, timer = 0, falling = [], localStep = 0;
+const sq = (x, y) => Math.sqrt(x * x + y * y);
+
+function begin(s) {
+  S = s;
+  S.on('aims', d => { if (d && d.r === rnd && phase === 'plan') { aims[1 - me] = d.a; ready[1 - me] = true; tryGo(); } else if (d && d.r === rnd + 1) earlyAims = d; });
+  // the host's end-of-slide positions are the final word (applied once this screen finishes sliding too)
+  S.on('sync', d => { if (S.host || !d || d.r !== rnd) return; if (phase === 'slide') pendingSync = d; else applySync(d); });
+  S.startRound(() => ({}), () => {
+    me = S.mode === 'online' ? S.seat : 0;
+    pengs = [];
+    for (let t = 0; t < 2; t++) for (let k = 0; k < 3; k++) {
+      const a = (t ? 0 : Math.PI) + (k - 1) * 0.55;
+      pengs.push({ t, x: CX + Math.cos(a) * 150, y: CY + Math.sin(a) * 150, vx: 0, vy: 0, alive: true });
+    }
+    ice = 250; rnd = 0; falling = []; pendingSync = null; earlyAims = null;
+    newPlan();
+  });
+}
+let earlyAims = null, pendingSync = null;
+function applySync(d) { d.p.forEach((q, i) => { if (pengs[i]) { pengs[i].x = q[0]; pengs[i].y = q[1]; pengs[i].alive = !!q[2]; } }); }
+
+function newPlan() {
+  rnd++;
+  phase = 'plan';
+  aims = [pengs.map(() => [0, 0]), pengs.map(() => [0, 0])];
+  ready = [false, false];
+  localStep = 0;
+  timer = S.human ? 20000 : 0;
+  if (earlyAims && earlyAims.r === rnd) { aims[1 - me] = earlyAims.a; ready[1 - me] = true; }
+  earlyAims = null;
+  if (S.ai) { aims[1 - me] = aiAims(1 - me); ready[1 - me] = true; }
+  status();
+}
+
+const planner = () => (S.mode === 'local' ? localStep : me);
+function status() {
+  const alive = t => pengs.filter(p => p.alive && p.t === t).length;
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : S.mode === 'online' ? 'Online' : '2 players';
+  document.getElementById('vs').innerHTML = [0, 1].map(t => `<b style="color:${TEAM[t]}">${S.mode === 'local' ? 'P' + (t + 1) : t === me ? S.me.name : S.opp.name} 🐧×${alive(t)}</b>`).join(' vs ');
+  document.getElementById('go').disabled = phase !== 'plan' || ready[planner()];
+  if (phase === 'plan') msg.textContent = S.mode === 'local' ? `Player ${localStep + 1}: plan your slides (the other player looks away), then Go!` : ready[me] ? `Waiting for ${S.opp.name}…` : `Round ${rnd}: drag from your penguins to aim, then Go!${S.human ? ` (${Math.ceil(timer / 1000)}s)` : ''}`;
+}
+
+function aiAims(t) {
+  const L = S.level, out = pengs.map(() => [0, 0]);
+  pengs.forEach((p, i) => {
+    if (!p.alive || p.t !== t) return;
+    const foes = pengs.filter(q => q.alive && q.t !== t);
+    if (!foes.length) return;
+    // go for the enemy closest to the edge, aiming to push it outward
+    const tgt = foes.sort((a, b) => sq(b.x - CX, b.y - CY) - sq(a.x - CX, a.y - CY))[0];
+    let dx = tgt.x - p.x, dy = tgt.y - p.y;
+    const d = sq(dx, dy) || 1;
+    const myEdge = ice - sq(p.x - CX, p.y - CY);
+    let power = clamp(d * 1.6 + 120, 150, MAXV);
+    if (myEdge < 60 && Math.random() < L) { dx = CX - p.x; dy = CY - p.y; power = 220; }
+    const noise = (1 - L) * 0.6;
+    const ang = Math.atan2(dy, dx) + rand(-noise, noise);
+    power *= rand(0.75 + L * 0.2, 1.05);
+    out[i] = [Math.round(Math.cos(ang) * power), Math.round(Math.sin(ang) * power)];
+  });
+  return out;
+}
+
+function confirm() {
+  const who = planner();
+  if (phase !== 'plan' || ready[who]) return;
+  ready[who] = true;
+  if (S.human) S.send('aims', { r: rnd, a: aims[me] });
+  Sound.beep(600, 0.05, 'triangle', 0.04);
+  if (S.mode === 'local' && localStep === 0) { localStep = 1; status(); return; }
+  tryGo();
+  status();
+}
+
+function tryGo() {
+  if (!ready[0] || !ready[1] || phase !== 'plan') return;
+  pengs.forEach((p, i) => { if (!p.alive) return; const a = aims[p.t][i] || [0, 0]; p.vx = a[0]; p.vy = a[1]; });
+  phase = 'slide';
+  simT = 0; acc = 0;
+  Sound.beep(400, 0.1, 'triangle', 0.04);
+  status();
+}
+
+let simT = 0, acc = 0;
+function simStep() {
+  const live = pengs.filter(p => p.alive);
+  live.forEach(p => { p.x += p.vx * FIX; p.y += p.vy * FIX; const f = Math.pow(0.35, FIX); p.vx *= f; p.vy *= f; });
+  for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
+    const a = live[i], b = live[j], dx = b.x - a.x, dy = b.y - a.y, d = sq(dx, dy);
+    if (d >= PR * 2 || d === 0) continue;
+    const nx = dx / d, ny = dy / d, push = (PR * 2 - d) / 2;
+    a.x -= nx * push; a.y -= ny * push; b.x += nx * push; b.y += ny * push;
+    const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+    if (rv < 0) { a.vx += nx * rv * 0.95; a.vy += ny * rv * 0.95; b.vx -= nx * rv * 0.95; b.vy -= ny * rv * 0.95; Sound.beep(300, 0.03, 'square', 0.02); }
+  }
+  live.forEach(p => { if (sq(p.x - CX, p.y - CY) > ice) { p.alive = false; falling.push({ x: p.x, y: p.y, t: p.t, k: 0 }); Sound.beep(150, 0.2, 'sawtooth', 0.04); } });
+  simT += FIX;
+  return simT > 6 || live.every(p => sq(p.vx, p.vy) < 6);
+}
+
+function endSlide() {
+  pengs.forEach(p => { p.vx = 0; p.vy = 0; });
+  if (pendingSync) { applySync(pendingSync); pendingSync = null; }
+  if (S.human && S.host) S.send('sync', { r: rnd, p: pengs.map(p => [p.x, p.y, p.alive ? 1 : 0]) });
+  phase = 'pause';
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round) return;
+    const alive = t => pengs.filter(p => p.alive && p.t === t).length;
+    const a = alive(0), b = alive(1);
+    if (!a || !b) {
+      phase = 'over';
+      const mine = alive(me), theirs = alive(1 - me);
+      const title = !a && !b ? 'Everyone fell in — draw!' : S.mode === 'local' ? `Player ${a ? 1 : 2} wins! 🐧` : mine ? 'Your penguins rule the ice! 🐧🏆' : `${S.opp.name} knocked you out`;
+      msg.textContent = title;
+      status();
+      setTimeout(() => Lobby.end(S, { result: !a && !b ? 0.5 : mine ? 1 : 0, title }), 900);
+      return;
+    }
+    ice = Math.max(130, ice * 0.9);
+    newPlan();
+  }, 700);
+}
+
+let last = 0;
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (S && phase === 'plan' && S.human && !ready[me]) { timer -= dt; if (timer <= 0) confirm(); else if (Math.floor(timer / 1000) !== Math.floor((timer + dt) / 1000)) status(); }
+  if (S && phase === 'slide') { acc += dt / 1000; while (acc >= FIX && phase === 'slide') { acc -= FIX; if (simStep()) endSlide(); } }
+  ctx.fillStyle = '#0c4a6e';
+  ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 30; i++) { ctx.fillStyle = 'rgba(255,255,255,.05)'; ctx.beginPath(); ctx.arc((i * 97) % W, (i * 61 + t / 40) % H, 20, 0, 7); ctx.fill(); }
+  if (pengs) {
+    const g = ctx.createRadialGradient(CX, CY, 10, CX, CY, ice);
+    g.addColorStop(0, '#f8fafc'); g.addColorStop(1, '#bae6fd');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(CX, CY, ice, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#7dd3fc'; ctx.lineWidth = 4; ctx.stroke();
+    falling.forEach(f => { f.k += dt / 600; ctx.globalAlpha = Math.max(0, 1 - f.k); ctx.font = `${40 * (1 - f.k * 0.6)}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('🐧', f.x, f.y); ctx.globalAlpha = 1; });
+    falling = falling.filter(f => f.k < 1);
+    pengs.forEach((p, i) => {
+      if (!p.alive) return;
+      ctx.fillStyle = TEAM[p.t]; ctx.beginPath(); ctx.arc(p.x, p.y, PR, 0, 7); ctx.fill();
+      ctx.font = '30px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('🐧', p.x, p.y + 1);
+      const who = planner();
+      if (phase === 'plan' && p.t === who && !ready[who]) {
+        const a = aims[who][i];
+        if (a[0] || a[1]) {
+          const ex = p.x + a[0] * 0.3, ey = p.y + a[1] * 0.3;
+          ctx.strokeStyle = TEAM[p.t]; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ex, ey); ctx.stroke();
+          const an = Math.atan2(a[1], a[0]);
+          ctx.fillStyle = TEAM[p.t]; ctx.beginPath(); ctx.moveTo(ex + Math.cos(an) * 12, ey + Math.sin(an) * 12); ctx.lineTo(ex + Math.cos(an + 2.4) * 12, ey + Math.sin(an + 2.4) * 12); ctx.lineTo(ex + Math.cos(an - 2.4) * 12, ey + Math.sin(an - 2.4) * 12); ctx.fill();
+        }
+      }
+    });
+  }
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (!S || phase !== 'plan') return;
+  const who = planner();
+  if (ready[who]) return;
+  const p = canvasPoint(cv, e);
+  const i = pengs.findIndex(q => q.alive && q.t === who && sq(q.x - p.x, q.y - p.y) < PR + 10);
+  if (i >= 0) { drag = i; cv.setPointerCapture(e.pointerId); }
+});
+cv.addEventListener('pointermove', e => {
+  if (drag == null) return;
+  const p = canvasPoint(cv, e), q = pengs[drag];
+  let vx = (p.x - q.x) / 0.3, vy = (p.y - q.y) / 0.3;
+  const v = sq(vx, vy);
+  if (v > MAXV) { vx *= MAXV / v; vy *= MAXV / v; }
+  aims[planner()][drag] = [Math.round(vx), Math.round(vy)];
+});
+cv.addEventListener('pointerup', () => { drag = null; });
+document.getElementById('go').onclick = confirm;
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(loop);
+Lobby.open({ game: 'knockout', title: '🐧 Penguin Knockout', local: true, onStart: begin });
+</script>
+</body>
+</html>

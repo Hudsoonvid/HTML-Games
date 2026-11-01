@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Penalty Shootout</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⚽ Penalty Shootout</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="640" height="440"></canvas>
+</div>
+<p class="help">Five kicks each, taking turns. When you shoot, tap where in the goal you want to put the ball — the corners are hardest to save but easiest to miss. When you're in goal, tap left, middle or right to dive. Both choices are secret until the kick. Still level after five? Sudden death!</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const W = cv.width, H = cv.height, GX = 120, GY = 90, GW = 400, GH = 170;
+let S, me, kick, goals, log, picks, over, anim = null, local = { step: 0 }, early = {};
+// kick k: shooter is (first + k) % 2
+let first = 0;
+const shooterOf = k => (first + k) % 2;
+const nameOf = i => (S.mode === 'local' ? `Player ${i + 1}` : i === me ? 'You' : S.opp.name);
+
+function begin(s) {
+  S = s;
+  // picks for a later kick can arrive while this screen is still showing the last one
+  S.on('pick', d => {
+    if (!d || over || (d.role !== 'shot' && d.role !== 'dive')) return;
+    if (d.k === kick && !anim) { picks[d.role] = d.v; tryResolve(); status(); }
+    else if (d.k >= kick) (early[d.k] = early[d.k] || {})[d.role] = d.v;
+  });
+  S.startRound(() => ({ first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    first = cfg.first;
+    me = S.mode === 'online' ? S.seat : 0;
+    kick = 0; goals = [0, 0]; log = [[], []]; over = false; anim = null; early = {};
+    newKick();
+  });
+}
+
+function newKick() {
+  picks = { shot: null, dive: null };
+  if (early[kick]) { Object.assign(picks, early[kick]); delete early[kick]; }
+  local.step = 0;
+  status();
+  tryResolve();
+  if (S.ai) {
+    const r = S.round, k = kick;
+    setTimeout(() => {
+      if (r !== S.round || k !== kick) return;
+      if (shooterOf(kick) !== me) picks.shot = aiShot(); else picks.dive = aiDive();
+      tryResolve();
+    }, S.delay(400, 900));
+  }
+}
+
+// which role am I choosing for right now (or null)
+function myRole() {
+  if (!S || over || anim) return null;
+  if (S.mode === 'local') return picks.shot == null ? 'shot' : picks.dive == null ? 'dive' : null;
+  const role = shooterOf(kick) === me ? 'shot' : 'dive';
+  return picks[role] == null ? role : null;
+}
+
+function status() {
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : S.mode === 'online' ? 'Online' : '2 players';
+  const dots = i => log[i].map(g => (g ? '🟢' : '🔴')).join('') + '⚪'.repeat(Math.max(0, 5 - log[i].length));
+  document.getElementById('vs').innerHTML = [0, 1].map(i => `<b ${i === shooterOf(kick) && !over ? 'class="turn"' : ''}>${S.mode === 'local' ? 'P' + (i + 1) : i === me ? S.me.name : S.opp.name} ${goals[i]} ${dots(i)}</b>`).join(' vs ');
+  if (over) return;
+  const role = myRole(), sh = shooterOf(kick);
+  if (S.mode === 'local') msg.textContent = role === 'shot' ? `Player ${sh + 1}: tap where to shoot (keeper, look away!)` : role === 'dive' ? `Player ${2 - sh}: tap where to dive` : '';
+  else msg.textContent = role === 'shot' ? 'Your kick! Tap where to shoot.' : role === 'dive' ? `${S.opp.name} is about to shoot — tap where to dive!` : 'Waiting…';
+}
+
+function aiShot() {
+  const corner = Math.random() < 0.5 + S.level * 0.3;
+  let x = corner ? pick([-1, 1]) * rand(0.6, 0.95) : rand(-0.5, 0.5), y = corner ? rand(0.4, 0.95) : rand(0.1, 0.7);
+  // shakier shooters drag it wide
+  if (Math.random() < (1 - S.level) * 0.25) x *= 1.25;
+  return { x: +x.toFixed(3), y: +y.toFixed(3), luck: Math.random() };
+}
+function aiDive() {
+  const z = randInt(-1, 1);
+  return z;
+}
+
+function choose(role, v) {
+  picks[role] = v;
+  if (S.human) S.send('pick', { k: kick, role, v });
+  Sound.beep(500, 0.04, 'triangle', 0.03);
+  if (S.mode === 'local' && role === 'shot') { status(); return; }
+  tryResolve();
+  status();
+}
+
+function tryResolve() {
+  if (picks.shot == null || picks.dive == null || anim) return;
+  const { x, y, luck } = picks.shot, dive = picks.dive;
+  const zone = x < -0.33 ? -1 : x > 0.33 ? 1 : 0;
+  let result;
+  if (Math.abs(x) > 1 || y > 1.05) result = 'miss';
+  else if (zone !== dive) result = 'goal';
+  else {
+    // right way: easy to save in the middle, hard in the top corners
+    const hard = Math.abs(x) * 0.5 + y * 0.45;
+    result = luck < 0.95 - hard * 0.6 ? 'save' : 'goal';
+  }
+  anim = { x, y, dive, result, t: 0 };
+  status();
+}
+
+function finishKick() {
+  const sh = shooterOf(kick), scored = anim.result === 'goal';
+  if (scored) goals[sh]++;
+  log[sh].push(scored);
+  anim = null;
+  kick++;
+  // decided? (after 5 each, or early when one side can't catch up, or sudden death)
+  const taken = [log[0].length, log[1].length];
+  const left = i => Math.max(0, 5 - taken[i]);
+  let winner = -1;
+  if (kick <= 10) {
+    if (goals[0] > goals[1] + left(1)) winner = 0;
+    else if (goals[1] > goals[0] + left(0)) winner = 1;
+  }
+  if (kick >= 10 && taken[0] === taken[1] && goals[0] !== goals[1]) winner = goals[0] > goals[1] ? 0 : 1;
+  if (winner >= 0) {
+    over = true;
+    status();
+    const title = S.mode === 'local' ? `Player ${winner + 1} wins the shootout! ⚽` : winner === me ? 'You win the shootout! ⚽🏆' : `${S.opp.name} wins the shootout`;
+    msg.textContent = `${title} (${goals[0]}–${goals[1]})`;
+    setTimeout(() => Lobby.end(S, { result: winner === me ? 1 : 0, title, detail: `${goals[0]} – ${goals[1]}` }), 1200);
+    return;
+  }
+  newKick();
+}
+
+function goalPoint(x, y) { return { x: GX + GW / 2 + x * GW / 2, y: GY + GH - y * GH }; }
+
+function draw() {
+  ctx.fillStyle = '#15803d';
+  ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 8; i++) { ctx.fillStyle = i % 2 ? '#16a34a' : '#15803d'; ctx.fillRect(0, GY + GH + i * 30, W, 30); }
+  ctx.fillStyle = '#0f172a'; ctx.fillRect(0, 0, W, GY - 10);
+  // net
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1;
+  for (let x = GX; x <= GX + GW; x += 16) { ctx.beginPath(); ctx.moveTo(x, GY); ctx.lineTo(x, GY + GH); ctx.stroke(); }
+  for (let y = GY; y <= GY + GH; y += 16) { ctx.beginPath(); ctx.moveTo(GX, y); ctx.lineTo(GX + GW, y); ctx.stroke(); }
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(GX, GY + GH); ctx.lineTo(GX, GY); ctx.lineTo(GX + GW, GY); ctx.lineTo(GX + GW, GY + GH); ctx.stroke();
+  ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(40, GY + GH); ctx.lineTo(W - 40, GY + GH); ctx.stroke();
+  if (!S || !picks) return requestAnimationFrame(draw);
+  const role = myRole();
+  if (role === 'dive') {
+    ['⬅ Dive left', 'Stay', 'Dive right ➡'].forEach((t, i) => { ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fillRect(GX + i * GW / 3 + 4, GY + 4, GW / 3 - 8, GH - 8); ctx.fillStyle = '#fff'; ctx.font = 'bold 16px system-ui'; ctx.textAlign = 'center'; ctx.fillText(t, GX + i * GW / 3 + GW / 6, GY + GH / 2); });
+  }
+  // keeper
+  let kx = GX + GW / 2, ky = GY + GH - 40, kr = 0;
+  let bx = W / 2, by = H - 50, bs = 1;
+  if (anim) {
+    anim.t += 16;
+    const k = Math.min(1, anim.t / 600);
+    kx += anim.dive * GW * 0.3 * Math.min(1, anim.t / 400);
+    kr = anim.dive * Math.min(1, anim.t / 400) * 1.2;
+    ky -= anim.dive ? Math.sin(Math.min(1, anim.t / 400) * Math.PI) * 20 : 0;
+    const tgt = goalPoint(anim.x, anim.y);
+    let tx = tgt.x, ty = tgt.y;
+    if (anim.result === 'save') { tx = kx + (tgt.x - kx) * 0.4; ty = ky + (tgt.y - ky) * 0.4; }
+    bx = W / 2 + (tx - W / 2) * k; by = H - 50 + (ty - (H - 50)) * k; bs = 1 - k * 0.45;
+    if (anim.t > 600 && !anim.said) {
+      anim.said = true;
+      msg.textContent = anim.result === 'goal' ? 'GOAL! ⚽' : anim.result === 'save' ? 'Saved! 🧤' : 'Wide! 😬';
+      Sound.beep(anim.result === 'goal' ? 880 : 200, 0.25, 'triangle', 0.05);
+    }
+    if (anim.t > 1700) finishKick();
+  }
+  ctx.save(); ctx.translate(kx, ky); ctx.rotate(kr);
+  ctx.font = '64px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('🧤', 0, -30);
+  ctx.fillStyle = '#f59e0b'; ctx.fillRect(-20, -14, 40, 50);
+  ctx.fillStyle = '#fcd34d'; ctx.beginPath(); ctx.arc(0, -26, 14, 0, 7); ctx.fill();
+  ctx.restore();
+  ctx.font = `${36 * bs}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('⚽', bx, by);
+  if (role === 'shot' && aimP) { ctx.strokeStyle = '#fde047'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(aimP.x, aimP.y, 12, 0, 7); ctx.stroke(); }
+  requestAnimationFrame(draw);
+}
+let aimP = null;
+
+cv.addEventListener('pointermove', e => { aimP = canvasPoint(cv, e); });
+cv.addEventListener('pointerdown', e => {
+  const role = myRole();
+  if (!role) return;
+  const p = canvasPoint(cv, e);
+  if (role === 'shot') {
+    if (p.y > GY + GH + 30) return;
+    const x = (p.x - GX - GW / 2) / (GW / 2), y = (GY + GH - p.y) / GH;
+    // a little shake: aiming at the very edge can go wide
+    choose('shot', { x: +(x + rand(-0.06, 0.06)).toFixed(3), y: +clamp(y + rand(-0.05, 0.05), 0, 1.2).toFixed(3), luck: +Math.random().toFixed(3) });
+  } else {
+    if (p.x < GX || p.x > GX + GW) return;
+    choose('dive', p.x < GX + GW / 3 ? -1 : p.x > GX + GW * 2 / 3 ? 1 : 0);
+  }
+});
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(draw);
+Lobby.open({ game: 'penalty-shootout', title: '⚽ Penalty Shootout', local: true, onStart: begin });
+</script>
+</body>
+</html>
