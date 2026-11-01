@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FreeCell</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🆓 FreeCell</h1>
+  <div class="stats">Deal <b id="deal">#1</b> Moves <b id="moves">0</b> Wins <b id="wins">0</b></div>
+</header>
+<div class="controls">
+  <button class="btn" id="new">New deal</button>
+  <button class="btn alt" id="undo">↶ Undo</button>
+  <button class="btn alt" id="restart">↺ Restart deal</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="800" height="720"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Move every card to the four foundations (top right), Ace up to King by suit. In the columns, build down in alternating colours. The four free cells (top left) each hold one card. You can move several cards at once if there are enough free cells and empty columns to do it one by one. Tap a card to send it to the best spot, or drag it.</p>
+<script src="shared.js"></script>
+<script src="cards.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const CW = 86, CH = 118, GAP = 12, TOPY = 150;
+let cols, cells, found, moves, hist, startState, dealNo, drag = null, wins = Store.get('freecell-wins', 0);
+const X = i => 8 + i * (CW + GAP);
+
+function newDeal(again) {
+  if (!again) {
+    dealNo = randInt(1, 32000);
+    const deck = shuffle(makeDeck());
+    deck.forEach(c => { c.up = true; });
+    cols = Array.from({ length: 8 }, () => []);
+    deck.forEach((c, i) => cols[i % 8].push(c));
+    cells = [null, null, null, null];
+    found = [[], [], [], []];
+    startState = JSON.stringify({ cols, cells, found });
+  } else ({ cols, cells, found } = JSON.parse(startState));
+  moves = 0; hist = []; drag = null;
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('deal').textContent = '#' + dealNo;
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('wins').textContent = wins;
+}
+
+const save = () => { hist.push(JSON.stringify({ cols, cells, found, moves })); };
+const topOf = a => a[a.length - 1];
+const fits = (c, onto) => !onto || (onto.r === c.r + 1 && isRed(onto) !== isRed(c));
+const toFound = c => { const f = found[c.s]; return (!f.length && c.r === 1) || (f.length && topOf(f).r === c.r - 1); };
+// how many cards can move at once: (free cells + 1) × 2^(empty columns not used as the target)
+const capacity = toEmpty => (cells.filter(x => !x).length + 1) * Math.pow(2, cols.filter(c => !c.length).length - (toEmpty ? 1 : 0));
+function isRun(ci, i) {
+  const c = cols[ci];
+  for (let k = i; k < c.length - 1; k++) if (!fits(c[k + 1], c[k])) return false;
+  return true;
+}
+
+// src: { kind: 'col', ci, i } or { kind: 'cell', ci }; dst: { kind: 'col'|'cell'|'found', ci }
+function cardsOf(src) { return src.kind === 'cell' ? [cells[src.ci]] : cols[src.ci].slice(src.i); }
+function legal(src, dst) {
+  const cs = cardsOf(src), first = cs[0];
+  if (!first) return false;
+  if (dst.kind === 'found') return cs.length === 1 && toFound(first);
+  if (dst.kind === 'cell') return cs.length === 1 && !cells[dst.ci];
+  if (src.kind === 'col' && src.ci === dst.ci) return false;
+  const tgt = cols[dst.ci];
+  return fits(first, topOf(tgt)) && cs.length <= capacity(!tgt.length);
+}
+function apply(src, dst) {
+  save();
+  const cs = src.kind === 'cell' ? [cells[src.ci]] : cols[src.ci].splice(src.i);
+  if (src.kind === 'cell') cells[src.ci] = null;
+  if (dst.kind === 'found') found[cs[0].s].push(cs[0]);
+  else if (dst.kind === 'cell') cells[dst.ci] = cs[0];
+  else cols[dst.ci].push(...cs);
+  moves++;
+  Sound.beep(dst.kind === 'found' ? 760 : 520, 0.04, 'triangle', 0.03);
+  autoPlay();
+  hud();
+  if (found.every(f => f.length === 13)) {
+    wins++;
+    Store.set('freecell-wins', wins);
+    hud();
+    setTimeout(() => overlay(ov, `<h2>Solved! 🏆</h2><p>Deal #${dealNo} in ${moves} moves</p><button class="btn" onclick="newDeal()">New deal</button>`), 300);
+  }
+}
+
+// cards that can never be needed again in the columns go home automatically
+function autoPlay() {
+  let movedAny = true;
+  while (movedAny) {
+    movedAny = false;
+    const minOpp = red => Math.min(...[0, 1, 2, 3].filter(s => (s === 1 || s === 2) !== red).map(s => found[s].length));
+    const safe = c => toFound(c) && (c.r <= 2 || c.r <= minOpp(isRed(c)) + 1);
+    for (let i = 0; i < 4; i++) if (cells[i] && safe(cells[i])) { found[cells[i].s].push(cells[i]); cells[i] = null; movedAny = true; }
+    for (const c of cols) if (c.length && safe(topOf(c))) { const k = c.pop(); found[k.s].push(k); movedAny = true; }
+  }
+}
+
+function autoMove(src) {
+  const cs = cardsOf(src);
+  if (cs.length === 1 && legal(src, { kind: 'found' })) return apply(src, { kind: 'found' });
+  for (let t = 0; t < 8; t++) if (cols[t].length && legal(src, { kind: 'col', ci: t })) return apply(src, { kind: 'col', ci: t });
+  for (let t = 0; t < 8; t++) if (!cols[t].length && legal(src, { kind: 'col', ci: t })) return apply(src, { kind: 'col', ci: t });
+  if (src.kind === 'col' && cs.length === 1) { const f = cells.findIndex(x => !x); if (f >= 0) return apply(src, { kind: 'cell', ci: f }); }
+  Sound.beep(160, 0.05, 'square', 0.03);
+}
+
+function colYs(ci) {
+  const n = cols[ci].length, avail = cv.height - TOPY - CH - 6, step = n > 1 ? Math.min(32, avail / (n - 1)) : 32;
+  return cols[ci].map((_, j) => TOPY + j * step);
+}
+
+function draw() {
+  drawFelt(ctx, cv.width, cv.height);
+  if (!cols) return requestAnimationFrame(draw);
+  for (let i = 0; i < 4; i++) {
+    if (cells[i] && !(drag && drag.src.kind === 'cell' && drag.src.ci === i)) drawCard(ctx, cells[i], X(i), 12, CW, CH);
+    else drawSlot(ctx, X(i), 12, CW, CH, 'free');
+    const f = found[i];
+    if (f.length) drawCard(ctx, topOf(f), X(i + 4), 12, CW, CH); else drawSlot(ctx, X(i + 4), 12, CW, CH, SUITS[i]);
+  }
+  cols.forEach((c, ci) => {
+    const ys = colYs(ci);
+    if (!c.length) drawSlot(ctx, X(ci), TOPY, CW, CH);
+    c.forEach((k, j) => { if (!(drag && drag.src.kind === 'col' && drag.src.ci === ci && j >= drag.src.i)) drawCard(ctx, k, X(ci), ys[j], CW, CH); });
+  });
+  if (drag) cardsOf(drag.src).forEach((k, j) => drawCard(ctx, k, drag.x - drag.ox, drag.y - drag.oy + j * 32, CW, CH, { lift: true }));
+  requestAnimationFrame(draw);
+}
+
+function hit(p) {
+  for (let i = 0; i < 8; i++) {
+    if (p.x < X(i) || p.x > X(i) + CW) continue;
+    if (p.y >= 12 && p.y <= 12 + CH) return i < 4 ? { kind: 'cell', ci: i, y: 12 } : { kind: 'found', ci: i - 4 };
+    const ys = colYs(i);
+    for (let j = cols[i].length - 1; j >= 0; j--) if (p.y >= ys[j] && p.y <= ys[j] + CH) return { kind: 'col', ci: i, i: j, y: ys[j] };
+    return { kind: 'col', ci: i, i: -1 };
+  }
+  return null;
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (!ov.classList.contains('hidden')) return;
+  const p = canvasPoint(cv, e), h = hit(p);
+  if (!h) return;
+  if (h.kind === 'cell' && cells[h.ci]) drag = { src: { kind: 'cell', ci: h.ci }, x: p.x, y: p.y, ox: p.x - X(h.ci), oy: p.y - 12, sx: p.x, sy: p.y };
+  else if (h.kind === 'col' && h.i >= 0 && isRun(h.ci, h.i)) drag = { src: { kind: 'col', ci: h.ci, i: h.i }, x: p.x, y: p.y, ox: p.x - X(h.ci), oy: p.y - h.y, sx: p.x, sy: p.y };
+  if (drag) cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => { if (drag) { const p = canvasPoint(cv, e); drag.x = p.x; drag.y = p.y; } });
+cv.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const d = drag, p = canvasPoint(cv, e);
+  drag = null;
+  if (Math.hypot(p.x - d.sx, p.y - d.sy) < 8) return autoMove(d.src);
+  const cx = p.x - d.ox + CW / 2, cy = p.y - d.oy + CH / 2;
+  const i = clamp(Math.floor((cx - 8) / (CW + GAP)), 0, 7);
+  const dst = cy < TOPY - 10 ? (i < 4 ? { kind: 'cell', ci: i } : { kind: 'found' }) : { kind: 'col', ci: i };
+  if (legal(d.src, dst)) apply(d.src, dst);
+  else Sound.beep(160, 0.05, 'square', 0.03);
+});
+document.getElementById('new').onclick = () => newDeal();
+document.getElementById('restart').onclick = () => newDeal(true);
+document.getElementById('undo').onclick = () => { if (hist.length) { const s = JSON.parse(hist.pop()); ({ cols, cells, found } = s); moves = s.moves + 1; hud(); } };
+newDeal();
+draw();
+</script>
+</body>
+</html>

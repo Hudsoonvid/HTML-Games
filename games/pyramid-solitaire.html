@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pyramid Solitaire</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔺 Pyramid Solitaire</h1>
+  <div class="stats">Pyramid <b id="left">28</b> Passes <b id="passes">3</b> Wins <b id="wins">0</b></div>
+</header>
+<div class="controls">
+  <button class="btn" id="new">New deal</button>
+  <button class="btn alt" id="undo">↶ Undo</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="700" height="600"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Remove pairs of uncovered cards that add up to 13 (Jack = 11, Queen = 12, King = 13 on its own). A card is free when no cards cover it from below. Tap the stock to turn a card onto the waste — its top card can pair too. Clear the pyramid to win; you can go through the stock three times.</p>
+<script src="shared.js"></script>
+<script src="cards.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const CW = 66, CH = 92, DX = 72, DY = 48;
+let pyr, stock, waste, passes, sel, hist, over, wins = Store.get('pyramid-wins', 0);
+// pyramid cards: row r (0-6), index i (0..r)
+const pos = (r, i) => ({ x: cv.width / 2 - (r * DX) / 2 + i * DX - CW / 2, y: 14 + r * DY });
+const idx = (r, i) => (r * (r + 1)) / 2 + i;
+const free = (r, i) => pyr[idx(r, i)] && (r === 6 || (!pyr[idx(r + 1, i)] && !pyr[idx(r + 1, i + 1)]));
+
+function deal() {
+  const d = shuffle(makeDeck());
+  d.forEach(c => { c.up = true; });
+  pyr = d.splice(0, 28);
+  stock = d; waste = []; passes = 3; sel = null; hist = []; over = false;
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('left').textContent = pyr.filter(Boolean).length;
+  document.getElementById('passes').textContent = passes;
+  document.getElementById('wins').textContent = wins;
+}
+
+const save = () => hist.push(JSON.stringify({ pyr, stock, waste, passes }));
+const cardOf = s => (s.kind === 'p' ? pyr[s.k] : waste[waste.length - 1]);
+
+function removeSel(s) { if (s.kind === 'p') pyr[s.k] = null; else waste.pop(); }
+
+function choose(s) {
+  const c = cardOf(s);
+  if (!c) return;
+  if (c.r === 13) { save(); removeSel(s); sel = null; Sound.beep(880, 0.08, 'triangle', 0.04); return after(); }
+  if (!sel) { sel = s; Sound.beep(500, 0.03, 'triangle', 0.03); return; }
+  if (sel.kind === s.kind && sel.k === s.k) { sel = null; return; }
+  if (cardOf(sel).r + c.r === 13) {
+    save();
+    // remove the waste one last so its index stays valid
+    if (sel.kind === 'w') { removeSel(s); removeSel(sel); } else { removeSel(sel); removeSel(s); }
+    sel = null;
+    Sound.beep(760, 0.08, 'triangle', 0.04);
+    return after();
+  }
+  sel = s;
+}
+
+function turn() {
+  sel = null;
+  if (stock.length) { save(); waste.push(stock.pop()); Sound.beep(320, 0.04, 'triangle', 0.03); }
+  else if (passes > 1) { save(); passes--; stock = waste.reverse(); waste = []; Sound.beep(240, 0.08, 'triangle', 0.03); }
+  after();
+}
+
+function after() {
+  hud();
+  if (pyr.every(c => !c)) {
+    over = true; wins++; Store.set('pyramid-wins', wins); hud();
+    setTimeout(() => overlay(ov, '<h2>Pyramid cleared! 🔺🏆</h2><button class="btn" onclick="deal()">Deal again</button>'), 300);
+    return;
+  }
+  if (!stock.length && passes <= 1 && !movesLeft()) {
+    over = true;
+    setTimeout(() => overlay(ov, `<h2>No moves left</h2><p>${pyr.filter(Boolean).length} cards remained.</p><button class="btn" onclick="deal()">Deal again</button>`), 300);
+  }
+}
+
+function movesLeft() {
+  const avail = [];
+  for (let r = 0; r < 7; r++) for (let i = 0; i <= r; i++) if (free(r, i)) avail.push(pyr[idx(r, i)]);
+  if (waste.length) avail.push(waste[waste.length - 1]);
+  return avail.some(a => a.r === 13 || avail.some(b => b !== a && a.r + b.r === 13));
+}
+
+function draw() {
+  drawFelt(ctx, cv.width, cv.height);
+  if (!pyr) return requestAnimationFrame(draw);
+  for (let r = 0; r < 7; r++) for (let i = 0; i <= r; i++) {
+    const c = pyr[idx(r, i)];
+    if (!c) continue;
+    const p = pos(r, i), f = free(r, i);
+    drawCard(ctx, c, p.x, p.y, CW, CH, { dim: !f, hi: sel && sel.kind === 'p' && sel.k === idx(r, i) });
+  }
+  const y = cv.height - CH - 18, sx = cv.width / 2 - CW - 30, wx = cv.width / 2 + 30;
+  if (stock.length) drawCard(ctx, { up: false }, sx, y, CW, CH); else drawSlot(ctx, sx, y, CW, CH, passes > 1 ? '↺' : '∅');
+  if (waste.length) drawCard(ctx, waste[waste.length - 1], wx, y, CW, CH, { hi: sel && sel.kind === 'w' });
+  else drawSlot(ctx, wx, y, CW, CH);
+  ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.font = '13px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText(`stock ${stock.length}`, sx + CW / 2, y - 8);
+  ctx.fillText('waste', wx + CW / 2, y - 8);
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (over) return;
+  const p = canvasPoint(cv, e), y = cv.height - CH - 18;
+  if (p.y > y) {
+    if (p.x > cv.width / 2 - CW - 30 && p.x < cv.width / 2 - 30) return turn();
+    if (p.x > cv.width / 2 + 30 && p.x < cv.width / 2 + 30 + CW && waste.length) return choose({ kind: 'w' });
+    return;
+  }
+  // topmost (highest row) free card under the pointer
+  for (let r = 6; r >= 0; r--) for (let i = 0; i <= r; i++) {
+    const q = pos(r, i);
+    if (pyr[idx(r, i)] && p.x >= q.x && p.x <= q.x + CW && p.y >= q.y && p.y <= q.y + CH) {
+      if (free(r, i)) choose({ kind: 'p', k: idx(r, i) });
+      return;
+    }
+  }
+});
+document.getElementById('new').onclick = deal;
+document.getElementById('undo').onclick = () => { if (hist.length && !over) { ({ pyr, stock, waste, passes } = JSON.parse(hist.pop())); sel = null; hud(); } };
+deal();
+draw();
+</script>
+</body>
+</html>

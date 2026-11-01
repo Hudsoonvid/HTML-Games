@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Poker</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #pay { width: min(640px, calc(100vw - 16px)); margin: 0 auto 8px; border-collapse: collapse; font-size: 13px; }
+  #pay td { padding: 2px 8px; border-bottom: 1px solid var(--line); text-align: right; color: var(--muted); }
+  #pay td:first-child { text-align: left; }
+  #pay tr.win td { background: #854d0e; color: #fff; font-weight: 700; }
+  #pay td.col { color: var(--fg); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🎰 Video Poker</h1>
+  <div class="stats">Credits <b id="credits">100</b></div>
+</header>
+<table id="pay"></table>
+<div class="msg" id="msg">Choose your bet and press Deal.</div>
+<div class="stage">
+  <canvas id="c" class="game" width="640" height="250"></canvas>
+</div>
+<div class="controls">
+  <button class="btn alt" id="bet">Bet 1</button>
+  <button class="btn alt" id="max">Bet max</button>
+  <button class="btn" id="deal">Deal</button>
+</div>
+<p class="help">Jacks or Better. Deal five cards, tap the ones you want to <b>hold</b>, then draw to replace the rest. Pairs of Jacks or higher pay back your bet; better hands pay more. A Royal Flush on a 5-credit bet pays 4000! Out of credits? You get 100 more.</p>
+<script src="shared.js"></script>
+<script src="cards.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const PAY = [
+  ['Royal Flush', 250], ['Straight Flush', 50], ['Four of a Kind', 25], ['Full House', 9], ['Flush', 6],
+  ['Straight', 4], ['Three of a Kind', 3], ['Two Pair', 2], ['Jacks or Better', 1]
+];
+let credits = Store.get('vpoker-credits', 100), bet = 1, hand = [], held = [false, false, false, false, false], deck = [], phase = 'bet', lastWin = null;
+const CW = 112, CH = 156, X = i => 12 + i * (CW + 12);
+
+function table() {
+  document.getElementById('pay').innerHTML = PAY.map(([n, p]) => `<tr class="${lastWin === n ? 'win' : ''}"><td>${n}</td>${[1, 2, 3, 4, 5].map(b => `<td class="${b === bet ? 'col' : ''}">${n === 'Royal Flush' && b === 5 ? 4000 : p * b}</td>`).join('')}</tr>`).join('');
+}
+
+function evaluate(h) {
+  const rs = h.map(c => c.r).sort((a, b) => a - b), counts = {};
+  rs.forEach(r => { counts[r] = (counts[r] || 0) + 1; });
+  const groups = Object.values(counts).sort((a, b) => b - a);
+  const flush = h.every(c => c.s === h[0].s);
+  const uniq = [...new Set(rs)];
+  let straight = uniq.length === 5 && rs[4] - rs[0] === 4;
+  const royal = uniq.length === 5 && rs.join() === '1,10,11,12,13';
+  if (royal) straight = true;
+  if (straight && flush) return royal ? 'Royal Flush' : 'Straight Flush';
+  if (groups[0] === 4) return 'Four of a Kind';
+  if (groups[0] === 3 && groups[1] === 2) return 'Full House';
+  if (flush) return 'Flush';
+  if (straight) return 'Straight';
+  if (groups[0] === 3) return 'Three of a Kind';
+  if (groups[0] === 2 && groups[1] === 2) return 'Two Pair';
+  if (groups[0] === 2) { const pr = +Object.keys(counts).find(k => counts[k] === 2); if (pr === 1 || pr >= 11) return 'Jacks or Better'; }
+  return null;
+}
+
+function hud() {
+  document.getElementById('credits').textContent = credits;
+  document.getElementById('bet').textContent = `Bet ${bet}`;
+  document.getElementById('deal').textContent = phase === 'hold' ? 'Draw' : 'Deal';
+  document.getElementById('bet').disabled = document.getElementById('max').disabled = phase === 'hold';
+  table();
+}
+
+function dealOrDraw() {
+  if (phase !== 'hold') {
+    if (credits < bet) { credits += 100; msg.textContent = 'Here are 100 free credits — good luck!'; }
+    credits -= bet;
+    deck = shuffle(makeDeck());
+    hand = deck.splice(0, 5);
+    hand.forEach(c => { c.up = true; });
+    held = [false, false, false, false, false];
+    phase = 'hold';
+    lastWin = null;
+    const pre = evaluate(hand);
+    msg.textContent = pre ? `You have ${pre}! Tap cards to hold, then Draw.` : 'Tap the cards you want to hold, then Draw.';
+    Sound.beep(400, 0.05, 'triangle', 0.04);
+  } else {
+    hand = hand.map((c, i) => { if (held[i]) return c; const n = deck.pop(); n.up = true; return n; });
+    const res = evaluate(hand);
+    lastWin = res;
+    if (res) {
+      const win = res === 'Royal Flush' && bet === 5 ? 4000 : PAY.find(p => p[0] === res)[1] * bet;
+      credits += win;
+      msg.textContent = `${res}! You win ${win} credits.`;
+      Sound.beep(880, 0.3, 'triangle');
+    } else { msg.textContent = 'No win. Deal again?'; Sound.beep(200, 0.15, 'triangle', 0.04); }
+    phase = 'bet';
+  }
+  Store.set('vpoker-credits', credits);
+  hud();
+}
+
+function draw() {
+  drawFelt(ctx, cv.width, cv.height);
+  for (let i = 0; i < 5; i++) {
+    const y = 40 - (held[i] ? 14 : 0);
+    if (hand[i]) drawCard(ctx, hand[i], X(i), y, CW, CH, { hi: held[i] });
+    else drawCard(ctx, { up: false }, X(i), y, CW, CH);
+    if (held[i]) { ctx.fillStyle = '#facc15'; ctx.font = 'bold 15px system-ui'; ctx.textAlign = 'center'; ctx.fillText('HELD', X(i) + CW / 2, 228); }
+  }
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (phase !== 'hold') return;
+  const p = canvasPoint(cv, e);
+  for (let i = 0; i < 5; i++) if (p.x >= X(i) && p.x <= X(i) + CW) { held[i] = !held[i]; Sound.beep(600, 0.03, 'triangle', 0.03); }
+});
+document.getElementById('bet').onclick = () => { bet = bet % 5 + 1; hud(); };
+document.getElementById('max').onclick = () => { bet = 5; hud(); dealOrDraw(); };
+document.getElementById('deal').onclick = dealOrDraw;
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') dealOrDraw();
+  if (phase === 'hold' && e.key >= '1' && e.key <= '5') held[+e.key - 1] = !held[+e.key - 1];
+});
+hud();
+draw();
+</script>
+</body>
+</html>

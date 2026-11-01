@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spider Solitaire</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🕷️ Spider Solitaire</h1>
+  <div class="stats">Moves <b id="moves">0</b> Suits done <b id="done">0/8</b> Wins <b id="wins">0</b></div>
+</header>
+<div class="controls">
+  <select id="suits"><option value="1">1 suit (easy)</option><option value="2">2 suits</option><option value="4">4 suits (hard)</option></select>
+  <button class="btn" id="new">New deal</button>
+  <button class="btn alt" id="undo">↶ Undo</button>
+  <button class="btn alt" id="hint">💡 Hint</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="800" height="700"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Build down in any suit, but only runs of the same suit move together. Complete a run from King down to Ace in one suit and it's removed. Tap the stock (top right) to deal a new card onto every column. Tap a card to move it automatically, or drag it.</p>
+<script src="shared.js"></script>
+<script src="cards.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const CW = 72, CH = 100, GAP = 7.5, TOPY = 128;
+let cols, stock, done, moves, hist, drag = null, hintMove = null, wins = Store.get('spider-wins', 0);
+const colX = i => 6 + i * (CW + GAP);
+
+function deal() {
+  const n = +document.getElementById('suits').value;
+  const suits = n === 1 ? [0] : n === 2 ? [0, 1] : [0, 1, 2, 3];
+  const deck = shuffle(makeDeck(8 / suits.length, suits));
+  cols = Array.from({ length: 10 }, () => []);
+  for (let i = 0; i < 54; i++) cols[i % 10].push(deck.pop());
+  cols.forEach(c => { c[c.length - 1].up = true; });
+  stock = deck;
+  done = []; moves = 0; hist = []; drag = null; hintMove = null;
+  Store.set('spider-suits', n);
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('moves').textContent = moves;
+  document.getElementById('done').textContent = `${done.length}/8`;
+  document.getElementById('wins').textContent = wins;
+}
+
+const snap = () => JSON.stringify({ cols, stock, done, moves });
+function save() { hist.push(snap()); if (hist.length > 200) hist.shift(); }
+
+// index from which a same-suit descending run reaches the bottom of column ci
+function runStart(ci) {
+  const c = cols[ci];
+  let i = c.length - 1;
+  while (i > 0 && c[i - 1].up && c[i - 1].s === c[i].s && c[i - 1].r === c[i].r + 1) i--;
+  return i;
+}
+const canPick = (ci, i) => i >= 0 && cols[ci][i] && cols[ci][i].up && i >= runStart(ci);
+const canDrop = (card, ci) => !cols[ci].length || cols[ci][cols[ci].length - 1].r === card.r + 1;
+
+function move(from, i, to) {
+  save();
+  const run = cols[from].splice(i);
+  cols[to].push(...run);
+  const c = cols[from];
+  if (c.length && !c[c.length - 1].up) c[c.length - 1].up = true;
+  moves++;
+  hintMove = null;
+  Sound.beep(520, 0.04, 'triangle', 0.03);
+  checkComplete(to);
+  hud();
+}
+
+function checkComplete(ci) {
+  const c = cols[ci];
+  if (c.length < 13) return;
+  const tail = c.slice(-13);
+  if (tail.every((k, j) => k.up && k.s === tail[0].s && k.r === 13 - j)) {
+    c.splice(-13);
+    done.push(tail[0].s);
+    if (c.length) c[c.length - 1].up = true;
+    Sound.beep(880, 0.25, 'triangle');
+    if (done.length === 8) {
+      wins++;
+      Store.set('spider-wins', wins);
+      setTimeout(() => overlay(ov, `<h2>You won! 🕷️🏆</h2><p>${moves} moves</p><button class="btn" onclick="deal()">Deal again</button>`), 400);
+    }
+  }
+}
+
+function dealStock() {
+  if (!stock.length) return;
+  if (cols.some(c => !c.length)) { flash = 'Fill every empty column before dealing.'; flashT = 1800; return; }
+  save();
+  cols.forEach((c, i) => { const k = stock.pop(); k.up = true; c.push(k); });
+  moves++;
+  Sound.beep(300, 0.08, 'triangle', 0.04);
+  cols.forEach((c, i) => checkComplete(i));
+  hud();
+}
+
+// best target for a run: a same-suit card one higher, then any card one higher, then an empty column
+function bestTarget(from, i) {
+  const card = cols[from][i];
+  let alt = -1, empty = -1;
+  for (let t = 0; t < 10; t++) {
+    if (t === from) continue;
+    const c = cols[t];
+    if (!c.length) { if (empty < 0 && i > 0) empty = t; continue; }
+    const top = c[c.length - 1];
+    if (top.r === card.r + 1) { if (top.s === card.s) return t; if (alt < 0) alt = t; }
+  }
+  return alt >= 0 ? alt : empty;
+}
+
+function findHint() {
+  for (let f = 0; f < 10; f++) {
+    if (!cols[f].length) continue;
+    const i = runStart(f), t = bestTarget(f, i);
+    if (t >= 0 && !(cols[t].length === 0 && i === 0)) {
+      // skip pointless moves onto a different suit when the run already sits on its rank+1
+      const under = cols[f][i - 1];
+      if (under && under.up && under.r === cols[f][i].r + 1 && (!cols[t].length || cols[t][cols[t].length - 1].s !== cols[f][i].s)) continue;
+      return { f, i, t };
+    }
+  }
+  return null;
+}
+
+function layoutCol(ci) {
+  const c = cols[ci], avail = cv.height - TOPY - CH - 6;
+  let down = 12, up = 26;
+  const need = c.reduce((a, k) => a + (k.up ? up : down), 0);
+  if (need > avail) { const k = avail / need; down *= k; up *= k; }
+  const ys = [];
+  let y = TOPY;
+  c.forEach(k => { ys.push(y); y += k.up ? up : down; });
+  return ys;
+}
+
+let flash = '', flashT = 0;
+function draw() {
+  drawFelt(ctx, cv.width, cv.height);
+  if (!cols) return requestAnimationFrame(draw);
+  // completed suits, then stock
+  for (let i = 0; i < 8; i++) {
+    if (done[i] != null) drawCard(ctx, { s: done[i], r: 13, up: true }, 6 + i * 22, 10, CW, CH);
+    else if (i === 0) drawSlot(ctx, 6, 10, CW, CH, '♠');
+  }
+  const sx = cv.width - CW - 8;
+  for (let k = 0; k < Math.ceil(stock.length / 10); k++) drawCard(ctx, { up: false }, sx - k * 10, 10, CW, CH);
+  if (!stock.length) drawSlot(ctx, sx, 10, CW, CH, '');
+  ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.font = '13px system-ui'; ctx.textAlign = 'right';
+  ctx.fillText(`${Math.ceil(stock.length / 10)} deals left`, sx - 8, 118);
+  cols.forEach((c, ci) => {
+    const ys = layoutCol(ci);
+    if (!c.length) drawSlot(ctx, colX(ci), TOPY, CW, CH);
+    c.forEach((k, j) => {
+      if (drag && drag.from === ci && j >= drag.i) return;
+      const hi = hintMove && ((hintMove.f === ci && j >= hintMove.i) || (hintMove.t === ci && j === c.length - 1));
+      drawCard(ctx, k, colX(ci), ys[j], CW, CH, { hi });
+    });
+    if (hintMove && hintMove.t === ci && !c.length) drawSlot(ctx, colX(ci), TOPY, CW, CH, '⬇');
+  });
+  if (drag) cols[drag.from].slice(drag.i).forEach((k, j) => drawCard(ctx, k, drag.x - drag.ox, drag.y - drag.oy + j * 26, CW, CH, { lift: true }));
+  if (flashT > 0) {
+    flashT -= 16;
+    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(cv.width / 2 - 200, cv.height / 2 - 24, 400, 48);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = '16px system-ui'; ctx.fillText(flash, cv.width / 2, cv.height / 2 + 6);
+  }
+  requestAnimationFrame(draw);
+}
+
+function hitCard(p) {
+  for (let ci = 0; ci < 10; ci++) {
+    if (p.x < colX(ci) || p.x > colX(ci) + CW) continue;
+    const ys = layoutCol(ci);
+    for (let j = cols[ci].length - 1; j >= 0; j--) if (p.y >= ys[j] && p.y <= ys[j] + CH) return { ci, j, y: ys[j] };
+    return { ci, j: -1 };
+  }
+  return null;
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (!ov.classList.contains('hidden')) return;
+  const p = canvasPoint(cv, e);
+  if (p.y < TOPY - 8 && p.x > cv.width - CW - 60) return dealStock();
+  const h = hitCard(p);
+  if (!h || h.j < 0 || !canPick(h.ci, h.j)) return;
+  drag = { from: h.ci, i: h.j, x: p.x, y: p.y, ox: p.x - colX(h.ci), oy: p.y - h.y, sx: p.x, sy: p.y };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => { if (drag) { const p = canvasPoint(cv, e); drag.x = p.x; drag.y = p.y; } });
+cv.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const d = drag, p = canvasPoint(cv, e);
+  drag = null;
+  const card = cols[d.from][d.i];
+  if (Math.hypot(p.x - d.sx, p.y - d.sy) < 8) {
+    const t = bestTarget(d.from, d.i);
+    if (t >= 0) move(d.from, d.i, t);
+    else Sound.beep(160, 0.05, 'square', 0.03);
+    return;
+  }
+  const cx = p.x - d.ox + CW / 2;
+  const t = Math.max(0, Math.min(9, Math.floor((cx - 6) / (CW + GAP))));
+  if (t !== d.from && canDrop(card, t)) move(d.from, d.i, t);
+});
+document.getElementById('new').onclick = deal;
+document.getElementById('suits').value = Store.get('spider-suits', 1);
+document.getElementById('suits').onchange = deal;
+document.getElementById('undo').onclick = () => { if (hist.length) { const s = JSON.parse(hist.pop()); cols = s.cols; stock = s.stock; done = s.done; moves = s.moves + 1; hintMove = null; hud(); } };
+document.getElementById('hint').onclick = () => { hintMove = findHint(); if (!hintMove) { flash = stock.length ? 'No moves — deal from the stock.' : 'No moves left. Try undo.'; flashT = 1800; } };
+deal();
+draw();
+</script>
+</body>
+</html>

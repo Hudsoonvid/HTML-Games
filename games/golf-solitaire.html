@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Golf Solitaire</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏌️ Golf Solitaire</h1>
+  <div class="stats">Left <b id="left">35</b> Stock <b id="stock">16</b> Best <b id="best">–</b></div>
+</header>
+<div class="controls">
+  <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="wrap"> King ↔ Ace wraps</label>
+  <button class="btn" id="new">New deal</button>
+  <button class="btn alt" id="undo">↶ Undo</button>
+</div>
+<div class="stage">
+  <canvas id="c" class="game" width="700" height="560"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Tap the bottom card of any column to play it onto the pile if it's one rank higher or lower (suits don't matter). Stuck? Tap the stock for a new pile card. Clear all 35 cards — fewer left is a better score, like golf.</p>
+<script src="shared.js"></script>
+<script src="cards.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const CW = 84, CH = 116, GAP = 14, STEP = 34;
+let cols, stock, waste, hist, best = Store.get('golf-best', null), over = false;
+const X = i => 14 + i * (CW + GAP);
+
+function deal() {
+  const d = shuffle(makeDeck());
+  d.forEach(c => { c.up = true; });
+  cols = Array.from({ length: 7 }, () => d.splice(0, 5));
+  waste = [d.pop()];
+  stock = d;
+  stock.forEach(c => { c.up = false; });
+  hist = []; over = false;
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  const left = cols.reduce((a, c) => a + c.length, 0);
+  document.getElementById('left').textContent = left;
+  document.getElementById('stock').textContent = stock.length;
+  document.getElementById('best').textContent = best == null ? '–' : best;
+  return left;
+}
+
+function playable(c) {
+  const w = waste[waste.length - 1], d = Math.abs(c.r - w.r);
+  return d === 1 || (document.getElementById('wrap').checked && d === 12);
+}
+const anyMove = () => cols.some(c => c.length && playable(c[c.length - 1]));
+
+function save() { hist.push(JSON.stringify({ cols, stock, waste })); }
+
+function play(ci) {
+  const c = cols[ci];
+  if (!c.length || !playable(c[c.length - 1])) { Sound.beep(160, 0.05, 'square', 0.03); return; }
+  save();
+  waste.push(c.pop());
+  Sound.beep(400 + waste[waste.length - 1].r * 30, 0.05, 'triangle', 0.04);
+  check();
+}
+
+function draw1() {
+  if (!stock.length) return;
+  save();
+  const k = stock.pop();
+  k.up = true;
+  waste.push(k);
+  Sound.beep(300, 0.05, 'triangle', 0.03);
+  check();
+}
+
+function check() {
+  const left = hud();
+  if (left === 0 || (!stock.length && !anyMove())) {
+    over = true;
+    if (best == null || left < best) { best = left; Store.set('golf-best', best); hud(); }
+    setTimeout(() => overlay(ov, `<h2>${left === 0 ? 'Hole in one! ⛳ All clear' : 'No more moves'}</h2><p>Score: ${left} card${left === 1 ? '' : 's'} left</p><button class="btn" onclick="deal()">Deal again</button>`), 400);
+  }
+}
+
+function draw() {
+  drawFelt(ctx, cv.width, cv.height);
+  if (!cols) return requestAnimationFrame(draw);
+  cols.forEach((c, i) => {
+    if (!c.length) drawSlot(ctx, X(i), 16, CW, CH);
+    c.forEach((k, j) => drawCard(ctx, k, X(i), 16 + j * STEP, CW, CH, { hi: j === c.length - 1 && playable(k) && !over ? '#86efac' : false }));
+  });
+  const y = cv.height - CH - 20;
+  if (stock.length) for (let k = 0; k < Math.min(stock.length, 8); k++) drawCard(ctx, stock[k], X(1) - k * 3, y - k * 1.5, CW, CH);
+  else drawSlot(ctx, X(1), y, CW, CH, '∅');
+  drawCard(ctx, waste[waste.length - 1], X(3), y, CW, CH);
+  ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.font = '14px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText('stock', X(1) + CW / 2, y - 12);
+  ctx.fillText('pile', X(3) + CW / 2, y - 12);
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (over) return;
+  const p = canvasPoint(cv, e), y = cv.height - CH - 20;
+  if (p.y > y - 20 && p.x > X(1) - 30 && p.x < X(1) + CW) return draw1();
+  for (let i = 0; i < 7; i++) {
+    const c = cols[i];
+    if (!c.length || p.x < X(i) || p.x > X(i) + CW) continue;
+    const ty = 16 + (c.length - 1) * STEP;
+    if (p.y >= 16 && p.y <= ty + CH) return play(i);
+  }
+});
+document.getElementById('new').onclick = deal;
+document.getElementById('undo').onclick = () => { if (hist.length && !over) { ({ cols, stock, waste } = JSON.parse(hist.pop())); hud(); } };
+document.getElementById('wrap').checked = Store.get('golf-wrap', false);
+document.getElementById('wrap').onchange = e => Store.set('golf-wrap', e.target.checked);
+deal();
+draw();
+</script>
+</body>
+</html>
