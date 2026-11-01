@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake Arena</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐉 Snake Arena</h1>
+  <div class="stats">Length <b id="len">0</b> Time <b id="time">3:00</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="720" height="560"></canvas>
+</div>
+<p class="help">Steer by pointing with the mouse or holding and dragging (or <kbd>←</kbd><kbd>→</kbd>). Hold the mouse button / <kbd>Space</kbd> / a second finger to speed boost (it costs length). Eat the glowing dots to grow. If your head touches another snake's body, you crash — so cut in front of others to make them crash into you! Longest snake when the 3-minute timer runs out wins.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height, WORLD = 2600, SEG = 7, MATCH = 180000;
+const HUES = [200, 330, 50, 120, 280, 20, 170, 0, 90, 250, 300, 140];
+const BOTNAMES = ['Slinky', 'Noodle', 'Zippy', 'Fang', 'Coil', 'Viper', 'Mamba', 'Wiggles', 'Sprout', 'Bolt'];
+let S, me, snakes, food, cam, state = 'idle', last = 0, steer = null, keys = {}, boost = false, startT, remote = null, sendT = 0, best = Store.get('snakearena-best', 0), remoteFinal = null;
+
+function mkSnake(name, hue, isBot) {
+  const x = rand(300, WORLD - 300), y = rand(300, WORLD - 300), a = rand(0, Math.PI * 2);
+  const s = { name, hue, x, y, a, len: 20, body: [], bot: isBot, dead: false, respawn: 0, tgt: null, think: 0 };
+  for (let i = 0; i < 20; i++) s.body.push([x - Math.cos(a) * i * SEG, y - Math.sin(a) * i * SEG]);
+  return s;
+}
+const radius = s => 7 + Math.min(14, Math.sqrt(s.len) * 0.9);
+
+function begin(s) {
+  S = s;
+  me = S.mode === 'online' ? S.seat : 0;
+  // the other person is drawn from the head positions they stream
+  S.on('st', d => { if (!d || state !== 'play') return; if (!remote || remote.dead && d.alive) { remote = mkSnake(S.opp.name, 330, false); remote.body = []; remote.remote = true; } remote.dead = !d.alive; remote.x = d.x; remote.y = d.y; remote.a = d.a; remote.len = d.len; if (d.alive) {
+      // fill in the path between updates so the body has no gaps
+      const prev = remote.body[0];
+      if (prev && Math.hypot(d.x - prev[0], d.y - prev[1]) < 200) { const n = Math.min(12, Math.floor(Math.hypot(d.x - prev[0], d.y - prev[1]) / (SEG / 2))); for (let k = 1; k < n; k++) remote.body.unshift([prev[0] + (d.x - prev[0]) * k / n, prev[1] + (d.y - prev[1]) * k / n]); }
+      else if (prev) remote.body = [];
+      remote.body.unshift([d.x, d.y]);
+      trimTrail(remote);
+    } });
+  S.on('dead', d => { if (remote && d) { killSnake(remote); } });
+  S.on('fin', d => { if (d) { remoteFinal = d.len; maybeEnd(); } });
+  S.startRound(() => ({}), () => {
+    snakes = [mkSnake(S.me.name + ' (you)', 200, false)];
+    snakes[0].me = true;
+    const nb = S.human ? 9 : 10;
+    for (let i = 0; i < nb; i++) snakes.push(mkSnake(i === 0 && !S.human ? S.opp.name : BOTNAMES[i], HUES[(i + 1) % HUES.length], true));
+    if (!S.human) snakes[1].rival = true;
+    food = [];
+    for (let i = 0; i < 700; i++) addFood(rand(30, WORLD - 30), rand(30, WORLD - 30), 1);
+    remote = null; remoteFinal = null;
+    startT = performance.now();
+    state = 'play';
+  });
+}
+
+function addFood(x, y, v) { food.push({ x, y, v, hue: randInt(0, 360) }); }
+
+// keep a body trail as long as the snake's length, spacing points every SEG pixels
+function trimTrail(s) {
+  const out = [s.body[0]];
+  let need = SEG;
+  for (let i = 1; i < s.body.length && out.length < s.len; i++) {
+    const [px, py] = out[out.length - 1], [x, y] = s.body[i];
+    const d = Math.hypot(x - px, y - py);
+    if (d >= need || i === s.body.length - 1) out.push([x, y]);
+  }
+  s.body = s.body.slice(0, Math.max(out.length * 3, 60));
+  s.drawBody = out;
+}
+
+function killSnake(s) {
+  if (s.dead) return;
+  s.dead = true;
+  (s.drawBody || s.body).forEach(([x, y], i) => { if (i % 2 === 0) addFood(x + rand(-6, 6), y + rand(-6, 6), 2); });
+  s.respawn = 2500;
+}
+
+function update(dt) {
+  const t = dt / 1000;
+  const all = snakes.concat(remote && !remote.dead ? [remote] : []);
+  for (const s of snakes) {
+    if (s.dead) {
+      s.respawn -= dt;
+      if (s.respawn <= 0) { const n = mkSnake(s.name, s.hue, s.bot); Object.assign(s, n, { me: s.me, rival: s.rival }); if (s.me) Sound.beep(660, 0.1, 'triangle', 0.04); }
+      continue;
+    }
+    // steering
+    let want = s.a, fast = false;
+    if (s.me) {
+      if (steer) want = Math.atan2(steer.y, steer.x);
+      if (keys.ArrowLeft || keys.a) want = s.a - 3;
+      if (keys.ArrowRight || keys.d) want = s.a + 3;
+      fast = boost && s.len > 12;
+    } else {
+      s.think -= dt;
+      if (s.think <= 0) {
+        s.think = rand(200, 500);
+        // head for nearby food, turn away from danger and the walls
+        let bestF = null, bd = 400;
+        for (const f of food) { const d = Math.abs(f.x - s.x) + Math.abs(f.y - s.y); if (d < bd) { bd = d; bestF = f; } }
+        s.tgt = bestF ? Math.atan2(bestF.y - s.y, bestF.x - s.x) : s.a + rand(-1, 1);
+        for (const o of all) if (o !== s) for (let i = 0; i < (o.drawBody || []).length; i += 3) {
+          const [x, y] = o.drawBody[i];
+          if (Math.hypot(x - s.x, y - s.y) < 70) { s.tgt = Math.atan2(s.y - y, s.x - x); break; }
+        }
+        if (s.x < 150 || s.x > WORLD - 150 || s.y < 150 || s.y > WORLD - 150) s.tgt = Math.atan2(WORLD / 2 - s.y, WORLD / 2 - s.x);
+        // the rival hunts the player sometimes
+        if (s.rival && Math.random() < S.level * 0.4 && !snakes[0].dead) { const p = snakes[0]; s.tgt = Math.atan2(p.y + Math.sin(p.a) * 80 - s.y, p.x + Math.cos(p.a) * 80 - s.x); s.burst = S.level > 0.5; }
+      }
+      want = s.tgt;
+      fast = !!s.burst && s.len > 30;
+    }
+    let da = ((want - s.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+    s.a += clamp(da, -4.2 * t, 4.2 * t);
+    const sp = fast ? 300 : 165;
+    s.x += Math.cos(s.a) * sp * t; s.y += Math.sin(s.a) * sp * t;
+    if (fast) { s.boostT = (s.boostT || 0) + dt; if (s.boostT > 120) { s.boostT = 0; s.len--; const tl = s.body[s.body.length - 1]; if (tl) addFood(tl[0], tl[1], 1); } }
+    s.body.unshift([s.x, s.y]);
+    trimTrail(s);
+    if (s.x < 0 || s.y < 0 || s.x > WORLD || s.y > WORLD) { killSnake(s); if (s.me) onMyDeath('the wall'); continue; }
+  }
+  // eat food
+  for (const s of snakes) if (!s.dead) {
+    const r = radius(s) + 6;
+    food = food.filter(f => { if (Math.abs(f.x - s.x) < r && Math.abs(f.y - s.y) < r && Math.hypot(f.x - s.x, f.y - s.y) < r) { s.len += f.v; if (s.me) Sound.beep(800 + Math.random() * 300, 0.02, 'sine', 0.015); return false; } return true; });
+  }
+  while (food.length < 650) addFood(rand(30, WORLD - 30), rand(30, WORLD - 30), 1);
+  // head-to-body crashes (each screen only decides for its own snakes)
+  for (const s of snakes) {
+    if (s.dead) continue;
+    const r = radius(s);
+    for (const o of all) {
+      if (o === s || o.dead) continue;
+      const body = o.drawBody || [];
+      const ro = radius(o);
+      for (let i = 2; i < body.length; i++) {
+        const [x, y] = body[i];
+        if (Math.abs(x - s.x) < r + ro && Math.abs(y - s.y) < r + ro && Math.hypot(x - s.x, y - s.y) < r * 0.7 + ro * 0.8) {
+          killSnake(s);
+          if (s.me) onMyDeath(o.name);
+          else if (o.me) Sound.beep(988, 0.12, 'triangle', 0.04);
+          break;
+        }
+      }
+      if (s.dead) break;
+    }
+  }
+  const p = snakes[0];
+  cam = { x: p.x - W / 2, y: p.y - H / 2 };
+  if (S.human) {
+    sendT += dt;
+    if (sendT > 70) { sendT = 0; S.send('st', { x: Math.round(p.x), y: Math.round(p.y), a: +p.a.toFixed(2), len: p.len, alive: !p.dead }); }
+  }
+  const left = MATCH - (performance.now() - startT);
+  document.getElementById('time').textContent = `${Math.floor(Math.max(0, left) / 60000)}:${String(Math.floor((Math.max(0, left) % 60000) / 1000)).padStart(2, '0')}`;
+  document.getElementById('len').textContent = p.dead ? 0 : p.len;
+  if (p.len > best) { best = p.len; Store.set('snakearena-best', best); }
+  const rival = S.human ? remote : snakes.find(s => s.rival);
+  document.getElementById('vs').innerHTML = `<b>${S.me.name}: ${p.dead ? '💥' : p.len}</b> vs <b>${S.opp.name}: ${rival ? (rival.dead ? '💥' : rival.len) : '…'}</b>`;
+  if (left <= 0) {
+    state = 'ending';
+    if (S.human) S.send('fin', { len: p.dead ? 0 : p.len });
+    maybeEnd();
+    setTimeout(() => { if (state === 'ending') { remoteFinal = remoteFinal == null ? (remote && !remote.dead ? remote.len : 0) : remoteFinal; maybeEnd(); } }, 2500);
+  }
+}
+
+function onMyDeath(by) {
+  Sound.beep(110, 0.4, 'sawtooth', 0.06);
+  if (S.human) S.send('dead', { by });
+}
+
+function maybeEnd() {
+  if (state !== 'ending') return;
+  const p = snakes[0], mine = p.dead ? 0 : p.len;
+  let theirs;
+  if (S.human) { if (remoteFinal == null) return; theirs = remoteFinal; }
+  else { const r = snakes.find(s => s.rival); theirs = r.dead ? 0 : r.len; }
+  state = 'done';
+  const title = mine === theirs ? 'Dead heat!' : mine > theirs ? `You win — length ${mine}! 🐉` : `${S.opp.name} wins with length ${theirs}`;
+  Lobby.end(S, { result: mine === theirs ? 0.5 : mine > theirs ? 1 : 0, title, detail: `You ${mine} · ${S.opp.name} ${theirs}` });
+}
+
+function drawSnake(s) {
+  if (s.dead || !s.drawBody) return;
+  const r = radius(s), b = s.drawBody;
+  for (let i = b.length - 1; i >= 0; i--) {
+    const [x, y] = b[i];
+    if (x < cam.x - 40 || x > cam.x + W + 40 || y < cam.y - 40 || y > cam.y + H + 40) continue;
+    ctx.fillStyle = `hsl(${s.hue},75%,${i % 4 < 2 ? 55 : 47}%)`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  }
+  const [hx, hy] = b[0];
+  ctx.fillStyle = '#fff';
+  [-1, 1].forEach(k => { const ex = hx + Math.cos(s.a + k * 0.6) * r * 0.55, ey = hy + Math.sin(s.a + k * 0.6) * r * 0.55; ctx.beginPath(); ctx.arc(ex, ey, r * 0.32, 0, 7); ctx.fill(); ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(ex + Math.cos(s.a) * 2, ey + Math.sin(s.a) * 2, r * 0.16, 0, 7); ctx.fill(); ctx.fillStyle = '#fff'; });
+  ctx.fillStyle = s.me ? '#fde047' : s.remote || s.rival ? '#f9a8d4' : 'rgba(255,255,255,.7)';
+  ctx.font = `bold ${s.me || s.remote || s.rival ? 13 : 11}px system-ui`; ctx.textAlign = 'center';
+  ctx.fillText(s.name, hx, hy - r - 8);
+}
+
+function draw() {
+  ctx.fillStyle = '#0b1020';
+  ctx.fillRect(0, 0, W, H);
+  if (!snakes) return;
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+  // hex-ish floor
+  ctx.strokeStyle = '#141b33'; ctx.lineWidth = 1;
+  for (let x = Math.floor(cam.x / 60) * 60; x < cam.x + W + 60; x += 60) { ctx.beginPath(); ctx.moveTo(x, cam.y); ctx.lineTo(x, cam.y + H); ctx.stroke(); }
+  for (let y = Math.floor(cam.y / 60) * 60; y < cam.y + H + 60; y += 60) { ctx.beginPath(); ctx.moveTo(cam.x, y); ctx.lineTo(cam.x + W, y); ctx.stroke(); }
+  ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 6; ctx.strokeRect(0, 0, WORLD, WORLD);
+  for (const f of food) {
+    if (f.x < cam.x - 10 || f.x > cam.x + W + 10 || f.y < cam.y - 10 || f.y > cam.y + H + 10) continue;
+    ctx.fillStyle = `hsl(${f.hue},90%,65%)`;
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.v > 1 ? 6 : 4, 0, 7); ctx.fill();
+  }
+  if (remote) drawSnake(remote);
+  snakes.slice(1).forEach(drawSnake);
+  drawSnake(snakes[0]);
+  ctx.restore();
+  if (snakes[0].dead) { ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, H / 2 - 30, W, 60); ctx.fillStyle = '#fff'; ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center'; ctx.fillText('Crashed! Respawning…', W / 2, H / 2 + 8); }
+  // minimap
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(W - 110, H - 110, 100, 100);
+  snakes.concat(remote ? [remote] : []).forEach(s => { if (s.dead) return; ctx.fillStyle = s.me ? '#fde047' : s.remote || s.rival ? '#f472b6' : 'rgba(255,255,255,.4)'; ctx.fillRect(W - 110 + s.x / WORLD * 100 - 2, H - 110 + s.y / WORLD * 100 - 2, s.me || s.remote || s.rival ? 5 : 3, s.me || s.remote || s.rival ? 5 : 3); });
+  // leaderboard
+  const board = snakes.concat(remote ? [remote] : []).filter(s => !s.dead).sort((a, b) => b.len - a.len).slice(0, 5);
+  ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(10, 10, 170, 22 + board.length * 17);
+  ctx.font = '12px system-ui'; ctx.textAlign = 'left';
+  board.forEach((s, i) => { ctx.fillStyle = s.me ? '#fde047' : '#e5e7eb'; ctx.fillText(`${i + 1}. ${s.name.slice(0, 16)} ${s.len}`, 18, 28 + i * 17); });
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+let touches = 0;
+cv.addEventListener('pointermove', e => { const p = canvasPoint(cv, e); steer = { x: p.x - W / 2, y: p.y - H / 2 }; });
+cv.addEventListener('pointerdown', e => { touches++; const p = canvasPoint(cv, e); steer = { x: p.x - W / 2, y: p.y - H / 2 }; if (e.pointerType === 'mouse' || touches > 1) boost = true; });
+const up = e => { touches = Math.max(0, touches - 1); if (e.pointerType === 'mouse' || touches < 2) boost = false; };
+cv.addEventListener('pointerup', up);
+cv.addEventListener('pointercancel', up);
+document.addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ') boost = true; if (e.key.startsWith('Arrow')) steer = null; });
+document.addEventListener('keyup', e => { keys[e.key] = false; if (e.key === ' ') boost = false; });
+document.getElementById('menu').onclick = () => { state = 'idle'; Lobby.open(); };
+requestAnimationFrame(loop);
+Lobby.open({ game: 'snake-arena', title: '🐉 Snake Arena', onStart: begin });
+</script>
+</body>
+</html>

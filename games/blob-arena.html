@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blob Arena</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🦠 Blob Arena</h1>
+  <div class="stats">Mass <b id="mass">0</b> Time <b id="time">3:00</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="720" height="560"></canvas>
+</div>
+<p class="help">Your blob follows the mouse or your finger (or use the arrow keys / <kbd>WASD</kbd>). Eat the dots and any blob clearly smaller than you; stay away from bigger ones. Bigger blobs move slower. Press <kbd>Space</kbd> or double-tap for a short dash (costs a little mass). Biggest blob when the 3-minute timer runs out wins.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height, WORLD = 3000, MATCH = 180000;
+const NAMES = ['Gloop', 'Bubbles', 'Jelly', 'Mochi', 'Pudding', 'Squish', 'Orb', 'Dot', 'Blip', 'Nugget', 'Pebble', 'Marble'];
+let S, me, blobs, pellets, remote = null, cam = { x: 0, y: 0, z: 1 }, state = 'idle', last = 0, aim = null, keys = {}, startT, sendT = 0, remoteFinal = null, dashT = 0, lastTap = 0;
+const rad = m => Math.sqrt(m) * 4;
+const speedOf = m => 260 / Math.pow(m, 0.22);
+
+function mkBlob(name, hue, bot) { return { name, hue, x: rand(200, WORLD - 200), y: rand(200, WORLD - 200), m: bot ? rand(10, 60) : 15, vx: 0, vy: 0, bot, dead: false, respawn: 0, tgt: null, think: 0 }; }
+
+function begin(s) {
+  S = s;
+  me = S.mode === 'online' ? S.seat : 0;
+  S.on('st', d => { if (!d || state !== 'play') return; if (!remote) remote = { name: S.opp.name, hue: 330, remote: true }; Object.assign(remote, { x: d.x, y: d.y, m: d.m, dead: !d.alive }); });
+  // the bigger blob decides that it ate the smaller one
+  S.on('ate', d => { if (d && state === 'play' && !blobs[0].dead) { blobs[0].dead = true; blobs[0].respawn = 2500; Sound.beep(110, 0.4, 'sawtooth', 0.06); } });
+  S.on('fin', d => { if (d) { remoteFinal = d.m; maybeEnd(); } });
+  S.startRound(() => ({}), () => {
+    blobs = [mkBlob(S.me.name + ' (you)', 200, false)];
+    blobs[0].me = true;
+    const n = S.human ? 11 : 12;
+    for (let i = 0; i < n; i++) blobs.push(mkBlob(i === 0 && !S.human ? S.opp.name : NAMES[i], randInt(0, 360), true));
+    if (!S.human) blobs[1].rival = true;
+    pellets = [];
+    for (let i = 0; i < 900; i++) pellets.push({ x: rand(0, WORLD), y: rand(0, WORLD), hue: randInt(0, 360) });
+    remote = null; remoteFinal = null;
+    startT = performance.now();
+    state = 'play';
+  });
+}
+
+function update(dt) {
+  const t = dt / 1000, p = blobs[0];
+  dashT = Math.max(0, dashT - dt);
+  for (const b of blobs) {
+    if (b.dead) {
+      b.respawn -= dt;
+      if (b.respawn <= 0) Object.assign(b, mkBlob(b.name, b.hue, b.bot), { me: b.me, rival: b.rival });
+      continue;
+    }
+    let dx = 0, dy = 0;
+    if (b.me) {
+      if (aim) { dx = aim.x; dy = aim.y; }
+      if (keys.ArrowLeft || keys.a) dx = -1;
+      if (keys.ArrowRight || keys.d) dx = 1;
+      if (keys.ArrowUp || keys.w) dy = -1;
+      if (keys.ArrowDown || keys.s) dy = 1;
+    } else {
+      b.think -= dt;
+      if (b.think <= 0) {
+        b.think = rand(250, 600);
+        // chase something smaller nearby, flee anything bigger, otherwise graze
+        let goal = null, gd = 500;
+        const others = blobs.filter(o => o !== b && !o.dead).concat(remote && !remote.dead ? [remote] : []);
+        for (const o of others) {
+          const d = Math.hypot(o.x - b.x, o.y - b.y);
+          if (o.m > b.m * 1.15 && d < 260 + rad(o.m)) { goal = { x: b.x - (o.x - b.x), y: b.y - (o.y - b.y) }; gd = 0; break; }
+          if (b.m > o.m * 1.2 && d < gd) { gd = d; goal = o; }
+        }
+        if (!goal) { let bd = 400; for (const f of pellets) { const d = Math.abs(f.x - b.x) + Math.abs(f.y - b.y); if (d < bd) { bd = d; goal = f; } } }
+        if (b.rival && S.level > 0.4 && b.m > p.m * 1.2 && !p.dead) goal = p;
+        b.tgt = goal ? { x: goal.x, y: goal.y } : { x: rand(0, WORLD), y: rand(0, WORLD) };
+      }
+      dx = b.tgt.x - b.x; dy = b.tgt.y - b.y;
+    }
+    const d = Math.hypot(dx, dy);
+    let sp = speedOf(b.m) * (b.me && dashT > 0 ? 2.2 : 1) * (b.rival ? 0.85 + S.level * 0.25 : 1);
+    if (d > 1) { const k = b.me && aim ? Math.min(1, d / 80) : 1; b.x += dx / d * sp * k * t; b.y += dy / d * sp * k * t; }
+    b.x = clamp(b.x, 0, WORLD); b.y = clamp(b.y, 0, WORLD);
+    // slow mass decay for big blobs
+    if (b.m > 100) b.m -= b.m * 0.002 * t;
+  }
+  // pellets
+  for (const b of blobs) if (!b.dead) {
+    const r = rad(b.m);
+    pellets = pellets.filter(f => { if (Math.abs(f.x - b.x) < r && Math.abs(f.y - b.y) < r && Math.hypot(f.x - b.x, f.y - b.y) < r) { b.m += 1; return false; } return true; });
+  }
+  while (pellets.length < 850) pellets.push({ x: rand(0, WORLD), y: rand(0, WORLD), hue: randInt(0, 360) });
+  // blob eats blob: centre of the smaller inside the bigger one
+  const live = blobs.filter(b => !b.dead);
+  for (const a of live) for (const c of live) {
+    if (a === c || a.dead || c.dead) continue;
+    if (a.m > c.m * 1.15 && Math.hypot(a.x - c.x, a.y - c.y) < rad(a.m) - rad(c.m) * 0.4) {
+      a.m += c.m * 0.8; c.dead = true; c.respawn = 2500;
+      if (a.me) Sound.beep(900, 0.12, 'triangle', 0.05);
+      if (c.me) Sound.beep(110, 0.4, 'sawtooth', 0.06);
+    }
+  }
+  if (remote && !remote.dead && !p.dead && p.m > remote.m * 1.15 && Math.hypot(p.x - remote.x, p.y - remote.y) < rad(p.m) - rad(remote.m) * 0.4) {
+    p.m += remote.m * 0.8; remote.dead = true;
+    S.send('ate', {});
+    Sound.beep(900, 0.15, 'triangle', 0.05);
+  }
+  // camera zooms out as you grow
+  const z = clamp(1.4 - Math.sqrt(p.m) * 0.035, 0.45, 1.2);
+  cam.z += (z - cam.z) * Math.min(1, 3 * t);
+  cam.x = p.x; cam.y = p.y;
+  if (S.human) { sendT += dt; if (sendT > 80) { sendT = 0; S.send('st', { x: Math.round(p.x), y: Math.round(p.y), m: Math.round(p.m), alive: !p.dead }); } }
+  const left = MATCH - (performance.now() - startT);
+  document.getElementById('time').textContent = `${Math.floor(Math.max(0, left) / 60000)}:${String(Math.floor((Math.max(0, left) % 60000) / 1000)).padStart(2, '0')}`;
+  document.getElementById('mass').textContent = p.dead ? 0 : Math.round(p.m);
+  const rival = S.human ? remote : blobs.find(b => b.rival);
+  document.getElementById('vs').innerHTML = `<b>${S.me.name}: ${p.dead ? '💥' : Math.round(p.m)}</b> vs <b>${S.opp.name}: ${rival ? (rival.dead ? '💥' : Math.round(rival.m)) : '…'}</b>`;
+  if (left <= 0) {
+    state = 'ending';
+    if (S.human) S.send('fin', { m: p.dead ? 0 : Math.round(p.m) });
+    maybeEnd();
+    setTimeout(() => { if (state === 'ending') { if (remoteFinal == null) remoteFinal = remote && !remote.dead ? Math.round(remote.m) : 0; maybeEnd(); } }, 2500);
+  }
+}
+
+function maybeEnd() {
+  if (state !== 'ending') return;
+  const p = blobs[0], mine = p.dead ? 0 : Math.round(p.m);
+  let theirs;
+  if (S.human) { if (remoteFinal == null) return; theirs = remoteFinal; }
+  else { const r = blobs.find(b => b.rival); theirs = r.dead ? 0 : Math.round(r.m); }
+  state = 'done';
+  const title = mine === theirs ? 'Exactly the same size — draw!' : mine > theirs ? `You're the biggest blob! 🦠 (${mine})` : `${S.opp.name} wins with ${theirs}`;
+  Lobby.end(S, { result: mine === theirs ? 0.5 : mine > theirs ? 1 : 0, title, detail: `You ${mine} · ${S.opp.name} ${theirs}` });
+}
+
+function drawBlob(b) {
+  if (b.dead) return;
+  const r = rad(b.m);
+  ctx.fillStyle = `hsl(${b.hue},70%,55%)`;
+  ctx.strokeStyle = `hsl(${b.hue},70%,38%)`; ctx.lineWidth = 4 / cam.z;
+  ctx.beginPath(); ctx.arc(b.x, b.y, r, 0, 7); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(10, r * 0.35)}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(b.name.replace(' (you)', ''), b.x, b.y - r * 0.12);
+  ctx.font = `${Math.max(9, r * 0.25)}px system-ui`;
+  ctx.fillText(Math.round(b.m), b.x, b.y + r * 0.3);
+}
+
+function draw() {
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, W, H);
+  if (!blobs) return;
+  ctx.save();
+  ctx.translate(W / 2, H / 2); ctx.scale(cam.z, cam.z); ctx.translate(-cam.x, -cam.y);
+  const vw = W / cam.z / 2 + 40, vh = H / cam.z / 2 + 40;
+  ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1 / cam.z;
+  for (let x = Math.floor((cam.x - vw) / 50) * 50; x < cam.x + vw; x += 50) { ctx.beginPath(); ctx.moveTo(x, cam.y - vh); ctx.lineTo(x, cam.y + vh); ctx.stroke(); }
+  for (let y = Math.floor((cam.y - vh) / 50) * 50; y < cam.y + vh; y += 50) { ctx.beginPath(); ctx.moveTo(cam.x - vw, y); ctx.lineTo(cam.x + vw, y); ctx.stroke(); }
+  ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 8; ctx.strokeRect(0, 0, WORLD, WORLD);
+  pellets.forEach(f => { if (Math.abs(f.x - cam.x) < vw && Math.abs(f.y - cam.y) < vh) { ctx.fillStyle = `hsl(${f.hue},85%,60%)`; ctx.beginPath(); ctx.arc(f.x, f.y, 5, 0, 7); ctx.fill(); } });
+  const all = blobs.concat(remote ? [remote] : []).filter(b => !b.dead).sort((a, b) => a.m - b.m);
+  all.forEach(drawBlob);
+  ctx.restore();
+  if (blobs[0].dead) { ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, H / 2 - 30, W, 60); ctx.fillStyle = '#fff'; ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center'; ctx.fillText('Eaten! Respawning…', W / 2, H / 2 + 8); }
+  const board = all.slice().sort((a, b) => b.m - a.m).slice(0, 5);
+  ctx.fillStyle = 'rgba(15,23,42,.6)'; ctx.fillRect(10, 10, 170, 22 + board.length * 17);
+  ctx.font = '12px system-ui'; ctx.textAlign = 'left';
+  board.forEach((b, i) => { ctx.fillStyle = b.me ? '#fde047' : '#e5e7eb'; ctx.fillText(`${i + 1}. ${b.name.slice(0, 16)} ${Math.round(b.m)}`, 18, 28 + i * 17); });
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function dash() { const p = blobs && blobs[0]; if (state === 'play' && p && !p.dead && dashT <= 0 && p.m > 20) { dashT = 300; p.m *= 0.96; Sound.beep(600, 0.06, 'triangle', 0.03); } }
+cv.addEventListener('pointermove', e => { const p = canvasPoint(cv, e); aim = { x: (p.x - W / 2) / cam.z, y: (p.y - H / 2) / cam.z }; });
+cv.addEventListener('pointerdown', e => { const p = canvasPoint(cv, e); aim = { x: (p.x - W / 2) / cam.z, y: (p.y - H / 2) / cam.z }; const now = performance.now(); if (now - lastTap < 300) dash(); lastTap = now; });
+document.addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ') dash(); if (/^Arrow|^[wasd]$/.test(e.key)) aim = null; });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+document.getElementById('menu').onclick = () => { state = 'idle'; Lobby.open(); };
+requestAnimationFrame(loop);
+Lobby.open({ game: 'blob-arena', title: '🦠 Blob Arena', onStart: begin });
+</script>
+</body>
+</html>
