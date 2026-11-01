@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Farkle</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>⚅ Farkle</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn" id="roll">🎲 Roll</button><button class="btn alt" id="bank">💰 Bank</button><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="640" height="360"></canvas>
+</div>
+<p class="help">Roll six dice and tap the scoring ones to set them aside: each 1 = 100, each 5 = 50, three of a kind = 100 × the number (three 1s = 1000), four/five/six of a kind double up, a 1-6 straight or three pairs = 1500. Then roll the rest to push your luck, or bank your points. Roll nothing that scores and you <b>Farkle</b> — losing this turn's points. Score with all six and you get to roll all six again! First to 5,000 wins.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const W = cv.width, H = cv.height, GOAL = 5000;
+let S, me, total, turn, dice, turnPts, over, busy, rolled, pending = [], spin = 0;
+const myTurn = () => S && !over && !busy && (S.mode === 'local' || turn === me);
+
+// points for a set of dice values where every die must count; 0 if any die doesn't score
+function score(vals) {
+  if (!vals.length) return 0;
+  const c = [0, 0, 0, 0, 0, 0, 0];
+  vals.forEach(v => c[v]++);
+  if (vals.length === 6 && c.slice(1).every(n => n === 1)) return 1500;
+  if (vals.length === 6 && c.filter(n => n === 2).length === 3) return 1500;
+  let pts = 0;
+  for (let f = 1; f <= 6; f++) {
+    let n = c[f];
+    if (n >= 3) { pts += (f === 1 ? 1000 : f * 100) * Math.pow(2, n - 3); n = 0; }
+    if (f === 1) pts += n * 100;
+    else if (f === 5) pts += n * 50;
+    else if (n) return 0;
+  }
+  return pts;
+}
+// best score available anywhere in a roll (to detect a Farkle)
+function bestIn(vals) {
+  let best = 0;
+  const n = vals.length;
+  for (let m = 1; m < 1 << n; m++) { const s = score(vals.filter((_, i) => m & (1 << i))); if (s > best) best = s; }
+  return best;
+}
+
+function begin(s) {
+  S = s;
+  S.on('act', d => { if (d) { pending.push(d); drain(); } });
+  S.startRound(() => ({ first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    me = S.mode === 'online' ? S.seat : 0;
+    total = [0, 0];
+    turn = S.mode === 'local' ? 0 : cfg.first;
+    over = false; busy = false; pending = [];
+    newTurn();
+  });
+}
+
+function drain() { while (pending.length && !busy && !over && turn !== me) act(pending.shift(), true); }
+
+function newTurn() {
+  dice = Array.from({ length: 6 }, () => ({ v: 1, kept: false, sel: false }));
+  turnPts = 0; rolled = false;
+  status();
+  if (S.ai && turn !== me) ai();
+}
+
+const selected = () => dice.filter(d => d.sel && !d.kept);
+function status() {
+  document.getElementById('stat').textContent = S.mode === 'online' ? 'Online · to 5,000' : S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : '2 players · to 5,000';
+  document.getElementById('vs').innerHTML = [0, 1].map(i => `<b ${i === turn ? 'class="turn"' : ''}>${S.mode === 'local' ? 'P' + (i + 1) : i === me ? S.me.name : S.opp.name}: ${total[i]}</b>`).join(' vs ');
+  const selPts = score(selected().map(d => d.v));
+  const can = myTurn();
+  document.getElementById('roll').disabled = !can || (rolled && !selPts);
+  document.getElementById('bank').disabled = !can || !rolled || !selPts;
+  const left = dice.filter(d => !d.kept && !d.sel).length;
+  document.getElementById('roll').textContent = !rolled ? '🎲 Roll' : `🎲 Roll ${left || 6} more`;
+  document.getElementById('bank').textContent = `💰 Bank ${turnPts + selPts}`;
+  if (over || busy) return;
+  const who = S.mode === 'local' ? `Player ${turn + 1}` : turn === me ? 'You' : S.opp.name;
+  msg.textContent = !rolled ? `${who}: roll the dice` : selPts ? `${who}: ${turnPts + selPts} this turn — roll on or bank` : turn === me || S.mode === 'local' ? 'Tap scoring dice to set them aside' : `${S.opp.name} is choosing…`;
+}
+
+// a: { t: 'roll', keep: [i], vals: [v for each free die] } | { t: 'bank', keep: [i] }
+function act(a, fromNet) {
+  const keep = (a.keep || []).filter(i => dice[i] && !dice[i].kept);
+  const pts = score(keep.map(i => dice[i].v));
+  if (rolled && !pts) return;
+  if (!fromNet && S.human && turn === me) S.send('act', a);
+  dice.forEach(d => { d.sel = false; });
+  keep.forEach(i => { dice[i].kept = true; });
+  turnPts += pts;
+  if (a.t === 'bank') {
+    total[turn] += turnPts;
+    Sound.beep(880, 0.15, 'triangle', 0.04);
+    msg.textContent = `Banked ${turnPts}!`;
+    if (total[turn] >= GOAL) return finish(turn);
+    busy = true;
+    const r = S.round;
+    setTimeout(() => { if (r !== S.round) return; busy = false; turn = 1 - turn; newTurn(); drain(); }, 900);
+    status();
+    return;
+  }
+  // roll: hot dice when everything is kept
+  if (dice.every(d => d.kept)) dice.forEach(d => { d.kept = false; });
+  const free = dice.filter(d => !d.kept);
+  free.forEach((d, k) => { d.v = a.vals[k]; });
+  rolled = true;
+  spin = 450;
+  busy = true;
+  Sound.beep(300, 0.08, 'square', 0.03);
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round) return;
+    busy = false;
+    if (!bestIn(free.map(d => d.v))) {
+      msg.textContent = `FARKLE! ${turnPts ? `Lost ${turnPts} points.` : ''}`;
+      Sound.beep(140, 0.4, 'sawtooth', 0.05);
+      busy = true;
+      setTimeout(() => { if (r !== S.round) return; busy = false; turn = 1 - turn; newTurn(); drain(); }, 1300);
+      return;
+    }
+    status();
+    if (S.ai && turn !== me) ai();
+    drain();
+  }, 500);
+}
+
+function finish(w) {
+  over = true;
+  status();
+  const title = S.mode === 'local' ? `Player ${w + 1} wins with ${total[w]}! ⚅` : w === me ? `You reached ${total[w]}! 🏆` : `${S.opp.name} reached ${total[w]}`;
+  msg.textContent = title;
+  setTimeout(() => Lobby.end(S, { result: w === me ? 1 : 0, title }), 1100);
+}
+
+const freshVals = () => dice.filter(d => !d.kept && !d.sel).map(() => randInt(1, 6));
+function rollNow() {
+  const keep = dice.map((d, i) => (d.sel && !d.kept ? i : -1)).filter(i => i >= 0);
+  const willHot = dice.every(d => d.kept || d.sel);
+  act({ t: 'roll', keep, vals: willHot ? [1, 2, 3, 4, 5, 6].map(() => randInt(1, 6)) : freshVals() });
+}
+
+// computer: keeps the best-scoring dice, then banks when its haul is big enough for the dice it has left
+function ai() {
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round || over || busy || turn === me) return;
+    if (!rolled) return act({ t: 'roll', keep: [], vals: [1, 2, 3, 4, 5, 6].map(() => randInt(1, 6)) });
+    const free = dice.map((d, i) => ({ v: d.v, i })).filter(o => !dice[o.i].kept);
+    let best = null, bv = 0;
+    for (let m = 1; m < 1 << free.length; m++) {
+      const pickd = free.filter((_, k) => m & (1 << k)), s = score(pickd.map(o => o.v));
+      if (!s) continue;
+      // prefer more points, but at higher levels keep fewer dice when the extra points are small
+      const v = s - (S.level > 0.5 ? pickd.length * 40 : 0);
+      if (v > bv || (best && v === bv && pickd.length < best.length)) { bv = v; best = pickd; }
+    }
+    if (!best) return;
+    best.forEach(o => { dice[o.i].sel = true; });
+    const pts = turnPts + score(best.map(o => o.v)), left = free.length - best.length || 6;
+    const need = [0, 300, 300, 350, 400, 2000, 3000][left] * (0.6 + S.level * 0.6);
+    const behind = total[1 - turn] - total[turn];
+    const finishNow = total[turn] + pts >= GOAL;
+    setTimeout(() => {
+      if (r !== S.round || over) return;
+      const keep = best.map(o => o.i);
+      if (finishNow || (pts >= need && !(behind > 1500 && left >= 4) )) act({ t: 'bank', keep });
+      else act({ t: 'roll', keep, vals: left === 6 && free.length === best.length ? [1, 2, 3, 4, 5, 6].map(() => randInt(1, 6)) : dice.filter(d => !d.kept && !d.sel).map(() => randInt(1, 6)) });
+    }, S.delay(400, 700));
+  }, S.delay(500, 800));
+}
+
+function die(x, y, v, opts) {
+  ctx.fillStyle = opts.kept ? '#64748b' : opts.sel ? '#fde047' : '#fff';
+  ctx.strokeStyle = opts.sel ? '#a16207' : '#111827'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.roundRect(x - 34, y - 34, 68, 68, 12); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#111827';
+  const P = { 1: [[0, 0]], 2: [[-1, -1], [1, 1]], 3: [[-1, -1], [0, 0], [1, 1]], 4: [[-1, -1], [1, -1], [-1, 1], [1, 1]], 5: [[-1, -1], [1, -1], [0, 0], [-1, 1], [1, 1]], 6: [[-1, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [1, 1]] }[v];
+  P.forEach(([a, b]) => { ctx.beginPath(); ctx.arc(x + a * 18, y + b * 18, 6, 0, 7); ctx.fill(); });
+}
+const dieXY = i => ({ x: 90 + i * 92, y: 150 });
+
+function draw() {
+  ctx.fillStyle = '#065f46';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#a16207'; ctx.lineWidth = 10; ctx.strokeRect(5, 5, W - 10, H - 10);
+  if (S && dice) {
+    if (spin > 0) spin -= 16;
+    dice.forEach((d, i) => {
+      const { x, y } = dieXY(i);
+      const v = spin > 0 && !d.kept ? randInt(1, 6) : d.v;
+      if (!rolled && !d.kept) { ctx.globalAlpha = 0.35; die(x, y, v, {}); ctx.globalAlpha = 1; }
+      else die(x, y + (d.kept ? 90 : 0), v, d);
+    });
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 18px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(`This turn: ${turnPts}${selected().length ? ` + ${score(selected().map(d => d.v))}` : ''}`, W / 2, 50);
+    ctx.font = '13px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.6)';
+    if (dice.some(d => d.kept)) ctx.fillText('set aside', W / 2, 320);
+  }
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (!myTurn() || !rolled) return;
+  const p = canvasPoint(cv, e);
+  dice.forEach((d, i) => { const { x, y } = dieXY(i); if (!d.kept && Math.abs(p.x - x) < 36 && Math.abs(p.y - y) < 36) { d.sel = !d.sel; Sound.beep(600, 0.03, 'triangle', 0.03); } });
+  status();
+});
+document.getElementById('roll').onclick = () => { if (!myTurn()) return; if (!rolled) act({ t: 'roll', keep: [], vals: [1, 2, 3, 4, 5, 6].map(() => randInt(1, 6)) }); else rollNow(); };
+document.getElementById('bank').onclick = () => { if (myTurn() && rolled) act({ t: 'bank', keep: dice.map((d, i) => (d.sel && !d.kept ? i : -1)).filter(i => i >= 0) }); };
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(draw);
+Lobby.open({ game: 'farkle', title: '⚅ Farkle', local: true, onStart: begin });
+</script>
+</body>
+</html>
