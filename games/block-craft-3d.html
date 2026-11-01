@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Block Craft 3D</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #c { width: min(860px, calc(100vw - 24px)); aspect-ratio: 16 / 10; height: auto; }
+  #bar { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin: 6px 0; }
+  #bar button { width: 52px; height: 52px; border-radius: 10px; border: 2px solid var(--line); font-size: 11px; color: #fff; cursor: pointer; text-shadow: 0 1px 2px #000; }
+  #bar button.on { border-color: #fde047; box-shadow: 0 0 0 2px #fde047; }
+  #tools { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🟫 Block Craft 3D</h1>
+  <div class="stats">Mode <b id="mode">Build</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game"></canvas>
+  <div id="cross" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:#fff;font:700 22px system-ui;text-shadow:0 0 3px #000;pointer-events:none">+</div>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<div id="bar"></div>
+<div id="tools"><button class="btn alt" id="toggle">⛏️ Switch to Break</button><button class="btn alt" id="jumpBtn">⤒ Jump</button><button class="btn alt" id="fly">🕊️ Fly: off</button><button class="btn alt" id="save">💾 Save</button><button class="btn alt" id="reset">🌍 New world</button></div>
+<p class="help"><b>Keyboard + mouse:</b> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move, <kbd>Space</kbd> jump, drag the mouse to look, left-click to place the selected block and right-click (or <kbd>Shift</kbd>+click) to break one; <kbd>1</kbd>–<kbd>8</kbd> pick blocks, <kbd>F</kbd> toggles flying (<kbd>Space</kbd>/<kbd>C</kbd> up/down). <b>Touch:</b> left half is a joystick, drag the right half to look and tap it to build or break (use the mode button). Your world saves in this browser.</p>
+<script src="shared.js"></script>
+<script src="gl3d.js"></script>
+<script>
+const cv = document.getElementById('c'), ov = document.getElementById('ov');
+const SX = 40, SZ = 40, SY = 24;
+const BLOCKS = [null,
+  { name: 'Grass', top: [0.36, 0.7, 0.25], side: [0.45, 0.33, 0.2] }, { name: 'Dirt', c: [0.47, 0.33, 0.2] }, { name: 'Stone', c: [0.55, 0.55, 0.58] },
+  { name: 'Wood', top: [0.6, 0.45, 0.25], side: [0.4, 0.27, 0.13] }, { name: 'Leaves', c: [0.2, 0.55, 0.2] }, { name: 'Sand', c: [0.9, 0.84, 0.55] },
+  { name: 'Planks', c: [0.75, 0.58, 0.33] }, { name: 'Brick', c: [0.7, 0.25, 0.2] }, { name: 'Glass', c: [0.75, 0.9, 1] }, { name: 'Water', c: [0.25, 0.45, 0.9] }, { name: 'Gold', c: [1, 0.82, 0.2] }];
+const HOTBAR = [1, 2, 3, 4, 7, 8, 9, 11];
+let R, world, mesh, P, yaw = 0.6, pitch = -0.2, keys = {}, sel = 0, mode = 'build', fly = false, last = 0, joy = null, dirty = true, aimHit = null, cursorMesh;
+const idx = (x, y, z) => (y * SZ + z) * SX + x;
+const get = (x, y, z) => (x < 0 || z < 0 || x >= SX || z >= SZ || y < 0 ? 3 : y >= SY ? 0 : world[idx(x, y, z)]);
+const solid = (x, y, z) => { const b = get(Math.floor(x), Math.floor(y), Math.floor(z)); return b > 0 && b !== 10; };
+
+function generate() {
+  world = new Uint8Array(SX * SY * SZ);
+  const s1 = rand(0, 100), s2 = rand(0, 100);
+  for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++) {
+    const h = Math.floor(7 + Math.sin(x * 0.18 + s1) * 2.2 + Math.cos(z * 0.15 + s2) * 2.2 + Math.sin((x + z) * 0.07) * 2);
+    for (let y = 0; y <= h; y++) world[idx(x, y, z)] = y === h ? (h <= 6 ? 6 : 1) : y > h - 3 ? 2 : 3;
+    for (let y = h + 1; y <= 6; y++) world[idx(x, y, z)] = 10;
+  }
+  for (let k = 0; k < 14; k++) {
+    const x = randInt(3, SX - 4), z = randInt(3, SZ - 4);
+    let y = SY - 1; while (y > 0 && !world[idx(x, y, z)]) y--;
+    if (world[idx(x, y, z)] !== 1) continue;
+    for (let t = 1; t <= 4; t++) world[idx(x, y + t, z)] = 4;
+    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = 3; dy <= 5; dy++) if (Math.abs(dx) + Math.abs(dz) + (dy === 5 ? 1 : 0) < 4 && !world[idx(x + dx, y + dy, z + dz)]) world[idx(x + dx, y + dy, z + dz)] = 5;
+  }
+}
+
+function spawn() {
+  const x = SX / 2, z = SZ / 2;
+  let y = SY - 1; while (y > 0 && !get(x, y, z)) y--;
+  P = { x: x + 0.5, y: y + 1.05, z: z + 0.5, vy: 0, ground: false };
+}
+
+// faces between a block and air (or glass/water) become triangles
+function rebuild() {
+  const b = GL3D.builder();
+  const see = (x, y, z, self) => { const n = get(x, y, z); return n === 0 || ((n === 9 || n === 10) && n !== self); };
+  for (let y = 0; y < SY; y++) for (let z = 0; z < SZ; z++) for (let x = 0; x < SX; x++) {
+    const t = world[idx(x, y, z)];
+    if (!t) continue;
+    const B = BLOCKS[t], top = B.top || B.c, side = B.side || B.c;
+    const sh = k => [side[0] * k, side[1] * k, side[2] * k];
+    const X = x + 1, Y = y + (t === 10 ? 0.85 : 1), Z = z + 1;
+    if (see(x + 1, y, z, t)) b.quad([X, y, Z], [X, y, z], [X, Y, z], [X, Y, Z], sh(0.8));
+    if (see(x - 1, y, z, t)) b.quad([x, y, z], [x, y, Z], [x, Y, Z], [x, Y, z], sh(0.8));
+    if (see(x, y + 1, z, t)) b.quad([x, Y, Z], [X, Y, Z], [X, Y, z], [x, Y, z], top);
+    if (see(x, y - 1, z, t)) b.quad([x, y, z], [X, y, z], [X, y, Z], [x, y, Z], sh(0.5));
+    if (see(x, y, z + 1, t)) b.quad([x, y, Z], [X, y, Z], [X, Y, Z], [x, Y, Z], sh(0.9));
+    if (see(x, y, z - 1, t)) b.quad([X, y, z], [x, y, z], [x, Y, z], [X, Y, z], sh(0.7));
+  }
+  if (mesh) R.update(mesh, b); else mesh = R.mesh(b);
+  dirty = false;
+}
+
+const look = () => [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), -Math.cos(pitch) * Math.cos(yaw)];
+const eye = () => [P.x, P.y + 1.55, P.z];
+
+// step through the voxel grid along the view ray to find the block you're pointing at
+function raycast() {
+  const [ox, oy, oz] = eye(), [dx, dy, dz] = look();
+  let x = Math.floor(ox), y = Math.floor(oy), z = Math.floor(oz), prev = null;
+  const sx = Math.sign(dx), sy = Math.sign(dy), sz = Math.sign(dz);
+  const tdx = Math.abs(1 / dx), tdy = Math.abs(1 / dy), tdz = Math.abs(1 / dz);
+  let tx = (sx > 0 ? x + 1 - ox : ox - x) * tdx, ty = (sy > 0 ? y + 1 - oy : oy - y) * tdy, tz = (sz > 0 ? z + 1 - oz : oz - z) * tdz;
+  for (let i = 0; i < 40; i++) {
+    const g = get(x, y, z);
+    if (g && g !== 10 && !(x < 0 || z < 0 || x >= SX || z >= SZ)) return { x, y, z, prev };
+    prev = [x, y, z];
+    const m = Math.min(tx, ty, tz);
+    if (m > 7) return null;
+    if (tx === m) { x += sx; tx += tdx; } else if (ty === m) { y += sy; ty += tdy; } else { z += sz; tz += tdz; }
+  }
+  return null;
+}
+
+function act(breakIt) {
+  const h = raycast();
+  if (!h) return;
+  if (breakIt) {
+    if (h.y === 0) return;
+    world[idx(h.x, h.y, h.z)] = 0;
+    Sound.beep(180, 0.06, 'square', 0.04);
+  } else if (h.prev) {
+    const [x, y, z] = h.prev;
+    if (y >= SY || x < 0 || z < 0 || x >= SX || z >= SZ) return;
+    // don't build inside yourself
+    if (Math.floor(P.x) === x && Math.floor(P.z) === z && (y === Math.floor(P.y) || y === Math.floor(P.y + 1))) return;
+    world[idx(x, y, z)] = HOTBAR[sel];
+    Sound.beep(420, 0.05, 'triangle', 0.04);
+  }
+  dirty = true;
+}
+
+function collide(nx, ny, nz) {
+  const r = 0.3;
+  for (const dy of [0.05, 0.9, 1.7]) for (const [dx, dz] of [[-r, -r], [r, -r], [-r, r], [r, r]]) if (solid(nx + dx, ny + dy, nz + dz)) return true;
+  return false;
+}
+
+function update(dt) {
+  const t = Math.min(0.05, dt / 1000);
+  let f = 0, s = 0;
+  if (keys.w || keys.ArrowUp) f += 1;
+  if (keys.s || keys.ArrowDown) f -= 1;
+  if (keys.a || keys.ArrowLeft) s -= 1;
+  if (keys.d || keys.ArrowRight) s += 1;
+  if (joy && joy.cur) { f += clamp(-(joy.cur.y - joy.y) / 45, -1, 1); s += clamp((joy.cur.x - joy.x) / 45, -1, 1); }
+  const sp = (fly ? 8 : 4.6) * t;
+  const mx = (Math.sin(yaw) * f + Math.cos(yaw) * s) * sp, mz = (-Math.cos(yaw) * f + Math.sin(yaw) * s) * sp;
+  if (!collide(P.x + mx, P.y, P.z)) P.x += mx;
+  if (!collide(P.x, P.y, P.z + mz)) P.z += mz;
+  if (fly) { const v = ((keys[' '] ? 1 : 0) - (keys.c ? 1 : 0)) * 6 * t; if (!collide(P.x, P.y + v, P.z)) P.y += v; P.vy = 0; }
+  else {
+    if (keys[' '] && P.ground) { P.vy = 7.2; P.ground = false; }
+    P.vy -= 20 * t;
+    const ny = P.y + P.vy * t;
+    if (collide(P.x, ny, P.z)) { if (P.vy < 0) P.ground = true; P.vy = 0; } else { P.y = ny; P.ground = false; }
+  }
+  if (P.y < -10) spawn();
+  if (dirty) rebuild();
+  aimHit = raycast();
+}
+
+function render() {
+  R.resize();
+  const e = eye(), d = look();
+  R.camera(e, [e[0] + d[0], e[1] + d[1], e[2] + d[2]]);
+  R.begin();
+  R.draw(mesh);
+  if (aimHit) R.draw(cursorMesh, M4.translate(aimHit.x, aimHit.y, aimHit.z), mode === 'break' ? [1, 0.3, 0.3] : [1, 1, 1]);
+}
+
+function loop(t) {
+  const dt = t - last;
+  last = t;
+  if (P) { update(dt); render(); }
+  requestAnimationFrame(loop);
+}
+
+function hotbar() {
+  const bar = document.getElementById('bar');
+  bar.innerHTML = HOTBAR.map((b, i) => { const B = BLOCKS[b], c = B.top || B.c; return `<button class="${i === sel ? 'on' : ''}" data-i="${i}" style="background:rgb(${c.map(v => v * 255 | 0).join(',')})">${i + 1}<br>${B.name}</button>`; }).join('');
+  bar.querySelectorAll('button').forEach(b => { b.onclick = () => { sel = +b.dataset.i; hotbar(); }; });
+  document.getElementById('mode').textContent = mode === 'build' ? `Build (${BLOCKS[HOTBAR[sel]].name})` : 'Break';
+  document.getElementById('toggle').textContent = mode === 'build' ? '⛏️ Switch to Break' : '🧱 Switch to Build';
+  document.getElementById('fly').textContent = `🕊️ Fly: ${fly ? 'on' : 'off'}`;
+}
+
+function saveWorld() {
+  let s = '';
+  for (let i = 0; i < world.length; i++) s += String.fromCharCode(97 + world[i]);
+  Store.set('blockcraft-world', s);
+}
+
+if (!GL3D.supported()) overlay(ov, '<h2>3D not available</h2><p>This game needs WebGL, which your browser or device has turned off.</p>');
+else {
+  R = GL3D.create(cv, { fog: [0.6, 0.82, 1], fogNear: 25, fogFar: 60, ambient: 0.62, light: [-0.4, -1, -0.6], fov: 70 });
+  const cb = GL3D.builder();
+  const e = 0.005, o = -e, l = 1 + 2 * e, th = 0.04;
+  // a wire cube made of thin bars around the targeted block
+  [[0, 0], [0, 1], [1, 0], [1, 1]].forEach(([a, b]) => { cb.box(o, o + a * l - th / 2, o + b * l - th / 2, l, th, th, [0.1, 0.1, 0.1]); cb.box(o + a * l - th / 2, o, o + b * l - th / 2, th, l, th, [0.1, 0.1, 0.1]); cb.box(o + a * l - th / 2, o + b * l - th / 2, o, th, th, l, [0.1, 0.1, 0.1]); });
+  cursorMesh = R.mesh(cb);
+  const saved = Store.get('blockcraft-world', null);
+  if (saved && saved.length === SX * SY * SZ) { world = new Uint8Array(SX * SY * SZ); for (let i = 0; i < saved.length; i++) world[i] = saved.charCodeAt(i) - 97; }
+  else generate();
+  spawn();
+  hotbar();
+  requestAnimationFrame(loop);
+  setInterval(saveWorld, 15000);
+}
+
+document.addEventListener('keydown', e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  keys[k] = true;
+  if (k >= '1' && k <= '8') { sel = +k - 1; hotbar(); }
+  if (k === 'f') { fly = !fly; hotbar(); }
+  if (k === ' ' || k.startsWith('Arrow')) e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
+const ptrs = {};
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('pointerdown', e => {
+  if (!P) return;
+  cv.setPointerCapture(e.pointerId);
+  const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  if (e.pointerType === 'mouse') { ptrs[e.pointerId] = { kind: 'look', x: e.clientX, y: e.clientY, moved: 0, btn: e.button, shift: e.shiftKey }; return; }
+  if (x < r.width / 2) { joy = { x, y, cur: { x, y } }; ptrs[e.pointerId] = { kind: 'joy' }; }
+  else ptrs[e.pointerId] = { kind: 'look', x: e.clientX, y: e.clientY, moved: 0, t: performance.now() };
+});
+cv.addEventListener('pointermove', e => {
+  const q = ptrs[e.pointerId];
+  if (!q) return;
+  if (q.kind === 'joy') { const r = cv.getBoundingClientRect(); joy.cur = { x: e.clientX - r.left, y: e.clientY - r.top }; return; }
+  const dx = e.clientX - q.x, dy = e.clientY - q.y;
+  yaw += dx * 0.006; pitch = clamp(pitch - dy * 0.006, -1.5, 1.5);
+  q.moved += Math.abs(dx) + Math.abs(dy); q.x = e.clientX; q.y = e.clientY;
+});
+const lift = e => {
+  const q = ptrs[e.pointerId];
+  if (!q) return;
+  if (q.kind === 'joy') joy = null;
+  else if (q.moved < 10) act(e.pointerType === 'mouse' ? q.btn === 2 || q.shift || mode === 'break' : mode === 'break');
+  delete ptrs[e.pointerId];
+};
+cv.addEventListener('pointerup', lift);
+cv.addEventListener('pointercancel', lift);
+document.getElementById('toggle').onclick = () => { mode = mode === 'build' ? 'break' : 'build'; hotbar(); };
+document.getElementById('fly').onclick = () => { fly = !fly; hotbar(); };
+holdButton(document.getElementById('jumpBtn'), v => { keys[' '] = v; });
+document.getElementById('save').onclick = () => { saveWorld(); document.getElementById('save').textContent = '💾 Saved!'; setTimeout(() => { document.getElementById('save').textContent = '💾 Save'; }, 1200); };
+// two taps to confirm (pop-up dialogs are blocked inside many embeds)
+let resetArm = 0;
+document.getElementById('reset').onclick = () => {
+  const b = document.getElementById('reset');
+  if (performance.now() - resetArm > 3000) { resetArm = performance.now(); b.textContent = '⚠️ Tap again to replace your world'; setTimeout(() => { b.textContent = '🌍 New world'; }, 3000); return; }
+  resetArm = 0; b.textContent = '🌍 New world';
+  generate(); spawn(); dirty = true; saveWorld();
+};
+</script>
+</body>
+</html>

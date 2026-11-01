@@ -140,8 +140,13 @@ document.getElementById('gem').addEventListener('click', e => {
   Sound.beep(rand(900, 1200), 0.03, 'square', 0.02);
   render();
 });
+// tap twice to erase (pop-up dialogs are blocked inside many site embeds)
+let resetArm = 0;
 document.getElementById('reset').onclick = () => {
-  if (!confirm('Erase all progress?')) return;
+  const b = document.getElementById('reset'), label = b.textContent;
+  if (performance.now() - resetArm > 3000) { resetArm = performance.now(); b.textContent = 'Tap again to erase'; setTimeout(() => { if (b.textContent === 'Tap again to erase') b.textContent = label; }, 3000); return; }
+  resetArm = 0;
+  b.textContent = label === 'Tap again to erase' ? 'Reset' : label;
   S = fresh();
   Store.set('clicker-save', S);
   render();
