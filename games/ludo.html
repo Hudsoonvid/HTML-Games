@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ludo</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏠 Ludo</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn" id="roll">🎲 Roll</button><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="600" height="600"></canvas>
+</div>
+<p class="help">Roll a 6 to bring a token out of your base. Then tap a highlighted token to move it by the roll. Land on an opponent to send them home (not on ⭐ safe squares). A 6 gives you another roll. Get all four tokens to the centre with an exact roll to win.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const CS = 40, OFF = 0;
+const COL = ['#dc2626', '#eab308'], LIGHT = ['#fecaca', '#fef08a'];
+// the 52 squares of the main track, starting at red's start
+const TRACK = [];
+(function build() {
+  const seg = (pts) => pts.forEach(p => TRACK.push(p));
+  const line = (x, y, dx, dy, n) => { const o = []; for (let i = 0; i < n; i++) o.push([x + dx * i, y + dy * i]); return o; };
+  seg(line(1, 6, 1, 0, 5)); seg(line(6, 5, 0, -1, 6)); seg(line(7, 0, 1, 0, 2));
+  seg(line(8, 1, 0, 1, 5)); seg(line(9, 6, 1, 0, 6)); seg(line(14, 7, 0, 1, 2));
+  seg(line(13, 8, -1, 0, 5)); seg(line(8, 9, 0, 1, 6)); seg(line(7, 14, -1, 0, 2));
+  seg(line(6, 13, 0, -1, 5)); seg(line(5, 8, -1, 0, 6)); seg(line(0, 7, 0, -1, 2));
+})();
+const START = [0, 26], SAFE = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
+const HOME = [[1, 2, 3, 4, 5].map(x => [x, 7]), [13, 12, 11, 10, 9].map(x => [x, 7])];
+const BASE = [[[1.5, 1.5], [3.5, 1.5], [1.5, 3.5], [3.5, 3.5]], [[10.5, 10.5], [12.5, 10.5], [10.5, 12.5], [12.5, 12.5]]];
+let S, me, tok, turn, over, die, rolled, busy, sixes, pending = [], spin = 0;
+const myTurn = () => S && !over && !busy && (S.mode === 'local' || turn === me);
+
+// progress: -1 base, 0..50 track, 51..55 home column, 56 finished
+function where(p, prog, k) {
+  if (prog < 0) return BASE[p][k];
+  if (prog <= 50) return TRACK[(START[p] + prog) % 52];
+  if (prog <= 55) return HOME[p][prog - 51];
+  return [7 + (p ? 0.5 : -0.5), 7];
+}
+const trackIdx = (p, prog) => (prog >= 0 && prog <= 50 ? (START[p] + prog) % 52 : -1);
+
+function begin(s) {
+  S = s;
+  S.on('roll', d => { if (d && d.v >= 1 && d.v <= 6) { pending.push(['roll', d.v]); drain(); } });
+  S.on('move', d => { if (d && d.k >= 0 && d.k < 4) { pending.push(['move', d.k]); drain(); } });
+  S.startRound(() => ({ first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    me = S.mode === 'online' ? S.seat : 0;
+    tok = [[-1, -1, -1, -1], [-1, -1, -1, -1]];
+    turn = S.mode === 'local' ? 0 : cfg.first;
+    over = false; die = 0; rolled = false; busy = false; sixes = 0; pending = [];
+    status();
+    if (S.ai && turn !== me) ai();
+  });
+}
+
+function drain() {
+  while (pending.length && !busy && !over && turn !== me) {
+    const [kind, v] = pending[0];
+    if (kind === 'roll' && !rolled) { pending.shift(); doRoll(v, true); }
+    else if (kind === 'move' && rolled) { pending.shift(); doMove(v, true); }
+    else break;
+  }
+}
+
+function legal(p, v) {
+  const out = [];
+  tok[p].forEach((prog, k) => {
+    if (prog === 56) return;
+    if (prog < 0) { if (v === 6) out.push(k); return; }
+    if (prog + v <= 56) out.push(k);
+  });
+  return out;
+}
+
+function status() {
+  const home = p => tok[p].filter(x => x === 56).length;
+  document.getElementById('stat').textContent = S.mode === 'online' ? 'Online' : S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : '2 players';
+  document.getElementById('vs').innerHTML = [0, 1].map(i => `<b style="color:${COL[i]}" ${i === turn ? 'class="turn"' : ''}>${S.mode === 'local' ? (i ? 'Yellow' : 'Red') : i === me ? S.me.name : S.opp.name} 🏠${home(i)}/4</b>`).join(' vs ');
+  document.getElementById('roll').disabled = !myTurn() || rolled;
+  if (over) return;
+  const who = S.mode === 'local' ? (turn ? 'Yellow' : 'Red') : turn === me ? 'You' : S.opp.name;
+  msg.textContent = !rolled ? `${who}: roll the dice` : `${who} rolled ${die} — ${turn === me || S.mode === 'local' ? 'tap a token to move' : 'choosing…'}`;
+}
+
+function doRoll(v, fromNet) {
+  if (!fromNet && S.human && turn === me) S.send('roll', { v });
+  die = v; rolled = true; spin = 400; busy = true;
+  Sound.beep(300, 0.05, 'square', 0.03);
+  if (v === 6) sixes++; else sixes = 0;
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round) return;
+    busy = false;
+    const opts = legal(turn, v);
+    if (sixes === 3) { msg.textContent = 'Three sixes — turn lost!'; return nextTurn(true); }
+    if (!opts.length) { msg.textContent = `No move with a ${v}.`; busy = true; setTimeout(() => { if (r !== S.round) return; busy = false; nextTurn(true); }, 800); return; }
+    status();
+    if (S.ai && turn !== me) ai();
+    else if (opts.length === 1 && (turn === me || S.mode === 'local') && tok[turn][opts[0]] >= 0 && opts.every(k => tok[turn][k] === tok[turn][opts[0]])) doMove(opts[0]);
+    drain();
+  }, 450);
+}
+
+function doMove(k, fromNet) {
+  if (!legal(turn, die).includes(k)) return;
+  if (!fromNet && S.human && turn === me) S.send('move', { k });
+  const p = turn, from = tok[p][k], to = from < 0 ? 0 : from + die;
+  busy = true;
+  // animate square by square
+  const steps = from < 0 ? [0] : Array.from({ length: to - from }, (_, i) => from + i + 1);
+  let i = 0;
+  const r = S.round;
+  const hop = () => {
+    if (r !== S.round) return;
+    if (i < steps.length) { tok[p][k] = steps[i++]; Sound.beep(500 + i * 30, 0.03, 'triangle', 0.03); setTimeout(hop, 140); return; }
+    let extra = die === 6;
+    // capture
+    const idx = trackIdx(p, to);
+    if (idx >= 0 && !SAFE.has(idx)) {
+      tok[1 - p].forEach((q, j) => { if (trackIdx(1 - p, q) === idx) { tok[1 - p][j] = -1; extra = true; Sound.beep(160, 0.3, 'sawtooth', 0.05); msg.textContent = 'Captured! Sent home 🏠'; } });
+    }
+    if (to === 56) { extra = true; Sound.beep(880, 0.2, 'triangle', 0.04); }
+    busy = false;
+    if (tok[p].every(x => x === 56)) {
+      over = true;
+      status();
+      const title = S.mode === 'local' ? `${p ? 'Yellow' : 'Red'} wins! 🏆` : p === me ? 'All home — you win! 🏆' : `${S.opp.name} got all four home`;
+      msg.textContent = title;
+      setTimeout(() => Lobby.end(S, { result: p === me ? 1 : 0, title }), 1000);
+      return;
+    }
+    nextTurn(!extra);
+  };
+  hop();
+}
+
+function nextTurn(pass) {
+  rolled = false;
+  if (pass) { turn = 1 - turn; sixes = 0; }
+  status();
+  if (S.ai && turn !== me) ai();
+  drain();
+}
+
+// computer: capture > finish > leave base > escape danger > advance the leader; lower levels choose more randomly
+function ai() {
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round || over || busy || turn === me) return;
+    if (!rolled) return doRoll(randInt(1, 6));
+    const opts = legal(turn, die);
+    if (!opts.length) return;
+    if (Math.random() > S.level * 0.8 + 0.2) return doMove(pick(opts));
+    const p = turn, score = k => {
+      const from = tok[p][k], to = from < 0 ? 0 : from + die, idx = trackIdx(p, to);
+      let s = to / 10;
+      if (idx >= 0 && !SAFE.has(idx) && tok[1 - p].some(q => trackIdx(1 - p, q) === idx)) s += 50;
+      if (to === 56) s += 30;
+      if (from < 0) s += 20;
+      if (idx >= 0 && SAFE.has(idx)) s += 8;
+      const danger = (prog) => { const ii = trackIdx(p, prog); return ii >= 0 && !SAFE.has(ii) && tok[1 - p].some(q => q >= 0 && q <= 50 && ((ii - trackIdx(1 - p, q) + 52) % 52) <= 6 && ((ii - trackIdx(1 - p, q) + 52) % 52) > 0); };
+      if (from >= 0 && danger(from)) s += 12;
+      if (danger(to)) s -= 15;
+      return s;
+    };
+    doMove(opts.sort((a, b) => score(b) - score(a))[0]);
+  }, S.delay(450, 800));
+}
+
+function cellRect(x, y, fill) { ctx.fillStyle = fill; ctx.fillRect(x * CS, y * CS, CS, CS); ctx.strokeStyle = '#9ca3af'; ctx.lineWidth = 1; ctx.strokeRect(x * CS, y * CS, CS, CS); }
+
+function draw() {
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  // bases
+  [[0, 0, 0], [9, 9, 1], [9, 0, -1], [0, 9, -2]].forEach(([x, y, p]) => {
+    ctx.fillStyle = p >= 0 ? COL[p] : p === -1 ? '#16a34a' : '#2563eb';
+    ctx.fillRect(x * CS, y * CS, 6 * CS, 6 * CS);
+    ctx.fillStyle = '#fff'; ctx.fillRect(x * CS + CS * 0.7, y * CS + CS * 0.7, CS * 4.6, CS * 4.6);
+  });
+  TRACK.forEach(([x, y], i) => cellRect(x, y, i === START[0] ? LIGHT[0] : i === START[1] ? LIGHT[1] : '#fff'));
+  SAFE.forEach(i => { const [x, y] = TRACK[i]; ctx.font = '18px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('⭐', x * CS + CS / 2, y * CS + CS / 2); });
+  HOME.forEach((h, p) => h.forEach(([x, y]) => cellRect(x, y, LIGHT[p])));
+  // centre triangles
+  ctx.fillStyle = COL[0]; ctx.beginPath(); ctx.moveTo(6 * CS, 6 * CS); ctx.lineTo(7.5 * CS, 7.5 * CS); ctx.lineTo(6 * CS, 9 * CS); ctx.fill();
+  ctx.fillStyle = COL[1]; ctx.beginPath(); ctx.moveTo(9 * CS, 6 * CS); ctx.lineTo(7.5 * CS, 7.5 * CS); ctx.lineTo(9 * CS, 9 * CS); ctx.fill();
+  ctx.fillStyle = '#16a34a'; ctx.beginPath(); ctx.moveTo(6 * CS, 6 * CS); ctx.lineTo(7.5 * CS, 7.5 * CS); ctx.lineTo(9 * CS, 6 * CS); ctx.fill();
+  ctx.fillStyle = '#2563eb'; ctx.beginPath(); ctx.moveTo(6 * CS, 9 * CS); ctx.lineTo(7.5 * CS, 7.5 * CS); ctx.lineTo(9 * CS, 9 * CS); ctx.fill();
+  if (S && tok) {
+    const can = myTurn() && rolled ? legal(turn, die) : [];
+    [0, 1].forEach(p => tok[p].forEach((prog, k) => {
+      const [x, y] = where(p, prog, k);
+      const same = tok[p].filter((q, j) => j < k && q === prog && prog >= 0 && prog < 56).length;
+      const cx = x * CS + CS / 2 + same * 5, cy = y * CS + CS / 2 - same * 5;
+      ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.arc(cx + 2, cy + 3, 13, 0, 7); ctx.fill();
+      ctx.fillStyle = COL[p]; ctx.beginPath(); ctx.arc(cx, cy, 13, 0, 7); ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke();
+      if (p === turn && can.includes(k)) { ctx.strokeStyle = '#111827'; ctx.lineWidth = 3; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.arc(cx, cy, 18 + Math.sin(performance.now() / 150) * 2, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
+    }));
+    // dice in the turn player's base corner
+    if (spin > 0) spin -= 16;
+    const dv = spin > 0 ? randInt(1, 6) : die;
+    if (dv) {
+      const bx = turn ? 13 * CS : 1 * CS, by = turn ? 6.6 * CS : 6.6 * CS;
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = COL[turn]; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.roundRect(bx - 4, by - 116, 44, 44, 8); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#111827'; ctx.font = 'bold 26px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(dv, bx + 18, by - 93);
+    }
+  }
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (!myTurn()) return;
+  if (!rolled) return doRoll(randInt(1, 6));
+  const p = canvasPoint(cv, e), opts = legal(turn, die);
+  let best = -1, bd = 26;
+  opts.forEach(k => { const [x, y] = where(turn, tok[turn][k], k); const d = Math.hypot(x * CS + CS / 2 - p.x, y * CS + CS / 2 - p.y); if (d < bd) { bd = d; best = k; } });
+  if (best >= 0) doMove(best);
+});
+document.getElementById('roll').onclick = () => { if (myTurn() && !rolled) doRoll(randInt(1, 6)); };
+document.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && myTurn() && !rolled) doRoll(randInt(1, 6)); });
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(draw);
+Lobby.open({ game: 'ludo', title: '🏠 Ludo', local: true, onStart: begin });
+</script>
+</body>
+</html>
