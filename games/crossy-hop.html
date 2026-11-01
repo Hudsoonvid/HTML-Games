@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crossy Hop</title>
+<link rel="stylesheet" href="shared.css">
+<style>#c { width: min(560px, calc(100vw - 24px)); aspect-ratio: 3 / 4; height: auto; }</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐔 Crossy Hop</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Tap (or <kbd>↑</kbd>/<kbd>W</kbd>/<kbd>Space</kbd>) to hop forward; swipe left, right or down (or use the arrow keys) to hop sideways or back. Dodge the cars and trains, ride the logs across rivers — and don't dawdle, or the camera leaves you behind!</p>
+<script src="shared.js"></script>
+<script src="gl3d.js"></script>
+<script>
+const cv = document.getElementById('c'), ov = document.getElementById('ov');
+const COLS = 9, HALFC = 4;
+let R, M = {}, lanes, rowMeshes = {}, P, camZ, state = 'ready', last = 0, best = Store.get('crossy-best', 0), score = 0, queued = null;
+
+function buildMeshes() {
+  const ch = GL3D.builder();
+  ch.cube(0, 0.35, 0, 0.6, 0.5, 0.6, [1, 1, 1]).cube(0, 0.8, 0.12, 0.42, 0.42, 0.42, [1, 1, 1]).cube(0, 1.06, 0.12, 0.12, 0.12, 0.3, [0.9, 0.15, 0.15]).cube(0, 0.75, 0.38, 0.14, 0.1, 0.14, [1, 0.6, 0.1]).cube(-0.12, 0.05, 0, 0.08, 0.2, 0.08, [1, 0.6, 0.1]).cube(0.12, 0.05, 0, 0.08, 0.2, 0.08, [1, 0.6, 0.1]);
+  M.chick = R.mesh(ch);
+  M.cars = ['#ef4444', '#3b82f6', '#f59e0b', '#a855f7', '#10b981'].map(c => { const b = GL3D.builder(); const col = GL3D.rgb(c); b.box(-0.9, 0.15, -0.4, 1.8, 0.5, 0.8, col).box(-0.5, 0.65, -0.35, 1, 0.4, 0.7, [0.7, 0.85, 0.95]).box(-0.75, 0, -0.45, 0.3, 0.3, 0.9, [0.1, 0.1, 0.1]).box(0.45, 0, -0.45, 0.3, 0.3, 0.9, [0.1, 0.1, 0.1]); return R.mesh(b); });
+  const tr = GL3D.builder(); tr.box(-6, 0.1, -0.45, 12, 1.2, 0.9, [0.85, 0.85, 0.9]).box(-6, 0.8, -0.46, 12, 0.3, 0.92, [0.2, 0.5, 0.9]); M.train = R.mesh(tr);
+  const lg = GL3D.builder(); lg.box(-1.5, -0.1, -0.4, 3, 0.3, 0.8, [0.55, 0.35, 0.15]); M.log = R.mesh(lg);
+  const tree = GL3D.builder(); tree.cube(0, 0.3, 0, 0.3, 0.6, 0.3, [0.45, 0.3, 0.15]).cube(0, 1, 0, 0.8, 0.9, 0.8, [0.15, 0.6, 0.25]); M.tree = R.mesh(tree);
+}
+
+// a lane: grass (with trees), road (cars), river (logs) or rails (trains)
+function makeLane(i) {
+  if (i < 4) return { k: 'grass', trees: i === 0 ? [] : [-4, 4].concat(shuffle([-3, -2, 2, 3]).slice(0, randInt(0, 2))) };
+  const prev = lanes[i - 1];
+  const r = Math.random(), hard = Math.min(1, i / 200);
+  if (prev && prev.k !== 'grass' && r < 0.3) return { k: 'grass', trees: shuffle([-4, -3, -2, -1, 1, 2, 3, 4]).slice(0, randInt(1, 3)) };
+  if (r < 0.55) { const dir = pick([-1, 1]); return { k: 'road', dir, speed: rand(2, 3.5 + hard * 3), gap: rand(4, 7 - hard * 1.5), cars: [], t: rand(0, 1), color: randInt(0, 4) }; }
+  if (r < 0.8) { const dir = prev && prev.k === 'river' ? -prev.dir : pick([-1, 1]); return { k: 'river', dir, speed: rand(1.4, 2.4 + hard), logs: [] }; }
+  return { k: 'rail', dir: pick([-1, 1]), train: null, warn: 0, wait: rand(2, 5) };
+}
+
+function laneMesh(i) {
+  const L = lanes[i], b = GL3D.builder(), z = -i;
+  const col = L.k === 'grass' ? (i % 2 ? [0.55, 0.85, 0.35] : [0.5, 0.8, 0.32]) : L.k === 'road' ? [0.3, 0.3, 0.35] : L.k === 'river' ? [0.25, 0.55, 0.95] : [0.45, 0.4, 0.35];
+  b.box(-12, L.k === 'river' ? -0.35 : -0.2, z - 0.5, 24, 0.2, 1, col);
+  if (L.k === 'road') for (let x = -11; x < 12; x += 2) b.box(x, 0.01, z - 0.04, 1, 0.01, 0.08, [0.95, 0.95, 0.95]);
+  if (L.k === 'rail') { b.box(-12, 0.01, z - 0.3, 24, 0.06, 0.06, [0.75, 0.75, 0.8]).box(-12, 0.01, z + 0.25, 24, 0.06, 0.06, [0.75, 0.75, 0.8]); for (let x = -11.5; x < 12; x += 0.8) b.box(x, 0, z - 0.4, 0.2, 0.03, 0.8, [0.35, 0.25, 0.15]); }
+  return R.mesh(b);
+}
+
+function ensure(n) {
+  while (lanes.length < n) {
+    const i = lanes.length, L = makeLane(i);
+    lanes.push(L);
+    if (L.k === 'river') { let x = -12; while (x < 12) { const len = randInt(2, 4); L.logs.push({ x, len }); x += len + rand(1.5, 3); } }
+    if (L.k === 'road') { let x = -12; while (x < 12) { L.cars.push({ x }); x += L.gap + rand(0, 3); } }
+    rowMeshes[i] = laneMesh(i);
+  }
+}
+
+function newGame() {
+  Object.values(rowMeshes).forEach(m => R.free(m));
+  rowMeshes = {}; lanes = [];
+  ensure(30);
+  P = { x: 0, row: 0, fx: 0, fz: 0, hop: 0, from: null, dead: false, ride: null, face: 0 };
+  camZ = 0; score = 0; queued = null;
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() { document.getElementById('score').textContent = score; document.getElementById('best').textContent = best; }
+
+function hop(dx, dz) {
+  if (state !== 'play') return;
+  if (P.hop > 0) { queued = [dx, dz]; return; }
+  const nx = Math.round(P.x) + dx, nr = P.row + dz;
+  if (nr < 0 || Math.abs(nx) > HALFC) return;
+  ensure(nr + 30);
+  const L = lanes[nr];
+  if (L.k === 'grass' && L.trees.includes(nx)) return;
+  P.from = { x: P.x, row: P.row };
+  P.x = nx; P.row = nr; P.hop = 1; P.ride = null;
+  P.face = dx ? (dx > 0 ? -Math.PI / 2 : Math.PI / 2) : dz > 0 ? 0 : Math.PI;
+  Sound.beep(520 + (dz > 0 ? 80 : 0), 0.03, 'triangle', 0.03);
+  if (P.row > score) { score = P.row; hud(); }
+}
+
+function die(why) {
+  if (state !== 'play') return;
+  state = 'over';
+  P.dead = true;
+  if (recordBest('crossy-best', score)) best = score;
+  hud();
+  Sound.beep(110, 0.5, 'sawtooth', 0.06);
+  setTimeout(() => overlay(ov, `<h2>${why}</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Hop again</button>`), 400);
+}
+
+function update(dt) {
+  const t = dt / 1000;
+  // move traffic
+  for (let i = Math.max(0, P.row - 8); i < Math.min(lanes.length, P.row + 22); i++) {
+    const L = lanes[i];
+    if (L.k === 'road') L.cars.forEach(c => { c.x += L.dir * L.speed * t; if (c.x > 13) c.x -= 26; if (c.x < -13) c.x += 26; });
+    if (L.k === 'river') L.logs.forEach(l => { l.x += L.dir * L.speed * t; if (l.x > 13) l.x -= 26 + l.len; if (l.x + l.len < -13) l.x += 26 + l.len; });
+    if (L.k === 'rail') {
+      if (!L.train) { L.wait -= t; if (L.wait < 1.2) L.warn = 1; if (L.wait <= 0) { L.train = { x: L.dir > 0 ? -22 : 22 }; L.warn = 0; } }
+      else { L.train.x += L.dir * 30 * t; if (Math.abs(L.train.x) > 24) { L.train = null; L.wait = rand(3, 7); } }
+    }
+  }
+  if (P.hop > 0) { P.hop = Math.max(0, P.hop - t * 7); if (P.hop === 0 && queued) { const q = queued; queued = null; hop(...q); } }
+  const L = lanes[P.row];
+  if (P.hop === 0) {
+    if (L.k === 'river') {
+      const log = L.logs.find(l => P.x >= l.x - 0.3 && P.x <= l.x + l.len + 0.3);
+      if (!log) return die('Splash! You fell in the river 💦');
+      P.x += L.dir * L.speed * t;
+      if (Math.abs(P.x) > HALFC + 0.6) return die('Swept away by the river!');
+    } else P.x += (Math.round(P.x) - P.x) * Math.min(1, t * 12);
+  }
+  if (L.k === 'road' && L.cars.some(c => Math.abs(c.x - P.x) < 1.1)) return die('Squashed by a car! 🚗');
+  if (L.k === 'rail' && L.train && Math.abs(L.train.x - P.x) < 6.3) return die('Hit by a train! 🚆');
+  // the camera keeps creeping forward
+  camZ += Math.max(0.6, (P.row - camZ) * 1.6) * t;
+  if (camZ > P.row + 2.2) die('Too slow — the eagle got you! 🦅');
+}
+
+function render() {
+  R.resize();
+  const p = P || { x: 0, row: 0, hop: 0 };
+  const cz = camZ || 0;
+  R.camera([2.5 + p.x * 0.3, 9, -cz + 6.5], [p.x * 0.5, 0, -cz - 3]);
+  R.begin();
+  if (!lanes) return;
+  for (let i = Math.max(0, Math.floor(cz) - 6); i < Math.min(lanes.length, Math.floor(cz) + 22); i++) {
+    const L = lanes[i];
+    R.draw(rowMeshes[i]);
+    const z = -i;
+    if (L.k === 'grass') L.trees.forEach(x => R.draw(M.tree, M4.translate(x, 0, z)));
+    if (L.k === 'road') L.cars.forEach(c => R.draw(M.cars[L.color], M4.chain(M4.translate(c.x, 0, z), M4.rotY(L.dir > 0 ? 0 : Math.PI))));
+    if (L.k === 'river') L.logs.forEach(l => R.draw(M.log, M4.chain(M4.translate(l.x + l.len / 2, 0, z), M4.scale(l.len / 3, 1, 1))));
+    if (L.k === 'rail') { if (L.train) R.draw(M.train, M4.translate(L.train.x, 0, z)); if (L.warn && Math.floor(performance.now() / 200) % 2) R.draw(M.cars[0], M4.chain(M4.translate(HALFC + 1.5, 0, z), M4.scale(0.3, 2, 0.3))); }
+  }
+  if (P) {
+    const k = P.hop, fx = P.from ? P.from.x + (P.x - P.from.x) * (1 - k) : P.x, frow = P.from ? P.from.row + (P.row - P.from.row) * (1 - k) : P.row;
+    const lift = Math.sin(k * Math.PI) * 0.5;
+    R.draw(M.chick, M4.chain(M4.translate(fx, lift + (lanes[P.row] && lanes[P.row].k === 'river' && !k ? 0.15 : 0), -frow), M4.rotY(P.face), M4.scale(1, P.dead ? 0.3 : 1, 1)));
+  }
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  if (R) render();
+  requestAnimationFrame(loop);
+}
+
+if (!GL3D.supported()) overlay(ov, '<h2>3D not available</h2><p>This game needs WebGL, which your browser or device has turned off.</p>');
+else {
+  R = GL3D.create(cv, { fog: [0.55, 0.8, 0.95], fogNear: 30, fogFar: 60, ambient: 0.6, light: [-0.6, -1, -0.3], fov: 48 });
+  buildMeshes();
+  lanes = []; ensure(30);
+  P = { x: 0, row: 0, hop: 0, face: 0 }; camZ = 0;
+  hud();
+  overlay(ov, '<h2>🐔 Crossy Hop</h2><p>Hop across roads, rivers and railways.</p><button class="btn" onclick="newGame()">Play</button>');
+  requestAnimationFrame(loop);
+}
+const KEYS = { ArrowUp: [0, 1], w: [0, 1], ' ': [0, 1], ArrowDown: [0, -1], s: [0, -1], ArrowLeft: [-1, 0], a: [-1, 0], ArrowRight: [1, 0], d: [1, 0] };
+document.addEventListener('keydown', e => { if (KEYS[e.key] && !e.repeat) { if (state === 'play') hop(...KEYS[e.key]); else if (R && e.key === ' ') newGame(); } });
+let sw = null;
+cv.addEventListener('pointerdown', e => { sw = { x: e.clientX, y: e.clientY, done: false }; });
+cv.addEventListener('pointermove', e => {
+  if (!sw || sw.done) return;
+  const dx = e.clientX - sw.x, dy = e.clientY - sw.y;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 26) return;
+  sw.done = true;
+  if (Math.abs(dx) > Math.abs(dy)) hop(dx > 0 ? 1 : -1, 0); else hop(0, dy > 0 ? -1 : 1);
+});
+cv.addEventListener('pointerup', () => { if (sw && !sw.done) hop(0, 1); sw = null; });
+</script>
+</body>
+</html>
