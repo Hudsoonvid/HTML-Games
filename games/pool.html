@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8-Ball Pool</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🎱 8-Ball Pool</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="840" height="460"></canvas>
+</div>
+<p class="help">Aim by pointing the mouse where you want the white ball to go (or touch there), then press and drag to set the power — further means harder — and let go to strike. Drag back to where you started to cancel. Pot all your group — solids ● or stripes ◐ — then the black 8. Potting the white, missing your own balls, or hitting the other group first is a foul: the other player gets the white in hand and can tap to place it.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const W = cv.width, H = cv.height, RAIL = 34, BR = 10, PR = 19, FIX = 1 / 240;
+const TX0 = RAIL, TY0 = RAIL, TX1 = W - RAIL, TY1 = H - RAIL;
+const POCKETS = [[TX0, TY0], [(TX0 + TX1) / 2, TY0 - 4], [TX1, TY0], [TX0, TY1], [(TX0 + TX1) / 2, TY1 + 4], [TX1, TY1]];
+const BCOL = ['#fff', '#facc15', '#2563eb', '#dc2626', '#7c3aed', '#f97316', '#16a34a', '#7f1d1d', '#111', '#facc15', '#2563eb', '#dc2626', '#7c3aed', '#f97316', '#16a34a', '#7f1d1d'];
+let S, me, balls, turn, groups, over, phase, inHand, aimA = 0, pull = null, firstHit, pottedThisShot, acc = 0, pendingSync = null, early = null;
+const sq = (x, y) => Math.sqrt(x * x + y * y);
+const myTurn = () => S && !over && phase === 'aim' && (S.mode === 'local' || turn === me);
+const groupOf = n => (n === 0 ? 'cue' : n === 8 ? 'eight' : n < 8 ? 'solids' : 'stripes');
+
+function rack() {
+  const b = [{ n: 0, x: TX0 + (TX1 - TX0) * 0.25, y: H / 2, vx: 0, vy: 0, in: false }];
+  const order = [1, 9, 2, 10, 8, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15];
+  let k = 0;
+  const fx = TX0 + (TX1 - TX0) * 0.7;
+  for (let col = 0; col < 5; col++) for (let r = 0; r <= col; r++) {
+    b.push({ n: order[k++], x: fx + col * BR * 1.74, y: H / 2 + (r - col / 2) * BR * 2.02, vx: 0, vy: 0, in: false });
+  }
+  return b;
+}
+
+function begin(s) {
+  S = s;
+  S.on('shot', d => { if (!d) return; if (phase === 'aim' && turn !== me) shoot(d, true); else early = d; });
+  S.on('sync', d => { if (S.host || !d) return; if (phase === 'roll') pendingSync = d; else applySync(d); });
+  S.startRound(() => ({ first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    me = S.mode === 'online' ? S.seat : 0;
+    balls = rack();
+    turn = S.mode === 'local' ? 0 : cfg.first;
+    groups = [null, null]; over = false; phase = 'aim'; inHand = false; early = null; pendingSync = null;
+    aimA = Math.PI;
+    status();
+    if (S.ai && turn !== me) ai();
+  });
+}
+
+function applySync(d) { d.b.forEach((q, i) => { balls[i].x = q[0]; balls[i].y = q[1]; balls[i].in = !!q[2]; balls[i].vx = balls[i].vy = 0; }); }
+
+function status(extra) {
+  const left = g => balls.filter(b => !b.in && groupOf(b.n) === g).length;
+  document.getElementById('stat').textContent = S.mode === 'online' ? 'Online' : S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : '2 players';
+  document.getElementById('vs').innerHTML = [0, 1].map(i => `<b ${i === turn ? 'class="turn"' : ''}>${S.mode === 'local' ? 'P' + (i + 1) : i === me ? S.me.name : S.opp.name}${groups[i] ? ` · ${groups[i] === 'solids' ? '● solids' : '◐ stripes'} ${7 - left(groups[i])}/7` : ''}</b>`).join(' vs ');
+  if (over) return;
+  const who = S.mode === 'local' ? `Player ${turn + 1}` : turn === me ? 'Your' : `${S.opp.name}'s`;
+  msg.textContent = (extra ? extra + ' ' : '') + (phase === 'aim' ? `${who} shot${inHand ? ' — ball in hand: tap to place the white' : ''}` : '');
+}
+
+// shot: { a, p, cx, cy }
+function shoot(d, fromNet) {
+  const cue = balls[0];
+  if (inHand && typeof d.cx === 'number') { cue.x = clamp(d.cx, TX0 + BR, TX1 - BR); cue.y = clamp(d.cy, TY0 + BR, TY1 - BR); cue.in = false; }
+  d.a = Math.round(d.a * 1e6) / 1e6; d.p = Math.round(d.p * 100) / 100;
+  if (!fromNet && S.human && turn === me) S.send('shot', { a: d.a, p: d.p, cx: inHand ? cue.x : undefined, cy: inHand ? cue.y : undefined });
+  inHand = false;
+  const sp = d.p * 11;
+  cue.vx = Math.cos(d.a) * sp; cue.vy = Math.sin(d.a) * sp;
+  firstHit = null; pottedThisShot = [];
+  phase = 'roll'; acc = 0;
+  Sound.beep(220 + d.p * 3, 0.06, 'square', 0.05);
+  status();
+}
+
+function step() {
+  const live = balls.filter(b => !b.in);
+  const f = Math.pow(0.8, FIX);
+  for (const b of live) {
+    b.x += b.vx * FIX; b.y += b.vy * FIX;
+    // rolling friction: a steady slowdown plus a little drag
+    const sp = sq(b.vx, b.vy), ns = Math.max(0, sp * f - 240 * FIX);
+    if (ns < 3) { b.vx = 0; b.vy = 0; } else { b.vx *= ns / sp; b.vy *= ns / sp; }
+    // pockets
+    for (const [px, py] of POCKETS) if (sq(b.x - px, b.y - py) < PR) { b.in = true; b.vx = b.vy = 0; pottedThisShot.push(b.n); Sound.beep(160, 0.15, 'triangle', 0.05); break; }
+    if (b.in) continue;
+    // cushions
+    if (b.x < TX0 + BR) { b.x = TX0 + BR; b.vx = Math.abs(b.vx) * 0.8; }
+    if (b.x > TX1 - BR) { b.x = TX1 - BR; b.vx = -Math.abs(b.vx) * 0.8; }
+    if (b.y < TY0 + BR) { b.y = TY0 + BR; b.vy = Math.abs(b.vy) * 0.8; }
+    if (b.y > TY1 - BR) { b.y = TY1 - BR; b.vy = -Math.abs(b.vy) * 0.8; }
+  }
+  for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
+    const a = live[i], b = live[j];
+    if (a.in || b.in) continue;
+    const dx = b.x - a.x, dy = b.y - a.y, d = sq(dx, dy);
+    if (d >= BR * 2 || d === 0) continue;
+    const nx = dx / d, ny = dy / d, push = (BR * 2 - d) / 2;
+    a.x -= nx * push; a.y -= ny * push; b.x += nx * push; b.y += ny * push;
+    const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+    if (rv < 0) {
+      a.vx += nx * rv * 0.98; a.vy += ny * rv * 0.98; b.vx -= nx * rv * 0.98; b.vy -= ny * rv * 0.98;
+      if (firstHit == null && (a.n === 0 || b.n === 0)) firstHit = a.n === 0 ? b.n : a.n;
+      Sound.beep(700, 0.015, 'square', Math.min(0.04, -rv / 20000));
+    }
+  }
+  return balls.every(b => b.in || (b.vx === 0 && b.vy === 0));
+}
+
+// rules after the balls stop
+function settle() {
+  if (pendingSync) { applySync(pendingSync); pendingSync = null; }
+  if (S.human && S.host) S.send('sync', { b: balls.map(b => [b.x, b.y, b.in ? 1 : 0]) });
+  const p = turn, mine = groups[p];
+  const cueIn = pottedThisShot.includes(0), eightIn = pottedThisShot.includes(8);
+  const myLeft = g => balls.filter(b => !b.in && groupOf(b.n) === g).length;
+  let foul = cueIn || firstHit == null;
+  if (mine && firstHit != null && groupOf(firstHit) !== mine && !(groupOf(firstHit) === 'eight' && myLeft(mine) === 0)) foul = true;
+  if (eightIn) {
+    const cleared = mine && myLeft(mine) === 0;
+    return finish(cleared && !cueIn ? p : 1 - p, cleared && !cueIn ? 'potted the 8-ball' : 'potted the 8-ball too early');
+  }
+  // first legal pot decides the groups
+  const pots = pottedThisShot.filter(n => n && n !== 8);
+  if (!mine && pots.length && !foul) { groups[p] = groupOf(pots[0]); groups[1 - p] = groups[p] === 'solids' ? 'stripes' : 'solids'; }
+  const ownPot = pots.some(n => groupOf(n) === groups[p]);
+  let note = '';
+  if (cueIn) { balls[0].in = true; note = 'Scratch!'; }
+  if (foul) { turn = 1 - turn; inHand = true; note = note || 'Foul!'; if (balls[0].in) { balls[0].in = false; balls[0].x = TX0 + (TX1 - TX0) * 0.25; balls[0].y = H / 2; } }
+  else if (!ownPot) turn = 1 - turn;
+  else note = 'Nice pot — shoot again!';
+  phase = 'aim';
+  status(note);
+  if (early && turn !== me) { const d = early; early = null; shoot(d, true); return; }
+  early = null;
+  if (S.ai && turn !== me) ai();
+}
+
+function finish(w, how) {
+  over = true; phase = 'over';
+  status();
+  const title = S.mode === 'local' ? `Player ${w + 1} wins! 🎱` : w === me ? 'You win! 🎱🏆' : `${S.opp.name} wins`;
+  msg.textContent = `${title} (${w === turn ? '' : 'opponent '}${how})`;
+  setTimeout(() => Lobby.end(S, { result: w === me ? 1 : 0, title, detail: how }), 1200);
+}
+
+// computer: tries every target ball into every pocket with the ghost-ball method
+function ai() {
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round || over || phase !== 'aim' || turn === me) return;
+    const cue = balls[0], mine = groups[turn];
+    if (inHand) { cue.x = TX0 + (TX1 - TX0) * 0.25; cue.y = H / 2 + rand(-60, 60); cue.in = false; }
+    const targets = balls.filter(b => !b.in && b.n && (mine ? groupOf(b.n) === mine || (groupOf(b.n) === 'eight' && !balls.some(o => !o.in && groupOf(o.n) === mine)) : b.n !== 8));
+    let best = null, bv = -Infinity;
+    const clear = (x0, y0, x1, y1, skip) => balls.every(o => o.in || o === skip || o.n === 0 || (() => { const dx = x1 - x0, dy = y1 - y0, l = sq(dx, dy), t = clamp(((o.x - x0) * dx + (o.y - y0) * dy) / (l * l), 0, 1); return sq(o.x - x0 - dx * t, o.y - y0 - dy * t) > BR * 2.1; })());
+    for (const t of targets) for (const [px, py] of POCKETS) {
+      const dx = px - t.x, dy = py - t.y, d = sq(dx, dy);
+      const gx = t.x - dx / d * BR * 2, gy = t.y - dy / d * BR * 2;
+      const ax = gx - cue.x, ay = gy - cue.y, ad = sq(ax, ay);
+      const cut = Math.acos(clamp((ax * dx + ay * dy) / (ad * d), -1, 1));
+      if (cut > 1.2) continue;
+      let v = -cut * 60 - d * 0.05 - ad * 0.03;
+      if (!clear(cue.x, cue.y, gx, gy, t)) v -= 80;
+      if (!clear(t.x, t.y, px, py, t)) v -= 60;
+      if (v > bv) { bv = v; best = { a: Math.atan2(ay, ax), p: clamp(30 + (d + ad) * 0.06, 30, 95) }; }
+    }
+    if (!best) { const t = targets[0] || balls.find(b => !b.in && b.n); best = { a: Math.atan2(t.y - cue.y, t.x - cue.x), p: 60 }; }
+    const err = (1 - S.level) * 0.09 + 0.004;
+    shoot({ a: best.a + rand(-err, err), p: best.p * rand(0.92, 1.08), cx: cue.x, cy: cue.y });
+  }, S.delay(700, 1200));
+}
+
+function ballDraw(b) {
+  ctx.fillStyle = BCOL[b.n];
+  ctx.beginPath(); ctx.arc(b.x, b.y, BR, 0, 7); ctx.fill();
+  if (b.n > 8) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(b.x, b.y, BR, -0.6, 0.6); ctx.arc(b.x, b.y, BR, Math.PI - 0.6, Math.PI + 0.6); ctx.fill(); }
+  if (b.n) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(b.x, b.y, 4.5, 0, 7); ctx.fill(); ctx.fillStyle = '#111'; ctx.font = 'bold 6px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(b.n, b.x, b.y + 0.5); }
+  ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.arc(b.x - 3, b.y - 3, 3, 0, 7); ctx.fill();
+}
+
+let last = 0, pointer = null;
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (S && phase === 'roll') { acc += dt / 1000; while (acc >= FIX && phase === 'roll') { acc -= FIX; if (step()) settle(); } }
+  ctx.fillStyle = '#5b3416'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#166534'; ctx.fillRect(TX0, TY0, TX1 - TX0, TY1 - TY0);
+  ctx.fillStyle = '#000';
+  POCKETS.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, PR - 3, 0, 7); ctx.fill(); });
+  ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.beginPath(); ctx.moveTo(TX0 + (TX1 - TX0) * 0.25, TY0); ctx.lineTo(TX0 + (TX1 - TX0) * 0.25, TY1); ctx.stroke();
+  if (balls) {
+    balls.forEach(b => { if (!b.in) ballDraw(b); });
+    // potted balls along the bottom
+    balls.filter(b => b.in && b.n).forEach((b, i) => ballDraw({ n: b.n, x: 60 + i * 24, y: H - 12 }));
+    const cue = balls[0];
+    if (myTurn() && !cue.in) {
+      const power = pullPower();
+      // aim line with a ghost ball where it first touches something
+      const dx = Math.cos(aimA), dy = Math.sin(aimA);
+      let len = 900;
+      for (const b of balls) { if (b.in || b.n === 0) continue; const ox = b.x - cue.x, oy = b.y - cue.y, proj = ox * dx + oy * dy; if (proj <= 0) continue; const perp = Math.abs(ox * dy - oy * dx); if (perp < BR * 2) { const back = Math.sqrt(BR * BR * 4 - perp * perp); len = Math.min(len, proj - back); } }
+      ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.setLineDash([6, 6]); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(cue.x, cue.y); ctx.lineTo(cue.x + dx * len, cue.y + dy * len); ctx.stroke(); ctx.setLineDash([]);
+      if (len < 900) { ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.beginPath(); ctx.arc(cue.x + dx * len, cue.y + dy * len, BR, 0, 7); ctx.stroke(); }
+      // cue stick
+      const off = 14 + power * 1.2;
+      ctx.strokeStyle = '#d6a76c'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(cue.x - dx * off, cue.y - dy * off); ctx.lineTo(cue.x - dx * (off + 260), cue.y - dy * (off + 260)); ctx.stroke();
+      if (pull) { ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.fillRect(W / 2 - 100, 8, 200, 14); ctx.fillStyle = power > 70 ? '#ef4444' : '#22c55e'; ctx.fillRect(W / 2 - 100, 8, power * 2, 14); ctx.fillStyle = '#fff'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText(power > 3 ? `Power ${Math.round(power)} — release to shoot` : 'Drag to set power (drag back to cancel)', W / 2, 19); }
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+// aim: hover (mouse) or touch where you want to shoot; then drag any way to set the power and let go
+cv.addEventListener('pointermove', e => {
+  if (!myTurn()) return;
+  const p = canvasPoint(cv, e), cue = balls[0];
+  if (pull) { pull.x = p.x; pull.y = p.y; }
+  else if (e.pointerType === 'mouse') aimA = Math.atan2(p.y - cue.y, p.x - cue.x);
+});
+cv.addEventListener('pointerdown', e => {
+  if (!myTurn()) return;
+  const p = canvasPoint(cv, e), cue = balls[0];
+  if (inHand && sq(p.x - cue.x, p.y - cue.y) > 30 && p.x > TX0 && p.x < TX1 && p.y > TY0 && p.y < TY1 && balls.every(b => b.in || b.n === 0 || sq(b.x - p.x, b.y - p.y) > BR * 2.2)) { cue.x = p.x; cue.y = p.y; cue.in = false; return; }
+  aimA = Math.atan2(p.y - cue.y, p.x - cue.x);
+  pull = { x: p.x, y: p.y, sx: p.x, sy: p.y };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointerup', () => {
+  if (!pull || !myTurn()) { pull = null; return; }
+  const power = pullPower();
+  pull = null;
+  if (power > 3) shoot({ a: aimA, p: Math.round(power * 10) / 10, cx: balls[0].x, cy: balls[0].y });
+});
+const pullPower = () => (pull ? clamp(sq(pull.x - pull.sx, pull.y - pull.sy) * 0.6, 0, 100) : 0);
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(loop);
+Lobby.open({ game: 'pool', title: '🎱 8-Ball Pool', local: true, onStart: begin });
+</script>
+</body>
+</html>
