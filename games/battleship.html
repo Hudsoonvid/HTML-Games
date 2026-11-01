@@ -24,23 +24,26 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>🚢 Battleship</h1>
-  <div class="stats">Wins <b id="w">0</b> Losses <b id="l">0</b></div>
+  <div class="stats" id="stat"></div>
 </header>
 <div class="controls">
   <button class="btn alt" id="random">🔀 Reposition my fleet</button>
-  <button class="btn" id="new">New game</button>
+  <button class="btn alt" id="menu">Change mode</button>
 </div>
+<div class="vsbar" id="vs"></div>
 <div class="msg" id="msg"></div>
 <div class="boards">
-  <div class="side"><h3>Enemy waters — fire here</h3><div class="grid" id="enemy"></div><div class="fleet" id="efleet"></div></div>
+  <div class="side"><h3 id="enemyTitle">Enemy waters — fire here</h3><div class="grid" id="enemy"></div><div class="fleet" id="efleet"></div></div>
   <div class="side"><h3>Your fleet</h3><div class="grid" id="mine"></div><div class="fleet" id="mfleet"></div></div>
 </div>
-<p class="help">Click a square in enemy waters to fire. The computer fires back after each of your shots. Sink all five enemy ships first: Carrier (5), Battleship (4), Cruiser (3), Submarine (3), Destroyer (2). You can reposition your fleet until you fire your first shot.</p>
+<p class="help">Play online or vs the computer. Take turns firing at enemy waters. Sink all five enemy ships first: Carrier (5), Battleship (4), Cruiser (3), Submarine (3), Destroyer (2). You can reposition your fleet until you fire your first shot.</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const SHIPS = [['Carrier', 5], ['Battleship', 4], ['Cruiser', 3], ['Submarine', 3], ['Destroyer', 2]];
-let me, foe, started, over, busy, ai, gameId = 0;
-let rec = Store.get('battleship-record', { w: 0, l: 0 });
+// me: my fleet + the shots fired at it. foe: what I know about the enemy (their fleet only in computer games).
+let S, me, foe, myTurn, over, started, ai;
+const $ = id => document.getElementById(id);
 
 function placeFleet() {
   const grid = Array(100).fill(-1), ships = [];
@@ -56,77 +59,87 @@ function placeFleet() {
   });
   return { grid, ships, shots: new Set() };
 }
-
-function newGame() {
-  gameId++;
-  me = placeFleet();
-  foe = placeFleet();
-  started = false; over = false; busy = false;
-  ai = { targets: [], hits: [] };
-  document.getElementById('msg').textContent = 'Fire when ready, captain!';
-  render();
-}
+// the enemy board as I see it: results of my shots
+const blankView = () => ({ shots: new Map(), sunk: [], sunkNames: [] });
 
 function render() {
-  const draw = (el, side, reveal) => {
-    el.innerHTML = '';
-    for (let i = 0; i < 100; i++) {
-      const b = document.createElement('button');
-      b.className = 'cell';
-      const ship = side.grid[i] >= 0 ? side.ships[side.grid[i]] : null;
-      const sunk = ship && ship.hits === ship.cells.length;
-      if (ship && (reveal || sunk)) b.classList.add('ship');
-      if (sunk) b.classList.add('sunk');
-      if (side.shots.has(i)) b.classList.add('shot', ...(ship ? ['hit'] : []));
-      if (side === foe) b.onclick = () => fire(i);
-      el.appendChild(b);
-    }
-  };
-  draw(document.getElementById('enemy'), foe, over);
-  draw(document.getElementById('mine'), me, true);
-  const fleet = side => side.ships.map(s => `<span class="${s.hits === s.cells.length ? 'gone' : ''}">${s.name} (${s.cells.length})</span>`).join('');
-  document.getElementById('efleet').innerHTML = fleet(foe);
-  document.getElementById('mfleet').innerHTML = fleet(me);
-  document.getElementById('w').textContent = rec.w;
-  document.getElementById('l').textContent = rec.l;
-  document.getElementById('random').disabled = started;
+  const mineEl = $('mine'), enemyEl = $('enemy');
+  mineEl.innerHTML = ''; enemyEl.innerHTML = '';
+  for (let i = 0; i < 100; i++) {
+    const b = document.createElement('button');
+    b.className = 'cell';
+    const shipIdx = me.grid[i], ship = shipIdx >= 0 ? me.ships[shipIdx] : null;
+    if (ship) b.classList.add('ship');
+    if (ship && ship.hits === ship.cells.length) b.classList.add('sunk');
+    if (me.shots.has(i)) b.classList.add('shot', ...(ship ? ['hit'] : []));
+    mineEl.appendChild(b);
+    const e = document.createElement('button');
+    e.className = 'cell';
+    const r = foe.shots.get(i);
+    if (r) e.classList.add('shot', ...(r !== 'miss' ? ['hit'] : []));
+    if (foe.sunk.includes(i)) e.classList.add('ship', 'sunk');
+    if (over && foe.fleet && foe.fleet.grid[i] >= 0 && !foe.sunk.includes(i)) e.classList.add('ship');
+    e.onclick = () => fire(i);
+    enemyEl.appendChild(e);
+  }
+  const fleet = (names, lost) => SHIPS.map(([n, l]) => `<span class="${lost.includes(n) ? 'gone' : ''}">${n} (${l})</span>`).join('');
+  $('efleet').innerHTML = fleet(SHIPS.map(x => x[0]), foe.sunkNames);
+  $('mfleet').innerHTML = fleet(SHIPS.map(x => x[0]), me.ships.filter(s => s.hits === s.cells.length).map(s => s.name));
+  $('random').disabled = started;
+  $('vs').innerHTML = `<b>${S.me.name}</b> vs <b>${S.opp.name}</b> ${over ? '' : `<span class="turn">${myTurn ? 'Your turn' : S.opp.name + "'s turn"}</span>`}`;
+  $('enemyTitle').textContent = `${S.opp.name}'s waters — fire here`;
+  $('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : 'Online';
 }
 
-// returns 'miss' | 'hit' | ship name if sunk
-function shoot(side, i) {
-  side.shots.add(i);
-  const idx = side.grid[i];
-  if (idx < 0) return 'miss';
-  const s = side.ships[idx];
-  s.hits++;
-  return s.hits === s.cells.length ? s.name : 'hit';
+// apply a shot at my fleet; returns what the shooter learns
+function takeShot(i) {
+  started = true;
+  me.shots.add(i);
+  const idx = me.grid[i];
+  if (idx < 0) return { i, r: 'miss' };
+  const ship = me.ships[idx];
+  ship.hits++;
+  if (ship.hits < ship.cells.length) return { i, r: 'hit' };
+  return { i, r: 'sunk', name: ship.name, cells: ship.cells, lost: me.ships.every(s => s.hits === s.cells.length) };
 }
 
-const allSunk = side => side.ships.every(s => s.hits === s.cells.length);
+// what I learn about the enemy board from a shot result
+function learn(res) {
+  foe.shots.set(res.i, res.r);
+  if (res.r === 'sunk') { foe.sunk.push(...res.cells); foe.sunkNames.push(res.name); }
+  const msg = $('msg');
+  msg.textContent = res.r === 'miss' ? 'You missed.' : res.r === 'hit' ? 'Hit!' : `You sank their ${res.name}! 🔥`;
+  Sound.beep(res.r === 'miss' ? 220 : 600, res.r === 'miss' ? 0.08 : 0.15, res.r === 'miss' ? 'sine' : 'square', 0.05);
+  if (res.lost) return finish(true);
+  myTurn = false;
+  render();
+  if (S.ai) { const r = S.round; setTimeout(() => { if (r === S.round && !over) aiTurn(); }, S.delay(350, 800)); }
+}
 
 function fire(i) {
-  if (over || busy || foe.shots.has(i)) return;
+  if (over || !myTurn || foe.shots.has(i) || foe.waiting) return;
   started = true;
-  const r = shoot(foe, i);
-  const msg = document.getElementById('msg');
-  msg.textContent = r === 'miss' ? 'You missed.' : r === 'hit' ? 'Hit!' : `You sank their ${r}! 🔥`;
-  Sound.beep(r === 'miss' ? 220 : 600, r === 'miss' ? 0.08 : 0.15, r === 'miss' ? 'sine' : 'square', 0.05);
-  if (allSunk(foe)) {
-    over = true;
-    rec.w++;
-    Store.set('battleship-record', rec);
-    msg.textContent = 'Victory! You sank the entire enemy fleet. 🎉';
-    return render();
-  }
-  render();
-  busy = true;
-  const id = gameId;
-  setTimeout(() => { if (id === gameId) { aiTurn(); busy = false; } }, 550);
+  if (S.ai) return learn(foeShot(i));
+  foe.waiting = true;
+  S.send('fire', { i });
 }
 
+// computer side: its own hidden fleet
+function foeShot(i) {
+  const f = foe.fleet;
+  f.shots.add(i);
+  const idx = f.grid[i];
+  if (idx < 0) return { i, r: 'miss' };
+  const ship = f.ships[idx];
+  ship.hits++;
+  if (ship.hits < ship.cells.length) return { i, r: 'hit' };
+  return { i, r: 'sunk', name: ship.name, cells: ship.cells, lost: f.ships.every(s => s.hits === s.cells.length) };
+}
+
+// hunt with a checkerboard, then finish off wounded ships; higher levels hunt smarter
 function aiPick() {
   const open = i => i >= 0 && i < 100 && !me.shots.has(i);
-  // target mode: extend lines of unsunk hits
+  if (Math.random() < 0.5 - S.level * 0.5) return pick([...Array(100).keys()].filter(open));
   const live = ai.hits.filter(i => { const s = me.ships[me.grid[i]]; return s.hits < s.cells.length; });
   if (live.length) {
     if (live.length >= 2) {
@@ -145,30 +158,61 @@ function aiPick() {
     }));
     if (cands.length) return pick(cands);
   }
-  // hunt mode: checkerboard parity is enough to find every ship of length >= 2
   const pool = [...Array(100).keys()].filter(i => open(i) && (Math.floor(i / 10) + i % 10) % 2 === 0);
   return pool.length ? pick(pool) : pick([...Array(100).keys()].filter(open));
 }
 
 function aiTurn() {
-  if (over) return;
-  const i = aiPick();
-  const r = shoot(me, i);
-  if (r !== 'miss') ai.hits.push(i);
-  const msg = document.getElementById('msg');
-  msg.textContent += r === 'miss' ? ' The enemy missed.' : r === 'hit' ? ' The enemy hit your ship!' : ` The enemy sank your ${r}!`;
-  if (allSunk(me)) {
-    over = true;
-    rec.l++;
-    Store.set('battleship-record', rec);
-    msg.textContent = 'Your fleet has been sunk. The enemy wins.';
-  }
+  const res = takeShot(aiPick());
+  if (res.r !== 'miss') ai.hits.push(res.i);
+  incoming(res);
+}
+
+// someone fired at me
+function incoming(res) {
+  $('msg').textContent += res.r === 'miss' ? ` ${S.opp.name} missed.` : res.r === 'hit' ? ` ${S.opp.name} hit your ship!` : ` ${S.opp.name} sank your ${res.name}!`;
+  if (res.lost) return finish(false);
+  myTurn = true;
   render();
 }
 
-document.getElementById('random').onclick = () => { if (!started) { me = placeFleet(); render(); } };
-document.getElementById('new').onclick = newGame;
-newGame();
+function finish(won) {
+  over = true;
+  myTurn = false;
+  render();
+  const title = won ? 'Victory! You sank the entire enemy fleet. 🎉' : `${S.opp.name} sank your fleet`;
+  $('msg').textContent = title;
+  Sound.beep(won ? 880 : 150, 0.4, 'triangle');
+  setTimeout(() => Lobby.end(S, { result: won ? 1 : 0, title }), 1300);
+}
+
+function begin(s) {
+  S = s;
+  S.on('fire', d => {
+    if (!d || typeof d.i !== 'number' || d.i < 0 || d.i > 99 || me.shots.has(d.i) || myTurn || over) return;
+    const res = takeShot(d.i);
+    S.send('result', res);
+    incoming(res);
+  });
+  S.on('result', d => { if (d && foe.waiting) { foe.waiting = false; learn(d); } });
+  S.startRound(() => ({ first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    me = placeFleet();
+    foe = blankView();
+    if (S.ai) foe.fleet = placeFleet();
+    ai = { hits: [] };
+    over = false; started = false;
+    myTurn = cfg.first === S.seat;
+    $('msg').textContent = myTurn ? 'Fire when ready, captain!' : `${S.opp.name} fires first…`;
+    render();
+    if (S.ai && !myTurn) { const r = S.round; setTimeout(() => { if (r === S.round) aiTurn(); }, S.delay(400, 800)); }
+  });
+}
+
+$('random').onclick = () => { if (!started && me) { me = placeFleet(); render(); } };
+$('menu').onclick = () => Lobby.open();
+me = placeFleet(); foe = blankView();
+Lobby.open({ game: 'battleship', title: '🚢 Battleship', local: false, onStart: begin });
 </script>
 </body>
 </html>

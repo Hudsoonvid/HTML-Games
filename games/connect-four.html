@@ -10,50 +10,32 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>🔴 Connect Four 🟡</h1>
-  <div class="stats">You <b id="w">0</b> CPU <b id="l">0</b> Draws <b id="d">0</b></div>
+  <div class="stats" id="stat"></div>
 </header>
-<div class="controls">
-  <select id="mode">
-    <option value="2">vs CPU · Easy</option>
-    <option value="5" selected>vs CPU · Medium</option>
-    <option value="8">vs CPU · Hard</option>
-    <option value="0">2 players</option>
-  </select>
-  <button class="btn" id="new">New game</button>
-</div>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
 <div class="msg" id="msg"></div>
 <div class="stage">
   <canvas id="c" class="game" width="560" height="540"></canvas>
 </div>
-<p class="help">Drop discs into the columns (click, or keys <kbd>1</kbd>–<kbd>7</kbd>, or <kbd>←</kbd><kbd>→</kbd> + <kbd>Space</kbd>). Line up four of yours horizontally, vertically or diagonally.</p>
+<p class="help">Drop discs into the columns (tap, keys <kbd>1</kbd>–<kbd>7</kbd>, or <kbd>←</kbd><kbd>→</kbd> + <kbd>Space</kbd>). Line up four horizontally, vertically or diagonally. Play online, vs the computer or with a friend.</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
-const C = 7, R = 6, S = 80, TOP = 60;
-let gameId = 0, board, turn, over, winLine, hoverCol = 3, drop = null, rec = Store.get('c4-record', { w: 0, l: 0, d: 0 }), busy = false;
-const depth = () => +document.getElementById('mode').value;
-
-function newGame() {
-  gameId++;
-  board = Array.from({ length: R }, () => Array(C).fill(0));
-  turn = 1;
-  over = false;
-  winLine = null;
-  drop = null;
-  busy = false;
-  status();
-  record();
-}
-
-function record() {
-  document.getElementById('w').textContent = rec.w;
-  document.getElementById('l').textContent = rec.l;
-  document.getElementById('d').textContent = rec.d;
-}
+const C = 7, R = 6, CS = 80, TOP = 60;
+let S, board, turn, over, winLine, hoverCol = 3, drop = null, busy = false, me = 1;
+// red (1) always drops first; me is this player's colour
+const myTurn = () => S && (S.mode === 'local' || turn === me);
+// computer strength: search depth 1..8, plus some randomness on the easy end
+const aiDepth = () => 1 + Math.round(S.level * 7);
 
 function status() {
+  const col = p => (p === 1 ? '🔴 Red' : '🟡 Yellow');
+  document.getElementById('vs').innerHTML = S.mode === 'local' ? '<b>🔴 Player 1</b> vs <b>🟡 Player 2</b>' : `<b>${S.me.name}</b> ${me === 1 ? '🔴' : '🟡'} vs <b>${S.opp.name}</b> ${me === 1 ? '🟡' : '🔴'}`;
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : S.mode === 'online' ? 'Online' : '2 players';
   if (over) return;
-  msg.textContent = depth() === 0 ? `${turn === 1 ? 'Red' : 'Yellow'} to move` : turn === 1 ? 'Your move (red)' : 'CPU is thinking…';
+  msg.textContent = S.mode === 'local' ? `${col(turn)} to move` : turn === me ? `Your move (${col(me)})` : `${S.opp.name} is thinking…`;
 }
 
 const rowFor = (b, c) => { for (let r = R - 1; r >= 0; r--) if (!b[r][c]) return r; return -1; };
@@ -134,26 +116,28 @@ function negamax(b, d, alpha, beta, player) {
 }
 
 function cpuChoose() {
-  const d = depth();
+  const ai = 3 - me, d = aiDepth();
   let bestC = ORDER.find(c => rowFor(board, c) >= 0), bestV = -Infinity;
   for (const c of ORDER) {
     const r = rowFor(board, c);
     if (r < 0) continue;
-    board[r][c] = 2;
-    let v = winsAt(board, r, c, 2) ? 1e6 : -negamax(board, d - 1, -Infinity, Infinity, 1);
+    board[r][c] = ai;
+    let v = winsAt(board, r, c, ai) ? 1e6 : -negamax(board, d - 1, -Infinity, Infinity, me);
     board[r][c] = 0;
-    if (d <= 2) v += rand(-20, 20);
+    // weaker levels sometimes misjudge a move
+    v += rand(-1, 1) * (1 - S.level) * 120;
     if (v > bestV) { bestV = v; bestC = c; }
   }
   return bestC;
 }
 
-function play(c) {
+function play(c, fromNet) {
   if (over || busy || drop) return;
   const r = rowFor(board, c);
   if (r < 0) return;
   busy = true;
-  drop = { c, r, y: TOP - S / 2, vy: 0, p: turn };
+  if (!fromNet && S.human && turn === me) S.send('move', { c });
+  drop = { c, r, y: TOP - CS / 2, vy: 0, p: turn };
 }
 
 function landed() {
@@ -167,80 +151,94 @@ function landed() {
     over = true;
     busy = false;
     winLine = w && w.line;
-    const vs = depth() !== 0;
-    if (w) {
-      if (vs) { if (w.p === 1) rec.w++; else rec.l++; }
-      msg.textContent = vs ? (w.p === 1 ? 'You win! 🎉' : 'The CPU wins.') : `${w.p === 1 ? 'Red' : 'Yellow'} wins!`;
-      Sound.beep(w.p === 1 || !vs ? 880 : 180, 0.35, 'triangle');
-    } else { if (vs) rec.d++; msg.textContent = "It's a draw!"; }
-    Store.set('c4-record', rec);
-    record();
+    const title = !w ? "It's a draw!" : S.mode === 'local' ? `${w.p === 1 ? 'Red' : 'Yellow'} wins!` : w.p === me ? 'You win! 🎉' : `${S.opp.name} wins`;
+    msg.textContent = title;
+    Sound.beep(!w || w.p === me || S.mode === 'local' ? 880 : 180, 0.35, 'triangle');
+    setTimeout(() => Lobby.end(S, { result: !w ? 0.5 : w.p === me ? 1 : 0, title }), 1100);
     return;
   }
   turn = 3 - turn;
+  busy = false;
   status();
-  if (depth() !== 0 && turn === 2) { const id = gameId; setTimeout(() => { if (id !== gameId) return; busy = false; play(cpuChoose()); }, 60); }
-  else busy = false;
+  if (S.ai && turn !== me) aiTurn();
+}
+
+function aiTurn() {
+  busy = true;
+  const round = S.round;
+  setTimeout(() => { if (round !== S.round || over) return; busy = false; play(cpuChoose()); }, S.delay(150, 450));
+}
+
+function begin(s) {
+  S = s;
+  S.on('move', d => { if (d && d.c >= 0 && d.c < C && turn !== me) play(d.c, true); });
+  S.startRound(() => ({ red: S.lastRed == null ? randInt(0, 1) : 1 - S.lastRed }), cfg => {
+    S.lastRed = cfg.red;
+    board = Array.from({ length: R }, () => Array(C).fill(0));
+    turn = 1; over = false; winLine = null; drop = null; busy = false;
+    me = S.mode === 'local' ? 1 : cfg.red === S.seat ? 1 : 2;
+    status();
+    if (S.ai && turn !== me) aiTurn();
+  });
 }
 
 function draw() {
   ctx.fillStyle = '#0b0c18';
   ctx.fillRect(0, 0, cv.width, cv.height);
   const colorOf = p => (p === 1 ? '#ef4444' : '#facc15');
-  if (!over && !drop && (depth() === 0 || turn === 1)) {
+  if (!over && !drop && myTurn()) {
     ctx.globalAlpha = 0.5;
     ctx.fillStyle = colorOf(turn);
-    ctx.beginPath(); ctx.arc(hoverCol * S + S / 2, TOP / 2, S * 0.38, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(hoverCol * CS + CS / 2, TOP / 2, CS * 0.38, 0, 7); ctx.fill();
     ctx.globalAlpha = 1;
   }
   if (drop) {
     drop.vy += 1.4;
     drop.y += drop.vy;
-    const ty = TOP + drop.r * S + S / 2;
+    const ty = TOP + drop.r * CS + CS / 2;
     if (drop.y >= ty) { drop.y = ty; landed(); }
   }
-  if (drop) { ctx.fillStyle = colorOf(drop.p); ctx.beginPath(); ctx.arc(drop.c * S + S / 2, drop.y, S * 0.38, 0, 7); ctx.fill(); }
+  if (drop) { ctx.fillStyle = colorOf(drop.p); ctx.beginPath(); ctx.arc(drop.c * CS + CS / 2, drop.y, CS * 0.38, 0, 7); ctx.fill(); }
   // board with holes
   ctx.fillStyle = '#1d4ed8';
   ctx.beginPath();
-  ctx.roundRect(0, TOP, C * S, R * S, 14);
-  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) { ctx.moveTo(c * S + S / 2 + S * 0.38, TOP + r * S + S / 2); ctx.arc(c * S + S / 2, TOP + r * S + S / 2, S * 0.38, 0, 7, true); }
+  ctx.roundRect(0, TOP, C * CS, R * CS, 14);
+  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) { ctx.moveTo(c * CS + CS / 2 + CS * 0.38, TOP + r * CS + CS / 2); ctx.arc(c * CS + CS / 2, TOP + r * CS + CS / 2, CS * 0.38, 0, 7, true); }
   ctx.fill('evenodd');
   for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
     const p = board[r][c];
     if (!p) continue;
     ctx.fillStyle = colorOf(p);
-    ctx.beginPath(); ctx.arc(c * S + S / 2, TOP + r * S + S / 2, S * 0.38, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(c * CS + CS / 2, TOP + r * CS + CS / 2, CS * 0.38, 0, 7); ctx.fill();
     ctx.fillStyle = 'rgba(0,0,0,.15)';
-    ctx.beginPath(); ctx.arc(c * S + S / 2, TOP + r * S + S / 2, S * 0.26, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(c * CS + CS / 2, TOP + r * CS + CS / 2, CS * 0.26, 0, 7); ctx.fill();
   }
   if (winLine) {
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 8;
     ctx.lineCap = 'round';
     const [a, z] = [winLine[0], winLine[3]];
-    ctx.beginPath(); ctx.moveTo(a[1] * S + S / 2, TOP + a[0] * S + S / 2); ctx.lineTo(z[1] * S + S / 2, TOP + z[0] * S + S / 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(a[1] * CS + CS / 2, TOP + a[0] * CS + CS / 2); ctx.lineTo(z[1] * CS + CS / 2, TOP + z[0] * CS + CS / 2); ctx.stroke();
   }
   requestAnimationFrame(draw);
 }
 
-cv.addEventListener('pointermove', e => { hoverCol = clamp(Math.floor(canvasPoint(cv, e).x / S), 0, C - 1); });
+cv.addEventListener('pointermove', e => { hoverCol = clamp(Math.floor(canvasPoint(cv, e).x / CS), 0, C - 1); });
 cv.addEventListener('pointerdown', e => {
-  hoverCol = clamp(Math.floor(canvasPoint(cv, e).x / S), 0, C - 1);
-  if (depth() === 0 || turn === 1) play(hoverCol);
+  hoverCol = clamp(Math.floor(canvasPoint(cv, e).x / CS), 0, C - 1);
+  if (myTurn()) play(hoverCol);
 });
 document.addEventListener('keydown', e => {
   const n = +e.key;
-  if (n >= 1 && n <= 7 && (depth() === 0 || turn === 1)) play(n - 1);
+  if (n >= 1 && n <= 7 && myTurn()) play(n - 1);
   if (e.key === 'ArrowLeft') hoverCol = Math.max(0, hoverCol - 1);
   if (e.key === 'ArrowRight') hoverCol = Math.min(C - 1, hoverCol + 1);
-  if ((e.key === ' ' || e.key === 'ArrowDown') && (depth() === 0 || turn === 1)) play(hoverCol);
-  if (e.key === 'Enter' && over) newGame();
+  if ((e.key === ' ' || e.key === 'ArrowDown') && myTurn()) play(hoverCol);
 });
-document.getElementById('new').onclick = newGame;
-document.getElementById('mode').onchange = newGame;
-newGame();
+document.getElementById('menu').onclick = () => Lobby.open();
+board = Array.from({ length: R }, () => Array(C).fill(0));
 draw();
+Lobby.open({ game: 'connect-four', title: '🔴 Connect Four 🟡', local: true, onStart: begin });
 </script>
 </body>
 </html>

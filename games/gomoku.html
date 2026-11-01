@@ -10,35 +10,34 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>⚫ Gomoku</h1>
-  <div class="stats">You <b id="w">0</b> CPU <b id="l">0</b></div>
+  <div class="stats" id="stat"></div>
 </header>
 <div class="controls">
-  <select id="diff"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option><option value="2p">2 players</option></select>
-  <button class="btn" id="new">New game</button>
   <button class="btn alt" id="undo">↶ Undo</button>
+  <button class="btn alt" id="menu">Change mode</button>
 </div>
+<div class="vsbar" id="vs"></div>
 <div class="msg" id="msg"></div>
 <div class="stage">
   <canvas id="c" class="game" width="600" height="600"></canvas>
 </div>
-<p class="help">Five in a row wins — horizontally, vertically or diagonally. You play black and move first. Click an intersection to place a stone.</p>
+<p class="help">Five in a row wins — horizontally, vertically or diagonally. Black moves first. Tap an intersection to place a stone. Play online, vs the computer or with a friend.</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
-const N = 15, S = cv.width / (N + 1), DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
+const N = 15, CS = cv.width / (N + 1), DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
 const TABLE = [0, 1, 12, 150, 2500, 100000];
-let b, turn, over, moves, winLine, gameId = 0;
-let rec = Store.get('gomoku-record', { w: 0, l: 0 });
-const diff = () => document.getElementById('diff').value;
+let S, b, turn, over, moves, winLine, me = 1;
+// black (1) moves first; me is this player's colour
+const myTurn = () => S && !over && (S.mode === 'local' || turn === me);
 
-function newGame() {
-  gameId++;
-  b = Array.from({ length: N }, () => Array(N).fill(0));
-  turn = 1; over = false; moves = []; winLine = null;
-  showRec();
-  msg.textContent = diff() === '2p' ? 'Black to move' : 'Your move (black)';
+function status() {
+  document.getElementById('vs').innerHTML = S.mode === 'local' ? '<b>⚫ Black</b> vs <b>⚪ White</b>' : `<b>${S.me.name}</b> ${me === 1 ? '⚫' : '⚪'} vs <b>${S.opp.name}</b> ${me === 1 ? '⚪' : '⚫'}`;
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : S.mode === 'online' ? 'Online' : '2 players';
+  if (over) return;
+  msg.textContent = S.mode === 'local' ? `${turn === 1 ? 'Black' : 'White'} to move` : turn === me ? `Your move (${me === 1 ? 'black' : 'white'})` : `${S.opp.name} is thinking…`;
 }
-function showRec() { document.getElementById('w').textContent = rec.w; document.getElementById('l').textContent = rec.l; }
 
 function fiveAt(r, c, p) {
   for (const [dr, dc] of DIRS) {
@@ -73,8 +72,9 @@ function potential(r, c, p) {
   return total;
 }
 
+// weighs its own threats against yours; weaker levels add noise and defend less
 function cpuMove() {
-  const d = diff();
+  const ai = -me, L = S.level;
   if (!moves.length) return place(7, 7);
   let best = null, bv = -Infinity;
   for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
@@ -83,14 +83,15 @@ function cpuMove() {
     let near = false;
     for (let dr = -2; dr <= 2 && !near; dr++) for (let dc = -2; dc <= 2; dc++) { const rr = r + dr, cc = c + dc; if (rr >= 0 && cc >= 0 && rr < N && cc < N && b[rr][cc]) { near = true; break; } }
     if (!near) continue;
-    const atk = potential(r, c, -1), def = potential(r, c, 1);
-    let v = d === 'easy' ? atk * 0.6 + def * 0.5 + rand(0, 400) : d === 'normal' ? atk + def * 0.85 + rand(0, 30) : atk * 1.1 + def;
+    const atk = potential(r, c, ai), def = potential(r, c, me);
+    const v = atk * (0.6 + 0.5 * L) + def * (0.45 + 0.55 * L) + rand(0, (1 - L) * 500);
     if (v > bv) { bv = v; best = [r, c]; }
   }
   place(...best);
 }
 
-function place(r, c) {
+function place(r, c, fromNet) {
+  if (!fromNet && S.human && turn === me) S.send('move', { r, c });
   b[r][c] = turn;
   moves.push([r, c]);
   Sound.beep(turn === 1 ? 500 : 400, 0.05, 'triangle', 0.05);
@@ -98,20 +99,29 @@ function place(r, c) {
   if (line) {
     over = true;
     winLine = line;
-    const vs = diff() !== '2p';
-    if (vs) { if (turn === 1) rec.w++; else rec.l++; Store.set('gomoku-record', rec); showRec(); }
-    msg.textContent = vs ? (turn === 1 ? 'Five in a row — you win! 🎉' : 'The CPU got five in a row.') : `${turn === 1 ? 'Black' : 'White'} wins!`;
-    Sound.beep(turn === 1 || !vs ? 880 : 160, 0.4, 'triangle');
+    const title = S.mode === 'local' ? `${turn === 1 ? 'Black' : 'White'} wins!` : turn === me ? 'Five in a row — you win! 🎉' : `${S.opp.name} got five in a row`;
+    msg.textContent = title;
+    Sound.beep(turn === me || S.mode === 'local' ? 880 : 160, 0.4, 'triangle');
+    setTimeout(() => Lobby.end(S, { result: turn === me ? 1 : 0, title }), 1100);
     return;
   }
-  if (moves.length === N * N) { over = true; msg.textContent = 'Board full — draw!'; return; }
+  if (moves.length === N * N) { over = true; msg.textContent = 'Board full — draw!'; setTimeout(() => Lobby.end(S, { result: 0.5, title: 'Board full — draw!' }), 900); return; }
   turn = -turn;
-  if (diff() === '2p') msg.textContent = `${turn === 1 ? 'Black' : 'White'} to move`;
-  else if (turn === -1) {
-    msg.textContent = 'CPU is thinking…';
-    const id = gameId;
-    setTimeout(() => { if (id === gameId && !over) cpuMove(); }, 250);
-  } else msg.textContent = 'Your move (black)';
+  status();
+  if (S.ai && turn !== me) { const rd = S.round; setTimeout(() => { if (rd === S.round && !over) cpuMove(); }, S.delay(250, 500)); }
+}
+
+function begin(s) {
+  S = s;
+  S.on('move', d => { if (d && turn !== me && !over && d.r >= 0 && d.r < N && d.c >= 0 && d.c < N && !b[d.r][d.c]) place(d.r, d.c, true); });
+  S.startRound(() => ({ black: S.lastBlack == null ? randInt(0, 1) : 1 - S.lastBlack }), cfg => {
+    S.lastBlack = cfg.black;
+    me = S.mode === 'local' ? 1 : cfg.black === S.seat ? 1 : -1;
+    b = Array.from({ length: N }, () => Array(N).fill(0));
+    turn = 1; over = false; moves = []; winLine = null;
+    status();
+    if (S.ai && turn !== me) { const rd = S.round; setTimeout(() => { if (rd === S.round) cpuMove(); }, S.delay(250, 500)); }
+  });
 }
 
 function draw() {
@@ -120,52 +130,53 @@ function draw() {
   ctx.strokeStyle = '#7c4a1e';
   ctx.lineWidth = 1;
   for (let i = 0; i < N; i++) {
-    ctx.beginPath(); ctx.moveTo(S, S * (i + 1)); ctx.lineTo(S * N, S * (i + 1)); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(S * (i + 1), S); ctx.lineTo(S * (i + 1), S * N); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(CS, CS * (i + 1)); ctx.lineTo(CS * N, CS * (i + 1)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(CS * (i + 1), CS); ctx.lineTo(CS * (i + 1), CS * N); ctx.stroke();
   }
   ctx.fillStyle = '#7c4a1e';
-  [[3, 3], [3, 11], [7, 7], [11, 3], [11, 11]].forEach(([r, c]) => { ctx.beginPath(); ctx.arc(S * (c + 1), S * (r + 1), 4, 0, 7); ctx.fill(); });
+  [[3, 3], [3, 11], [7, 7], [11, 3], [11, 11]].forEach(([r, c]) => { ctx.beginPath(); ctx.arc(CS * (c + 1), CS * (r + 1), 4, 0, 7); ctx.fill(); });
   for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
     if (!b[r][c]) continue;
-    const x = S * (c + 1), y = S * (r + 1);
-    const g = ctx.createRadialGradient(x - 5, y - 5, 2, x, y, S * 0.45);
+    const x = CS * (c + 1), y = CS * (r + 1);
+    const g = ctx.createRadialGradient(x - 5, y - 5, 2, x, y, CS * 0.45);
     if (b[r][c] === 1) { g.addColorStop(0, '#6b7280'); g.addColorStop(1, '#030712'); }
     else { g.addColorStop(0, '#ffffff'); g.addColorStop(1, '#cbd5e1'); }
     ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, S * 0.44, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, CS * 0.44, 0, 7); ctx.fill();
   }
   const lastM = moves[moves.length - 1];
-  if (lastM) { ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.arc(S * (lastM[1] + 1), S * (lastM[0] + 1), 4, 0, 7); ctx.fill(); }
+  if (lastM) { ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.arc(CS * (lastM[1] + 1), CS * (lastM[0] + 1), 4, 0, 7); ctx.fill(); }
   if (winLine) {
     ctx.strokeStyle = '#ef4444';
     ctx.lineWidth = 5;
     ctx.lineCap = 'round';
     const pts = winLine.slice().sort((a, z) => a[0] - z[0] || a[1] - z[1]);
     const a = pts[0], z = pts[pts.length - 1];
-    ctx.beginPath(); ctx.moveTo(S * (a[1] + 1), S * (a[0] + 1)); ctx.lineTo(S * (z[1] + 1), S * (z[0] + 1)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(CS * (a[1] + 1), CS * (a[0] + 1)); ctx.lineTo(CS * (z[1] + 1), CS * (z[0] + 1)); ctx.stroke();
   }
   requestAnimationFrame(draw);
 }
 
 cv.addEventListener('pointerdown', e => {
-  if (over || (diff() !== '2p' && turn !== 1)) return;
+  if (!myTurn()) return;
   const p = canvasPoint(cv, e);
-  const c = Math.round(p.x / S) - 1, r = Math.round(p.y / S) - 1;
+  const c = Math.round(p.x / CS) - 1, r = Math.round(p.y / CS) - 1;
   if (r < 0 || c < 0 || r >= N || c >= N || b[r][c]) return;
   place(r, c);
 });
-document.getElementById('new').onclick = newGame;
-document.getElementById('diff').onchange = newGame;
+document.getElementById('menu').onclick = () => Lobby.open();
+// undo (vs computer only) takes back your stone and the computer's reply
 document.getElementById('undo').onclick = () => {
-  if (turn !== 1 && !over && diff() !== '2p') return;
-  const n = diff() === '2p' ? 1 : (moves.length && b[moves[moves.length - 1][0]][moves[moves.length - 1][1]] === -1 ? 2 : 1);
+  if (!S || S.mode !== 'cpu' || (!over && turn !== me)) return;
+  const n = moves.length && b[moves[moves.length - 1][0]][moves[moves.length - 1][1]] === -me ? 2 : 1;
   for (let k = 0; k < n && moves.length; k++) { const [r, c] = moves.pop(); b[r][c] = 0; }
-  over = false; winLine = null;
-  turn = diff() === '2p' ? (moves.length % 2 ? -1 : 1) : 1;
-  msg.textContent = 'Your move';
+  over = false; winLine = null; turn = me;
+  status();
 };
-newGame();
+b = Array.from({ length: N }, () => Array(N).fill(0));
+moves = [];
 draw();
+Lobby.open({ game: 'gomoku', title: '⚫ Gomoku', local: true, onStart: begin });
 </script>
 </body>
 </html>

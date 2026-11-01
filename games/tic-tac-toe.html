@@ -20,25 +20,20 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>❌ Tic-Tac-Toe ⭕</h1>
-  <div class="stats">X <b id="sx">0</b> O <b id="so">0</b> Draws <b id="sd">0</b></div>
+  <div class="stats" id="stat"></div>
 </header>
-<div class="controls">
-  <select id="mode">
-    <option value="easy">vs CPU · Easy</option>
-    <option value="medium">vs CPU · Medium</option>
-    <option value="hard" selected>vs CPU · Unbeatable</option>
-    <option value="2p">2 players</option>
-  </select>
-  <button class="btn" id="new">New game</button>
-</div>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
 <div class="msg" id="msg"></div>
 <div id="board"></div>
-<p class="help">Get three in a row. You are ❌ and move first; turns alternate who starts each new game. Keys <kbd>1</kbd>–<kbd>9</kbd> pick squares.</p>
+<p class="help">Get three in a row. Play online, against the computer (it gets sharper as your skill grows) or with a friend on this device. Keys <kbd>1</kbd>–<kbd>9</kbd> pick squares.</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const LINES = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]];
 const boardEl = document.getElementById('board'), msg = document.getElementById('msg');
-let gameId = 0, b, turn, over, starter = 'X', score = { X: 0, O: 0, D: 0 }, sqs = [];
+// X always moves first; mine is the mark this player uses
+let S, b, turn, over, mine = 'X', sqs = [];
 
 for (let i = 0; i < 9; i++) {
   const s = document.createElement('button');
@@ -48,60 +43,68 @@ for (let i = 0; i < 9; i++) {
   sqs.push(s);
 }
 
-const mode = () => document.getElementById('mode').value;
 function winner(bd) {
   for (const l of LINES) if (bd[l[0]] && bd[l[0]] === bd[l[1]] && bd[l[1]] === bd[l[2]]) return { p: bd[l[0]], line: l };
   return bd.every(Boolean) ? { p: 'D' } : null;
 }
 
-function minimax(bd, player, depth) {
+function minimax(bd, player, me, depth) {
   const w = winner(bd);
-  if (w) return { score: w.p === 'O' ? 10 - depth : w.p === 'X' ? depth - 10 : 0 };
-  let best = { score: player === 'O' ? -Infinity : Infinity };
+  if (w) return { score: w.p === me ? 10 - depth : w.p === 'D' ? 0 : depth - 10 };
+  let best = { score: player === me ? -Infinity : Infinity };
   for (let i = 0; i < 9; i++) {
     if (bd[i]) continue;
     bd[i] = player;
-    const r = minimax(bd, player === 'O' ? 'X' : 'O', depth + 1);
+    const r = minimax(bd, player === 'O' ? 'X' : 'O', me, depth + 1);
     bd[i] = null;
-    if (player === 'O' ? r.score > best.score : r.score < best.score) best = { score: r.score, move: i };
+    if (player === me ? r.score > best.score : r.score < best.score) best = { score: r.score, move: i };
   }
   return best;
 }
 
-function cpuMove() {
+// the stronger the level, the more often it plays the perfect move
+function aiMove() {
+  const ai = mine === 'X' ? 'O' : 'X';
   const empty = b.map((v, i) => (v ? -1 : i)).filter(i => i >= 0);
-  let m;
-  const level = mode();
-  if (level === 'easy' && Math.random() < 0.75) m = pick(empty);
-  else if (level === 'medium' && Math.random() < 0.35) m = pick(empty);
-  else m = empty.length === 9 ? pick([0, 2, 4, 6, 8]) : minimax(b.slice(), 'O', 0).move;
+  const perfect = Math.random() < 0.25 + S.level * 0.78;
+  const m = !perfect ? pick(empty) : empty.length === 9 ? pick([0, 2, 4, 6, 8]) : minimax(b.slice(), ai, ai, 0).move;
   place(m);
 }
 
-function place(i) {
+const isMyTurn = () => S.mode === 'local' || turn === mine;
+const nameOf = mark => (S.mode === 'local' ? mark : mark === mine ? 'You' : S.opp.name);
+
+function status() {
+  msg.textContent = over ? msg.textContent : S.mode === 'local' ? `${turn} to move` : isMyTurn() ? 'Your move' : `${S.opp.name} is thinking…`;
+  document.getElementById('vs').innerHTML = S.mode === 'local' ? '<b>✕ Player 1</b> vs <b>◯ Player 2</b>' : `<b>${S.me.name}</b> (${mine === 'X' ? '✕' : '◯'}) vs <b>${S.opp.name}</b> (${mine === 'X' ? '◯' : '✕'})`;
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : S.mode === 'online' ? 'Online' : '2 players';
+}
+
+function place(i, fromNet) {
+  if (over || b[i]) return;
+  const who = turn;
   b[i] = turn;
+  if (!fromNet && S.human && who === mine) S.send('move', { i });
   Sound.beep(turn === 'X' ? 520 : 400, 0.05, 'triangle', 0.04);
   turn = turn === 'X' ? 'O' : 'X';
   render();
   const w = winner(b);
   if (w) {
     over = true;
-    score[w.p]++;
-    Store.set('ttt-score', score);
     if (w.line) w.line.forEach(k => sqs[k].classList.add('win'));
-    const vsCpu = mode() !== '2p';
-    msg.textContent = w.p === 'D' ? "It's a draw!" : vsCpu ? (w.p === 'X' ? 'You win! 🎉' : 'The CPU wins.') : `${w.p} wins!`;
-    Sound.beep(w.p === 'D' ? 300 : 880, 0.25, 'triangle');
-    renderScore();
+    const draw = w.p === 'D';
+    const title = draw ? "It's a draw!" : S.mode === 'local' ? `${w.p} wins!` : w.p === mine ? 'You win! 🎉' : `${S.opp.name} wins`;
+    msg.textContent = title;
+    Sound.beep(draw ? 300 : 880, 0.25, 'triangle');
+    setTimeout(() => Lobby.end(S, { result: draw ? 0.5 : w.p === mine ? 1 : 0, title }), 900);
     return;
   }
-  msg.textContent = mode() === '2p' ? `${turn} to move` : turn === 'X' ? 'Your move' : 'CPU is thinking…';
-  if (mode() !== '2p' && turn === 'O') { const id = gameId; setTimeout(() => { if (id === gameId) cpuMove(); }, 350); }
+  status();
+  if (S.ai && turn !== mine) { const r = S.round; setTimeout(() => { if (r === S.round && !over) aiMove(); }, S.delay(250, 600)); }
 }
 
 function humanMove(i) {
-  if (over || b[i]) return;
-  if (mode() !== '2p' && turn === 'O') return;
+  if (!S || over || b[i] || !isMyTurn()) return;
   place(i);
 }
 
@@ -111,33 +114,28 @@ function render() {
     sqs[i].innerHTML = v ? `<span>${v === 'X' ? '✕' : '◯'}</span>` : '';
   });
 }
-function renderScore() {
-  document.getElementById('sx').textContent = score.X;
-  document.getElementById('so').textContent = score.O;
-  document.getElementById('sd').textContent = score.D;
+
+function begin(s) {
+  S = s;
+  S.on('move', d => { if (d && d.i >= 0 && d.i < 9 && turn !== mine) place(d.i, true); });
+  // whoever is X moves first; alternate between rounds
+  S.startRound(() => ({ x: S.lastX == null ? randInt(0, 1) : 1 - S.lastX }), cfg => {
+    S.lastX = cfg.x;
+    b = Array(9).fill(null);
+    over = false;
+    turn = 'X';
+    mine = S.mode === 'local' ? 'X' : cfg.x === S.seat ? 'X' : 'O';
+    render();
+    status();
+    if (S.ai && turn !== mine) { const r = S.round; setTimeout(() => { if (r === S.round) aiMove(); }, S.delay(300, 600)); }
+  });
 }
 
-function newGame() {
-  gameId++;
-  b = Array(9).fill(null);
-  over = false;
-  turn = starter;
-  starter = starter === 'X' ? 'O' : 'X';
-  render();
-  msg.textContent = mode() === '2p' ? `${turn} to move` : turn === 'X' ? 'Your move' : 'CPU starts…';
-  if (mode() !== '2p' && turn === 'O') { const id = gameId; setTimeout(() => { if (id === gameId) cpuMove(); }, 450); }
-}
-
-score = Store.get('ttt-score', score);
-renderScore();
-document.getElementById('new').onclick = newGame;
-document.getElementById('mode').onchange = () => { starter = 'X'; newGame(); };
-document.addEventListener('keydown', e => {
-  const n = +e.key;
-  if (n >= 1 && n <= 9) humanMove(n - 1);
-  if (e.key === 'Enter' && over) newGame();
-});
-newGame();
+document.addEventListener('keydown', e => { const n = +e.key; if (n >= 1 && n <= 9) humanMove(n - 1); });
+document.getElementById('menu').onclick = () => Lobby.open();
+b = Array(9).fill(null);
+render();
+Lobby.open({ game: 'tic-tac-toe', title: '❌ Tic-Tac-Toe ⭕', local: true, onStart: begin });
 </script>
 </body>
 </html>

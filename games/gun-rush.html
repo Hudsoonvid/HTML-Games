@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gun Rush</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .shop { display: grid; gap: 8px; width: min(320px, 100%); }
+  .shop button { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🔫 Gun Rush</h1>
+  <div class="stats">Level <b id="level">1</b> Coins <b id="coins">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="700"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Drag left and right (or <kbd>←</kbd><kbd>→</kbd>) to steer. You fire automatically. Shoot gates to raise their number, then drive through the good ones. Smash blocks for coins and break as far into the multiplier wall as you can.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, HALF = 2.2, F = 330, HORIZON = 230, CAM_H = 2.4, CAM_BACK = 3.2;
+const STATS = { rate: 'Fire Rate', range: 'Range', dmg: 'Damage', multi: 'Bullets' };
+let save = Store.get('gunrush', { level: 1, coins: 0, up: { rate: 0, dmg: 0, range: 0 } });
+let run, keys = {}, last = 0, state = 'menu', pointerX = null;
+
+const upCost = k => Math.floor(30 * Math.pow(1.6, save.up[k]));
+function hud() {
+  document.getElementById('level').textContent = save.level;
+  document.getElementById('coins').textContent = save.coins;
+}
+
+function buildLevel(L) {
+  const len = 110 + L * 25;
+  const items = { gates: [], blocks: [], pickups: [] };
+  for (let z = 18; z < len - 12; z += rand(11, 16)) {
+    const r = Math.random();
+    if (r < 0.55) {
+      // a pair of gates: usually one good and one bad, both shootable
+      const types = shuffle(['rate', 'range', 'dmg', 'rate', 'dmg']);
+      [-1, 1].forEach((side, i) => {
+        const type = Math.random() < 0.12 ? 'multi' : types[i];
+        let val = type === 'multi' ? pick([1, 1, -1]) : randInt(-8 - L, 6 + Math.floor(L / 2));
+        if (val === 0) val = -2;
+        items.gates.push({ z, side, type, val, hits: 0 });
+      });
+    } else {
+      const n = randInt(1, 3);
+      for (let k = 0; k < n; k++) {
+        const hp = randInt(4, 10) * (1 + L * 0.5);
+        items.blocks.push({ z: z + k * 0.2, x: rand(-HALF + 0.6, HALF - 0.6), w: 1, hp: Math.round(hp), max: Math.round(hp) });
+      }
+    }
+    if (Math.random() < 0.6) for (let k = 0; k < 5; k++) items.pickups.push({ z: z + 5 + k * 0.8, x: Math.sin(z + k) * 1.2 });
+  }
+  // the multiplier wall at the end
+  for (let row = 0; row < 8; row++) {
+    const hp = Math.round((12 + L * 6) * (1 + row * 0.6));
+    for (let c = 0; c < 3; c++) items.blocks.push({ z: len + row * 2, x: -HALF + 0.73 + c * 1.47, w: 1.4, hp, max: hp, wall: row + 1 });
+  }
+  return { len, ...items };
+}
+
+function startRun() {
+  const L = save.level;
+  run = {
+    L, z: 0, x: 0, speed: 6.5, coins: 0, fireT: 0, bullets: [], fx: [], ended: false,
+    rate: 3 + save.up.rate * 0.6, dmg: 1 + save.up.dmg, range: 9 + save.up.range * 1.5, multi: 1,
+    ...buildLevel(L)
+  };
+  state = 'play';
+  overlay(ov, null);
+}
+
+function project(x, y, z) {
+  const dz = z - (run.z - CAM_BACK);
+  if (dz < 0.3) return null;
+  const k = F / dz;
+  return { x: W / 2 + x * k, y: HORIZON + (CAM_H - y) * k, k };
+}
+
+function endRun(reason, wallRows) {
+  if (run.ended) return;
+  run.ended = true;
+  state = 'over';
+  const mult = Math.max(1, wallRows);
+  const earned = run.coins * mult;
+  save.coins += earned;
+  const cleared = wallRows >= 8;
+  if (wallRows >= 3) save.level++;
+  Store.set('gunrush', save);
+  hud();
+  Sound.beep(wallRows >= 3 ? 880 : 200, 0.3, 'triangle');
+  showShop(`<h2>${cleared ? 'Wall destroyed! 🏆' : wallRows >= 3 ? `Level complete — ×${mult}!` : reason}</h2>
+    <p>${run.coins} coins × ${mult} = <b>${earned}</b></p>${wallRows < 3 ? '<p>Break at least 3 rows of the wall to reach the next level.</p>' : ''}`);
+}
+
+function showShop(head) {
+  const row = k => `<button class="btn alt" data-k="${k}" ${save.coins < upCost(k) ? 'disabled' : ''}><span>${STATS[k]} · lv ${save.up[k]}</span><span>🪙 ${upCost(k)}</span></button>`;
+  overlay(ov, `${head}<div class="shop"><p>Upgrades (you have 🪙 ${save.coins})</p>${row('rate')}${row('dmg')}${row('range')}<button class="btn" id="go">▶ Play level ${save.level}</button></div>`);
+  ov.querySelectorAll('[data-k]').forEach(b => b.onclick = () => {
+    const k = b.dataset.k;
+    if (save.coins < upCost(k)) return;
+    save.coins -= upCost(k);
+    save.up[k]++;
+    Store.set('gunrush', save);
+    hud();
+    Sound.beep(700, 0.08, 'triangle');
+    showShop(head);
+  });
+  ov.querySelector('#go').onclick = startRun;
+}
+
+function applyGate(g) {
+  const v = g.val;
+  if (g.type === 'rate') run.rate = Math.max(1, run.rate + v * 0.25);
+  if (g.type === 'range') run.range = Math.max(4, run.range + v * 0.6);
+  if (g.type === 'dmg') run.dmg = Math.max(1, run.dmg + v * 0.5);
+  if (g.type === 'multi') run.multi = clamp(run.multi + v, 1, 5);
+  run.fx.push({ text: `${v > 0 ? '+' : ''}${g.type === 'dmg' ? (v * 0.5).toFixed(1) : v} ${STATS[g.type]}`, color: v > 0 ? '#86efac' : '#fca5a5', t: 900 });
+  Sound.beep(v > 0 ? 900 : 180, 0.12, v > 0 ? 'triangle' : 'sawtooth', 0.05);
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  const steer = (keys.ArrowRight || keys.d ? 1 : 0) - (keys.ArrowLeft || keys.a ? 1 : 0);
+  if (steer) run.x += steer * 4.5 * s;
+  if (pointerX != null) run.x += clamp((pointerX - run.x) * 10 * s, -6 * s, 6 * s);
+  run.x = clamp(run.x, -HALF + 0.35, HALF - 0.35);
+  // blocked by an unbroken block in front?
+  const ahead = run.blocks.find(b => b.hp > 0 && b.z > run.z && b.z - run.z < 0.6 && Math.abs(b.x - run.x) < b.w / 2 + 0.3);
+  if (ahead) {
+    if (ahead.wall) return endRun('Stopped by the wall', ahead.wall - 1);
+    return endRun('Crashed into a block!', 0);
+  }
+  run.z += run.speed * s;
+  // passing through gates
+  run.gates.forEach(g => {
+    if (!g.done && run.z >= g.z) {
+      g.done = true;
+      if (Math.sign(run.x || 0.01) === g.side) applyGate(g);
+    }
+  });
+  // auto fire
+  run.fireT -= dt;
+  if (run.fireT <= 0) {
+    run.fireT = 1000 / run.rate;
+    const n = Math.round(run.multi);
+    for (let i = 0; i < n; i++) run.bullets.push({ x: run.x + (i - (n - 1) / 2) * 0.22, z: run.z + 0.5, start: run.z + 0.5 });
+    Sound.beep(1200, 0.02, 'square', 0.012);
+  }
+  for (const b of run.bullets) {
+    b.z += 24 * s;
+    if (b.z - b.start > run.range) b.dead = true;
+    for (const g of run.gates) {
+      if (!b.dead && !g.done && g.type !== 'multi' && Math.abs(b.z - g.z) < 0.4 && Math.sign(b.x || 0.01) === g.side) {
+        b.dead = true;
+        g.val += 1;
+        g.flash = 100;
+      }
+    }
+    for (const k of run.blocks) {
+      if (!b.dead && k.hp > 0 && Math.abs(b.z - k.z) < 0.4 && Math.abs(b.x - k.x) < k.w / 2 + 0.05) {
+        b.dead = true;
+        k.hp = Math.max(0, k.hp - run.dmg);
+        k.flash = 80;
+        if (k.hp <= 0) { run.coins += k.wall ? 3 : 2; Sound.beep(300, 0.06, 'square', 0.03); }
+      }
+    }
+  }
+  run.bullets = run.bullets.filter(b => !b.dead);
+  // collect coins on the track
+  for (const c of run.pickups) if (!c.got && Math.abs(c.z - run.z) < 0.5 && Math.abs(c.x - run.x) < 0.6) { c.got = true; run.coins++; Sound.beep(1400, 0.03, 'triangle', 0.02); }
+  [...run.gates, ...run.blocks].forEach(o => { if (o.flash) o.flash = Math.max(0, o.flash - dt); });
+  run.fx.forEach(f => { f.t -= dt; });
+  run.fx = run.fx.filter(f => f.t > 0);
+  // walked the whole wall
+  const wallEnd = run.len + 16;
+  if (run.z > wallEnd) endRun('Through the wall!', 8);
+}
+
+function drawTrack() {
+  const sky = ctx.createLinearGradient(0, 0, 0, HORIZON);
+  sky.addColorStop(0, '#60a5fa'); sky.addColorStop(1, '#dbeafe');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, HORIZON);
+  ctx.fillStyle = '#86efac';
+  ctx.fillRect(0, HORIZON, W, H - HORIZON);
+  const nearL = project(-HALF, 0, run.z - CAM_BACK + 0.35), nearR = project(HALF, 0, run.z - CAM_BACK + 0.35);
+  const farL = project(-HALF, 0, run.z + 120), farR = project(HALF, 0, run.z + 120);
+  if (!nearL || !farL) return;
+  ctx.fillStyle = '#e2e8f0';
+  ctx.beginPath(); ctx.moveTo(nearL.x, H); ctx.lineTo(farL.x, farL.y); ctx.lineTo(farR.x, farR.y); ctx.lineTo(nearR.x, H); ctx.fill();
+  // stripes so motion is visible
+  for (let z = Math.ceil(run.z - 2); z < run.z + 80; z += 2) {
+    if (Math.floor(z / 2) % 2) continue;
+    const a = project(-HALF, 0, z), b = project(-HALF, 0, z + 2), c = project(HALF, 0, z + 2), d = project(HALF, 0, z);
+    if (!a || !b || !c || !d) continue;
+    ctx.fillStyle = '#cbd5e1';
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.lineTo(d.x, d.y); ctx.fill();
+  }
+}
+
+function drawWorld() {
+  const objs = [];
+  run.gates.forEach(g => { if (!g.done && g.z > run.z - 0.5 && g.z < run.z + 70) objs.push({ z: g.z, draw: () => drawGate(g) }); });
+  run.blocks.forEach(k => { if (k.hp > 0 && k.z > run.z - 0.5 && k.z < run.z + 70) objs.push({ z: k.z, draw: () => drawBlock(k) }); });
+  run.pickups.forEach(c => { if (!c.got && c.z > run.z - 0.5 && c.z < run.z + 60) objs.push({ z: c.z, draw: () => { const p = project(c.x, 0.4, c.z); if (p) { ctx.fillStyle = '#facc15'; ctx.beginPath(); ctx.ellipse(p.x, p.y, 0.22 * p.k, 0.25 * p.k, 0, 0, 7); ctx.fill(); ctx.strokeStyle = '#a16207'; ctx.lineWidth = Math.max(1, p.k * 0.04); ctx.stroke(); } } }); });
+  run.bullets.forEach(b => objs.push({ z: b.z, draw: () => { const p = project(b.x, 0.7, b.z); if (p) { ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(2, 0.08 * p.k), 0, 7); ctx.fill(); } } }));
+  objs.sort((a, b) => b.z - a.z).forEach(o => o.draw());
+}
+
+function drawGate(g) {
+  const x0 = g.side < 0 ? -HALF : 0.05, x1 = g.side < 0 ? -0.05 : HALF;
+  const a = project(x0, 1.9, g.z), b = project(x1, 0, g.z);
+  if (!a || !b) return;
+  const good = g.val > 0;
+  ctx.fillStyle = g.flash ? 'rgba(255,255,255,.75)' : good ? 'rgba(34,197,94,.55)' : 'rgba(239,68,68,.55)';
+  ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+  ctx.strokeStyle = good ? '#15803d' : '#b91c1c';
+  ctx.lineWidth = Math.max(2, a.k * 0.06);
+  ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = `bold ${Math.max(9, a.k * 0.45)}px system-ui`;
+  ctx.fillText(`${g.val > 0 ? '+' : ''}${g.val}`, (a.x + b.x) / 2, a.y + (b.y - a.y) * 0.45);
+  ctx.font = `bold ${Math.max(7, a.k * 0.2)}px system-ui`;
+  ctx.fillText(STATS[g.type], (a.x + b.x) / 2, a.y + (b.y - a.y) * 0.72);
+}
+
+function drawBlock(k) {
+  const a = project(k.x - k.w / 2, k.wall ? 1.3 : 1, k.z), b = project(k.x + k.w / 2, 0, k.z);
+  if (!a || !b) return;
+  if (!a || !b) return;
+  const hue = k.wall ? 260 - k.wall * 18 : 30;
+  ctx.fillStyle = k.flash ? '#fff' : `hsl(${hue}, 70%, ${40 + 20 * (k.hp / k.max)}%)`;
+  ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+  ctx.strokeStyle = 'rgba(0,0,0,.4)';
+  ctx.lineWidth = Math.max(1, a.k * 0.03);
+  ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = `bold ${Math.max(8, a.k * 0.36)}px system-ui`;
+  ctx.fillText(Math.ceil(k.hp), (a.x + b.x) / 2, (a.y + b.y) / 2 + a.k * 0.12);
+  if (k.wall && k.x < -0.5) { ctx.font = `bold ${Math.max(8, a.k * 0.3)}px system-ui`; ctx.fillStyle = '#fde047'; ctx.fillText('×' + k.wall, a.x - a.k * 0.35, (a.y + b.y) / 2); }
+}
+
+function drawGun() {
+  const p = project(run.x, 0.6, run.z) || { x: W / 2, y: H - 120, k: 60 };
+  const n = Math.round(run.multi), k = p.k;
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  for (let i = 0; i < n; i++) {
+    const ox = (i - (n - 1) / 2) * k * 0.22;
+    ctx.fillStyle = '#374151';
+    ctx.fillRect(ox - k * 0.07, -k * 0.55, k * 0.14, k * 0.5);
+  }
+  ctx.fillStyle = '#1f2937';
+  ctx.beginPath(); ctx.roundRect(-k * 0.3, -k * 0.1, k * 0.6, k * 0.3, k * 0.05); ctx.fill();
+  ctx.fillStyle = '#92400e';
+  ctx.beginPath(); ctx.roundRect(-k * 0.12, k * 0.15, k * 0.24, k * 0.45, k * 0.05); ctx.fill();
+  ctx.restore();
+  // stats panel
+  ctx.fillStyle = 'rgba(15,23,42,.75)';
+  ctx.beginPath(); ctx.roundRect(8, 8, 150, 92, 10); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.font = '13px system-ui';
+  [['🔥 Rate', run.rate.toFixed(1)], ['💥 Damage', run.dmg.toFixed(1)], ['📏 Range', run.range.toFixed(1)], ['🔫 Bullets', Math.round(run.multi)]].forEach(([l, v], i) => ctx.fillText(`${l}: ${v}`, 16, 28 + i * 20));
+  ctx.textAlign = 'right';
+  ctx.font = 'bold 20px system-ui';
+  ctx.fillStyle = '#facc15';
+  ctx.fillText(`🪙 ${run.coins}`, W - 12, 32);
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 18px system-ui';
+  run.fx.forEach((f, i) => { ctx.globalAlpha = Math.min(1, f.t / 300); ctx.fillStyle = f.color; ctx.fillText(f.text, W / 2, 150 - i * 24 - (900 - f.t) * 0.03); });
+  ctx.globalAlpha = 1;
+  // progress bar
+  ctx.fillStyle = 'rgba(0,0,0,.3)';
+  ctx.fillRect(W / 2 - 80, 14, 160, 8);
+  ctx.fillStyle = '#22c55e';
+  ctx.fillRect(W / 2 - 80, 14, 160 * clamp(run.z / run.len, 0, 1), 8);
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (run) {
+    if (state === 'play') update(dt);
+    drawTrack();
+    drawWorld();
+    drawGun();
+  }
+  requestAnimationFrame(loop);
+}
+
+const toWorldX = px => clamp((px - W / 2) / 70, -HALF, HALF);
+cv.addEventListener('pointerdown', e => { pointerX = toWorldX(canvasPoint(cv, e).x); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (pointerX != null || e.pointerType === 'mouse') pointerX = toWorldX(canvasPoint(cv, e).x); });
+['pointerup', 'pointercancel'].forEach(t => cv.addEventListener(t, e => { if (e.pointerType !== 'mouse') pointerX = null; }));
+cv.addEventListener('pointerleave', () => { pointerX = null; });
+document.addEventListener('keydown', e => { keys[e.key] = true; pointerX = null; });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+hud();
+run = { L: save.level, z: 0, x: 0, rate: 3, dmg: 1, range: 9, multi: 1, bullets: [], fx: [], coins: 0, ...buildLevel(save.level) };
+showShop(`<h2>Gun Rush</h2><p>You are the gun! Shoot gates to power them up, drive through the best ones and blast the wall.</p>`);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

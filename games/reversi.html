@@ -10,21 +10,20 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>⚫ Reversi ⚪</h1>
-  <div class="stats">⚫ <b id="bc">2</b> ⚪ <b id="wc">2</b> Record <b id="rec">0–0</b></div>
+  <div class="stats">⚫ <b id="bc">2</b> ⚪ <b id="wc">2</b> <span id="stat"></span></div>
 </header>
-<div class="controls">
-  <select id="diff"><option value="1">Easy</option><option value="3" selected>Medium</option><option value="5">Hard</option><option value="0">2 players</option></select>
-  <button class="btn" id="new">New game</button>
-</div>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
 <div class="msg" id="msg"></div>
 <div class="stage">
   <canvas id="c" class="game" width="560" height="560"></canvas>
 </div>
-<p class="help">Place a disc so that it sandwiches a line of your opponent's discs — they flip to your colour. You play black and go first. Dots show legal moves. If you can't move, your turn passes. Most discs at the end wins.</p>
+<p class="help">Place a disc so that it sandwiches a line of your opponent's discs — they flip to your colour. Black goes first. Play online, vs the computer or with a friend. Dots show legal moves. If you can't move, your turn passes. Most discs at the end wins.</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
-const S = cv.width / 8, DIRS = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
+const CS = cv.width / 8, DIRS = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
 const WEIGHTS = [
   120, -20, 20, 5, 5, 20, -20, 120,
   -20, -40, -5, -5, -5, -5, -40, -20,
@@ -35,17 +34,22 @@ const WEIGHTS = [
   -20, -40, -5, -5, -5, -5, -40, -20,
   120, -20, 20, 5, 5, 20, -20, 120
 ];
-let board, turn, over, flips = {}, lastMove = -1, gameId = 0;
-let rec = Store.get('reversi-record', { w: 0, l: 0 });
-const diff = () => +document.getElementById('diff').value;
+let S, board, turn, over, flips = {}, lastMove = -1, me = 1;
+// black (1) moves first; me is this player's colour
+const myTurn = () => S && !over && (S.mode === 'local' || turn === me);
 
-function newGame() {
-  gameId++;
-  board = Array(64).fill(0);
-  board[27] = board[36] = -1; // white
-  board[28] = board[35] = 1;  // black
-  turn = 1; over = false; flips = {}; lastMove = -1;
-  update();
+function begin(s) {
+  S = s;
+  S.on('move', d => { if (d && typeof d.i === 'number' && turn !== me && !over) move(d.i, true); });
+  S.startRound(() => ({ black: S.lastBlack == null ? randInt(0, 1) : 1 - S.lastBlack }), cfg => {
+    S.lastBlack = cfg.black;
+    me = S.mode === 'local' ? 1 : cfg.black === S.seat ? 1 : -1;
+    board = Array(64).fill(0);
+    board[27] = board[36] = -1; // white
+    board[28] = board[35] = 1;  // black
+    turn = 1; over = false; flips = {}; lastMove = -1;
+    update();
+  });
 }
 
 function flipsFor(b, i, p) {
@@ -88,19 +92,22 @@ function search(b, d, alpha, beta, p) {
   return best;
 }
 
+// search depth 1..5 follows the level; weaker levels add some misjudgement
 function cpu() {
-  const ms = shuffle(legalMoves(board, -1)), d = diff();
+  const ai = -me, ms = shuffle(legalMoves(board, ai)), d = 1 + Math.round(S.level * 4);
   let best = ms[0], bv = -Infinity;
   for (const m of ms) {
-    const v = search(play(board, m, -1), d - 1, -Infinity, Infinity, 1) + (d === 1 ? rand(-40, 40) : 0);
+    // search() scores positions for white
+    const v = search(play(board, m, ai), d - 1, -Infinity, Infinity, -ai) * (ai === -1 ? 1 : -1) + rand(-1, 1) * (1 - S.level) * 60;
     if (v > bv) { bv = v; best = m; }
   }
   move(best);
 }
 
-function move(i) {
+function move(i, fromNet) {
   const f = flipsFor(board, i, turn);
   if (!f.length) return;
+  if (!fromNet && S.human && turn === me) S.send('move', { i });
   board = play(board, i, turn);
   flips = {};
   f.forEach((k, n) => { flips[k] = { t: -n * 40 }; });
@@ -114,26 +121,28 @@ function update() {
   const b = board.filter(v => v === 1).length, w = board.filter(v => v === -1).length;
   document.getElementById('bc').textContent = b;
   document.getElementById('wc').textContent = w;
-  document.getElementById('rec').textContent = `${rec.w}–${rec.l}`;
-  const vsCpu = diff() !== 0;
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `· CPU ${S.level.toFixed(2)}` : S.mode === 'online' ? '· Online' : '· 2 players';
+  document.getElementById('vs').innerHTML = S.mode === 'local' ? '<b>⚫ Black</b> vs <b>⚪ White</b>' : `<b>${S.me.name}</b> ${me === 1 ? '⚫' : '⚪'} vs <b>${S.opp.name}</b> ${me === 1 ? '⚪' : '⚫'}`;
   if (!legalMoves(board, turn).length) {
     if (!legalMoves(board, -turn).length) {
       over = true;
-      if (vsCpu && b !== w) { if (b > w) rec.w++; else rec.l++; Store.set('reversi-record', rec); document.getElementById('rec').textContent = `${rec.w}–${rec.l}`; }
-      msg.textContent = b === w ? `Draw, ${b}–${w}` : vsCpu ? (b > w ? `You win ${b}–${w}! 🎉` : `CPU wins ${w}–${b}`) : `${b > w ? 'Black' : 'White'} wins ${Math.max(b, w)}–${Math.min(b, w)}`;
-      Sound.beep(b > w ? 880 : 200, 0.4, 'triangle');
+      const mine = me === 1 ? b : w, theirs = me === 1 ? w : b;
+      const title = b === w ? `Draw, ${b}–${w}` : S.mode === 'local' ? `${b > w ? 'Black' : 'White'} wins ${Math.max(b, w)}–${Math.min(b, w)}` : mine > theirs ? `You win ${mine}–${theirs}! 🎉` : `${S.opp.name} wins ${theirs}–${mine}`;
+      msg.textContent = title;
+      Sound.beep(mine >= theirs ? 880 : 200, 0.4, 'triangle');
+      setTimeout(() => Lobby.end(S, { result: b === w ? 0.5 : mine > theirs ? 1 : 0, title }), 1000);
       return;
     }
     msg.textContent = `${turn === 1 ? 'Black' : 'White'} has no moves — pass.`;
     turn = -turn;
-    const id = gameId;
-    return setTimeout(() => { if (id === gameId) update(); }, 900);
+    const r = S.round;
+    return setTimeout(() => { if (r === S.round) update(); }, 900);
   }
-  if (vsCpu && turn === -1) {
-    msg.textContent = 'CPU is thinking…';
-    const id = gameId;
-    setTimeout(() => { if (id === gameId && turn === -1 && !over) cpu(); }, 450);
-  } else msg.textContent = vsCpu ? 'Your move (black)' : `${turn === 1 ? 'Black' : 'White'} to move`;
+  if (S.ai && turn !== me) {
+    msg.textContent = `${S.mode === 'online' ? S.opp.name : 'Computer'} is thinking…`;
+    const r = S.round;
+    setTimeout(() => { if (r === S.round && turn !== me && !over) cpu(); }, S.delay(250, 500));
+  } else msg.textContent = S.mode === 'local' ? `${turn === 1 ? 'Black' : 'White'} to move` : turn === me ? `Your move (${me === 1 ? 'black' : 'white'})` : `${S.opp.name} is thinking…`;
 }
 
 function draw() {
@@ -142,15 +151,15 @@ function draw() {
   ctx.strokeStyle = '#052e16';
   ctx.lineWidth = 2;
   for (let i = 0; i <= 8; i++) {
-    ctx.beginPath(); ctx.moveTo(i * S, 0); ctx.lineTo(i * S, cv.height); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, i * S); ctx.lineTo(cv.width, i * S); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(i * CS, 0); ctx.lineTo(i * CS, cv.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * CS); ctx.lineTo(cv.width, i * CS); ctx.stroke();
   }
   ctx.fillStyle = '#052e16';
-  [[2, 2], [2, 6], [6, 2], [6, 6]].forEach(([r, c]) => { ctx.beginPath(); ctx.arc(c * S, r * S, 5, 0, 7); ctx.fill(); });
-  const human = !over && (diff() === 0 || turn === 1);
+  [[2, 2], [2, 6], [6, 2], [6, 6]].forEach(([r, c]) => { ctx.beginPath(); ctx.arc(c * CS, r * CS, 5, 0, 7); ctx.fill(); });
+  const human = myTurn();
   const hints = human ? legalMoves(board, turn) : [];
   for (let i = 0; i < 64; i++) {
-    const x = (i & 7) * S + S / 2, y = (i >> 3) * S + S / 2;
+    const x = (i & 7) * CS + CS / 2, y = (i >> 3) * CS + CS / 2;
     if (board[i]) {
       let sx = 1, color = board[i];
       const f = flips[i];
@@ -162,27 +171,29 @@ function draw() {
         if (k >= 1) delete flips[i];
       }
       ctx.fillStyle = 'rgba(0,0,0,.35)';
-      ctx.beginPath(); ctx.ellipse(x + 2, y + 3, S * 0.4 * sx, S * 0.4, 0, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x + 2, y + 3, CS * 0.4 * sx, CS * 0.4, 0, 0, 7); ctx.fill();
       ctx.fillStyle = color === 1 ? '#111827' : '#f8fafc';
-      ctx.beginPath(); ctx.ellipse(x, y, S * 0.4 * Math.max(sx, 0.05), S * 0.4, 0, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x, y, CS * 0.4 * Math.max(sx, 0.05), CS * 0.4, 0, 0, 7); ctx.fill();
       if (i === lastMove) { ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.arc(x, y, 4, 0, 7); ctx.fill(); }
     } else if (hints.includes(i)) {
       ctx.fillStyle = turn === 1 ? 'rgba(0,0,0,.3)' : 'rgba(255,255,255,.35)';
-      ctx.beginPath(); ctx.arc(x, y, S * 0.1, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, CS * 0.1, 0, 7); ctx.fill();
     }
   }
   requestAnimationFrame(draw);
 }
 
 cv.addEventListener('pointerdown', e => {
-  if (over || (diff() !== 0 && turn !== 1)) return;
+  if (!myTurn()) return;
   const p = canvasPoint(cv, e);
-  move(Math.floor(p.y / S) * 8 + Math.floor(p.x / S));
+  move(Math.floor(p.y / CS) * 8 + Math.floor(p.x / CS));
 });
-document.getElementById('new').onclick = newGame;
-document.getElementById('diff').onchange = newGame;
-newGame();
+document.getElementById('menu').onclick = () => Lobby.open();
+board = Array(64).fill(0);
+board[27] = board[36] = -1;
+board[28] = board[35] = 1;
 draw();
+Lobby.open({ game: 'reversi', title: '⚫ Reversi ⚪', local: true, onStart: begin });
 </script>
 </body>
 </html>

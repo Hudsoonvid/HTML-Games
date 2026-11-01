@@ -10,12 +10,11 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>🔲 Dots &amp; Boxes</h1>
-  <div class="stats"><span style="color:#22d3ee">You <b id="s1">0</b></span> <span style="color:#f472b6"><span id="p2name">CPU</span> <b id="s2">0</b></span></div>
+  <div class="stats"><span style="color:#22d3ee"><span id="p1name">P1</span> <b id="s1">0</b></span> <span style="color:#f472b6"><span id="p2name">P2</span> <b id="s2">0</b></span></div>
 </header>
 <div class="controls">
   <select id="size"><option value="3">3 × 3 boxes</option><option value="5" selected>5 × 5 boxes</option><option value="7">7 × 7 boxes</option></select>
-  <select id="mode"><option value="cpu">vs CPU</option><option value="2p">2 players</option></select>
-  <button class="btn" id="new">New game</button>
+  <button class="btn alt" id="menu">Change mode</button>
 </div>
 <div class="msg" id="msg"></div>
 <div class="stage">
@@ -23,11 +22,14 @@
 </div>
 <p class="help">Take turns drawing a line between two neighbouring dots. Close the fourth side of a box to claim it — and you must go again. Most boxes wins. Avoid drawing the third side of a box!</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
 const COL = ['', '#22d3ee', '#f472b6'];
-let N, G, M, lines, owner, turn, score, hover = null, over, gameId = 0;
-const vsCpu = () => document.getElementById('mode').value === 'cpu';
+let S, N, G, M, lines, owner, turn, score, hover = null, over, me = 1;
+// player 1 (cyan) moves first; me is this player's number
+const myTurn = () => S && !over && (S.mode === 'local' || turn === me);
+const nameOf = p => (S.mode === 'local' ? 'P' + p : p === me ? 'You' : S.opp.name);
 
 // line ids: 'h,r,c' (r: 0..N, c: 0..N-1) and 'v,r,c' (r: 0..N-1, c: 0..N)
 function allLines() {
@@ -44,29 +46,41 @@ function boxesOf(id) {
 }
 const sides = (set, r, c) => [`h,${r},${c}`, `h,${r + 1},${c}`, `v,${r},${c}`, `v,${r},${c + 1}`].filter(l => set.has(l)).length;
 
-function newGame() {
-  gameId++;
-  N = +document.getElementById('size').value;
-  M = 40;
-  G = (cv.width - 2 * M) / N;
-  lines = new Map();
-  owner = Array.from({ length: N }, () => Array(N).fill(0));
-  turn = 1;
-  score = [0, 0, 0];
-  over = false;
-  document.getElementById('p2name').textContent = vsCpu() ? 'CPU' : 'P2';
-  status();
+function begin(s) {
+  S = s;
+  S.on('move', d => { if (d && typeof d.l === 'string' && turn !== me && !over && allLines().includes(d.l)) drawLine(d.l, true); });
+  S.startRound(() => ({ n: +document.getElementById('size').value, first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    N = [3, 5, 7].includes(cfg.n) ? cfg.n : 5;
+    document.getElementById('size').value = N;
+    document.getElementById('size').disabled = S.human;
+    me = S.mode === 'local' ? 1 : cfg.first === S.seat ? 1 : 2;
+    M = 40;
+    G = (cv.width - 2 * M) / N;
+    lines = new Map();
+    owner = Array.from({ length: N }, () => Array(N).fill(0));
+    turn = 1;
+    score = [0, 0, 0];
+    over = false;
+    document.getElementById('p1name').textContent = nameOf(1);
+    document.getElementById('p2name').textContent = nameOf(2);
+    status();
+    if (S.ai && turn !== me) aiTurn();
+  });
 }
+
+function aiTurn() { const r = S.round; setTimeout(() => { if (r === S.round && !over && turn !== me) cpu(); }, S.delay(250, 450)); }
 
 function status() {
   document.getElementById('s1').textContent = score[1];
   document.getElementById('s2').textContent = score[2];
   if (over) return;
-  msg.textContent = vsCpu() ? (turn === 1 ? 'Your turn' : 'CPU is thinking…') : `Player ${turn}'s turn`;
+  msg.textContent = S.mode === 'local' ? `Player ${turn}'s turn` : turn === me ? 'Your turn' : `${S.opp.name} is thinking…`;
 }
 
-function drawLine(id) {
+function drawLine(id, fromNet) {
   if (over || lines.has(id)) return;
+  if (!fromNet && S.human && turn === me) S.send('move', { l: id });
   lines.set(id, turn);
   let made = 0;
   for (const [r, c] of boxesOf(id)) if (sides(lines, r, c) === 4) { owner[r][c] = turn; made++; }
@@ -76,13 +90,15 @@ function drawLine(id) {
     over = true;
     status();
     const [a, b2] = [score[1], score[2]];
-    msg.textContent = a === b2 ? `Tie game, ${a}–${b2}!` : vsCpu() ? (a > b2 ? `You win ${a}–${b2}! 🎉` : `CPU wins ${b2}–${a}`) : `Player ${a > b2 ? 1 : 2} wins ${Math.max(a, b2)}–${Math.min(a, b2)}!`;
-    if (vsCpu() && a > b2) recordBest('dots-best-margin-' + N, a - b2);
+    const mine = score[me], theirs = score[3 - me];
+    const title = a === b2 ? `Tie game, ${a}–${b2}!` : S.mode === 'local' ? `Player ${a > b2 ? 1 : 2} wins ${Math.max(a, b2)}–${Math.min(a, b2)}!` : mine > theirs ? `You win ${mine}–${theirs}! 🎉` : `${S.opp.name} wins ${theirs}–${mine}`;
+    msg.textContent = title;
+    setTimeout(() => Lobby.end(S, { result: a === b2 ? 0.5 : mine > theirs ? 1 : 0, title }), 900);
     return;
   }
   if (!made) turn = 3 - turn;
   status();
-  if (vsCpu() && turn === 2) { const id2 = gameId; setTimeout(() => { if (id2 === gameId) cpu(); }, 380); }
+  if (S.ai && turn !== me) aiTurn();
 }
 
 // how many boxes the opponent could grab in a row after we play `id`
@@ -104,9 +120,12 @@ function giveaway(id) {
   return taken;
 }
 
+// takes free boxes, avoids drawing a third side, and gives away as little as it can;
+// at lower levels it sometimes misses those and just plays anywhere
 function cpu() {
-  if (over || turn !== 2) return;
+  if (over || turn === me) return;
   const free = allLines().filter(l => !lines.has(l));
+  if (Math.random() > 0.35 + S.level * 0.7) return drawLine(pick(free));
   const take = free.find(l => boxesOf(l).some(([r, c]) => sides(lines, r, c) === 3));
   if (take) return drawLine(take);
   const safe = free.filter(l => boxesOf(l).every(([r, c]) => sides(lines, r, c) < 2));
@@ -141,10 +160,10 @@ function draw() {
     ctx.font = `bold ${G * 0.35}px system-ui`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(owner[r][c] === 1 ? (vsCpu() ? 'You' : 'P1') : (vsCpu() ? 'CPU' : 'P2'), M + c * G + G / 2, M + r * G + G / 2);
+    ctx.fillText(nameOf(owner[r][c]).slice(0, 6), M + c * G + G / 2, M + r * G + G / 2);
   }
   ctx.lineCap = 'round';
-  if (hover && !lines.has(hover) && !over && (!vsCpu() || turn === 1)) {
+  if (hover && !lines.has(hover) && myTurn()) {
     const [x1, y1, x2, y2] = lineCoords(hover);
     ctx.strokeStyle = 'rgba(255,255,255,.3)';
     ctx.lineWidth = 6;
@@ -163,15 +182,15 @@ function draw() {
 
 cv.addEventListener('pointermove', e => { hover = nearest(canvasPoint(cv, e)); });
 cv.addEventListener('pointerdown', e => {
-  if (vsCpu() && turn !== 1) return;
+  if (!myTurn()) return;
   const l = nearest(canvasPoint(cv, e));
   if (l) drawLine(l);
 });
-document.getElementById('new').onclick = newGame;
-document.getElementById('size').onchange = newGame;
-document.getElementById('mode').onchange = newGame;
-newGame();
+document.getElementById('size').onchange = () => { if (S && !S.human) Lobby.open(); };
+document.getElementById('menu').onclick = () => Lobby.open();
+N = 5; M = 40; G = (cv.width - 2 * M) / N; lines = new Map(); owner = Array.from({ length: N }, () => Array(N).fill(0));
 draw();
+Lobby.open({ game: 'dots-and-boxes', title: '🔲 Dots & Boxes', local: true, onStart: begin });
 </script>
 </body>
 </html>

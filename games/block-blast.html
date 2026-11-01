@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Block Blast</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🟦 Block Blast</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="620"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<p class="help">Drag the shapes onto the board. Fill a whole row or column to blast it. Clear lines on back-to-back drops for a combo multiplier. The game ends when none of your pieces fit.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const N = 8, CELL = 46, BX = (cv.width - N * CELL) / 2, BY = 70, TRAY_Y = BY + N * CELL + 40;
+const COLORS = ['#ef4444', '#f97316', '#facc15', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7', '#ec4899'];
+const SHAPES = [
+  [[1]], [[1, 1]], [[1], [1]], [[1, 1, 1]], [[1], [1], [1]], [[1, 1, 1, 1]], [[1], [1], [1], [1]], [[1, 1, 1, 1, 1]], [[1], [1], [1], [1], [1]],
+  [[1, 1], [1, 1]], [[1, 1, 1], [1, 1, 1], [1, 1, 1]], [[1, 1, 1], [1, 1, 1]], [[1, 1], [1, 1], [1, 1]],
+  [[1, 0], [1, 1]], [[0, 1], [1, 1]], [[1, 1], [1, 0]], [[1, 1], [0, 1]],
+  [[1, 0, 0], [1, 1, 1]], [[0, 0, 1], [1, 1, 1]], [[1, 1, 1], [1, 0, 0]], [[1, 1, 1], [0, 0, 1]],
+  [[1, 1], [1, 0], [1, 0]], [[1, 1], [0, 1], [0, 1]], [[1, 0], [1, 0], [1, 1]], [[0, 1], [0, 1], [1, 1]],
+  [[1, 1, 1], [0, 1, 0]], [[0, 1, 0], [1, 1, 1]], [[1, 0], [1, 1], [1, 0]], [[0, 1], [1, 1], [0, 1]],
+  [[1, 1, 0], [0, 1, 1]], [[0, 1, 1], [1, 1, 0]], [[1, 0], [1, 1], [0, 1]], [[0, 1], [1, 1], [1, 0]],
+  [[1, 0, 0], [0, 1, 0], [0, 0, 1]], [[0, 0, 1], [0, 1, 0], [1, 0, 0]], [[1, 1, 1], [1, 0, 0], [1, 0, 0]], [[1, 1, 1], [0, 0, 1], [0, 0, 1]]
+];
+let board, tray, score, combo, drag = null, flashes = [], popups = [], over = false;
+let best = Store.get('blockblast-best', 0);
+
+function newPiece() {
+  const shape = pick(SHAPES);
+  return { shape, color: randInt(0, COLORS.length - 1), w: shape[0].length, h: shape.length };
+}
+function newTray() { tray = [newPiece(), newPiece(), newPiece()]; }
+
+function start() {
+  board = Array.from({ length: N }, () => Array(N).fill(-1));
+  score = 0; combo = 0; over = false; flashes = []; popups = [];
+  newTray();
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  if (score > best) { best = score; Store.set('blockblast-best', best); }
+  document.getElementById('best').textContent = best;
+}
+
+const fits = (p, r, c) => p.shape.every((row, y) => row.every((v, x) => !v || (r + y >= 0 && r + y < N && c + x >= 0 && c + x < N && board[r + y][c + x] < 0)));
+function anyFit(p) { for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (fits(p, r, c)) return true; return false; }
+
+// rows / columns that would be full after placing p at (r, c)
+function wouldClear(p, r, c) {
+  const filled = (y, x) => board[y][x] >= 0 || (y - r >= 0 && y - r < p.h && x - c >= 0 && x - c < p.w && p.shape[y - r][x - c]);
+  const rows = [], cols = [];
+  for (let y = 0; y < N; y++) { let full = true; for (let x = 0; x < N; x++) if (!filled(y, x)) { full = false; break; } if (full) rows.push(y); }
+  for (let x = 0; x < N; x++) { let full = true; for (let y = 0; y < N; y++) if (!filled(y, x)) { full = false; break; } if (full) cols.push(x); }
+  return { rows, cols };
+}
+
+function place(i, r, c) {
+  const p = tray[i];
+  const { rows, cols } = wouldClear(p, r, c);
+  let cells = 0;
+  p.shape.forEach((row, y) => row.forEach((v, x) => { if (v) { board[r + y][c + x] = p.color; cells++; } }));
+  score += cells;
+  tray[i] = null;
+  const lines = rows.length + cols.length;
+  if (lines) {
+    combo++;
+    const cleared = new Set();
+    rows.forEach(y => { for (let x = 0; x < N; x++) cleared.add(y * N + x); });
+    cols.forEach(x => { for (let y = 0; y < N; y++) cleared.add(y * N + x); });
+    cleared.forEach(k => { flashes.push({ y: Math.floor(k / N), x: k % N, color: board[Math.floor(k / N)][k % N], t: 350 }); board[Math.floor(k / N)][k % N] = -1; });
+    const pts = lines * 10 * lines * combo;
+    score += pts;
+    popups.push({ text: (combo > 1 ? `Combo ×${combo}  ` : '') + `+${pts}`, x: BX + (c + p.w / 2) * CELL, y: BY + (r + p.h / 2) * CELL, t: 900 });
+    if (board.every(row => row.every(v => v < 0))) { score += 300; popups.push({ text: 'All clear! +300', x: cv.width / 2, y: BY + N * CELL / 2 + 40, t: 1200 }); }
+    Sound.beep(500 + lines * 120 + combo * 40, 0.15, 'triangle', 0.06);
+  } else {
+    combo = 0;
+    Sound.beep(320, 0.04, 'triangle', 0.04);
+  }
+  if (tray.every(t => !t)) newTray();
+  hud();
+  if (!tray.some(t => t && anyFit(t))) {
+    over = true;
+    best = recordBest('blockblast-best', score);
+    hud();
+    setTimeout(() => overlay(ov, `<h2>No more space!</h2><p>Score ${score} · Best ${best}</p><button class="btn" onclick="start()">Play again</button>`), 500);
+  }
+}
+
+function block(x, y, size, color, alpha = 1) {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.roundRect(x + 1.5, y + 1.5, size - 3, size - 3, size * 0.16); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.35)';
+  ctx.fillRect(x + size * 0.18, y + size * 0.12, size * 0.64, size * 0.12);
+  ctx.fillStyle = 'rgba(0,0,0,.18)';
+  ctx.fillRect(x + size * 0.12, y + size * 0.78, size * 0.76, size * 0.1);
+  ctx.globalAlpha = 1;
+}
+
+function trayPos(i, p) {
+  const slotW = cv.width / 3, s = CELL * 0.55;
+  return { x: slotW * i + (slotW - p.w * s) / 2, y: TRAY_Y + (CELL * 2.8 - p.h * s) / 2, s };
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, cv.height);
+  g.addColorStop(0, '#1e2a5a'); g.addColorStop(1, '#0f1636');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = '#e6e7f2';
+  ctx.font = 'bold 34px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText(score, cv.width / 2, 48);
+  ctx.fillStyle = '#121a3c';
+  ctx.beginPath(); ctx.roundRect(BX - 6, BY - 6, N * CELL + 12, N * CELL + 12, 10); ctx.fill();
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    ctx.fillStyle = '#1d2754';
+    ctx.fillRect(BX + c * CELL + 1, BY + r * CELL + 1, CELL - 2, CELL - 2);
+    if (board[r][c] >= 0) block(BX + c * CELL, BY + r * CELL, CELL, COLORS[board[r][c]]);
+  }
+  // placement preview and the lines it would clear
+  if (drag && drag.r != null) {
+    const p = tray[drag.i];
+    const { rows, cols } = wouldClear(p, drag.r, drag.c);
+    ctx.fillStyle = 'rgba(255,255,255,.12)';
+    rows.forEach(y => ctx.fillRect(BX, BY + y * CELL, N * CELL, CELL));
+    cols.forEach(x => ctx.fillRect(BX + x * CELL, BY, CELL, N * CELL));
+    p.shape.forEach((row, y) => row.forEach((v, x) => { if (v) block(BX + (drag.c + x) * CELL, BY + (drag.r + y) * CELL, CELL, COLORS[p.color], 0.45); }));
+  }
+  flashes.forEach(f => { block(BX + f.x * CELL, BY + f.y * CELL, CELL, '#fff', f.t / 350); });
+  ctx.fillStyle = 'rgba(255,255,255,.04)';
+  ctx.fillRect(0, TRAY_Y - 10, cv.width, cv.height);
+  tray.forEach((p, i) => {
+    if (!p || (drag && drag.i === i)) return;
+    const { x, y, s } = trayPos(i, p);
+    const fitsAnywhere = anyFit(p);
+    p.shape.forEach((row, yy) => row.forEach((v, xx) => { if (v) block(x + xx * s, y + yy * s, s, COLORS[p.color], fitsAnywhere ? 1 : 0.3); }));
+  });
+  if (drag) {
+    const p = tray[drag.i];
+    p.shape.forEach((row, y) => row.forEach((v, x) => { if (v) block(drag.x + x * CELL, drag.y + y * CELL, CELL, COLORS[p.color], 0.95); }));
+  }
+  ctx.font = 'bold 24px system-ui';
+  popups.forEach(pp => { ctx.globalAlpha = Math.min(1, pp.t / 400); ctx.fillStyle = '#fde047'; ctx.strokeStyle = '#000'; ctx.lineWidth = 4; ctx.strokeText(pp.text, pp.x, pp.y); ctx.fillText(pp.text, pp.x, pp.y); });
+  ctx.globalAlpha = 1;
+}
+
+let last = 0;
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  flashes.forEach(f => { f.t -= dt; }); flashes = flashes.filter(f => f.t > 0);
+  popups.forEach(p => { p.t -= dt; p.y -= dt * 0.04; }); popups = popups.filter(p => p.t > 0);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// lift the piece above the finger on touch screens so it stays visible
+cv.addEventListener('pointerdown', e => {
+  if (over) return;
+  const pt = canvasPoint(cv, e);
+  tray.forEach((p, i) => {
+    if (!p || drag) return;
+    const { x, y, s } = trayPos(i, p);
+    if (pt.x > x - 20 && pt.x < x + p.w * s + 20 && pt.y > y - 20 && pt.y < y + p.h * s + 20) {
+      const lift = e.pointerType === 'mouse' ? 0 : CELL * 1.6;
+      drag = { i, ox: (p.w * CELL) / 2, oy: (p.h * CELL) / 2 + lift, r: null, c: null };
+      moveDrag(pt);
+      cv.setPointerCapture(e.pointerId);
+      Sound.beep(600, 0.03, 'triangle', 0.03);
+    }
+  });
+});
+function moveDrag(pt) {
+  const p = tray[drag.i];
+  drag.x = pt.x - drag.ox;
+  drag.y = pt.y - drag.oy;
+  const c = Math.round((drag.x - BX) / CELL), r = Math.round((drag.y - BY) / CELL);
+  if (fits(p, r, c)) { drag.r = r; drag.c = c; } else { drag.r = drag.c = null; }
+}
+cv.addEventListener('pointermove', e => { if (drag) moveDrag(canvasPoint(cv, e)); });
+const drop = () => {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  if (d.r != null) place(d.i, d.r, d.c);
+};
+cv.addEventListener('pointerup', drop);
+cv.addEventListener('pointercancel', () => { drag = null; });
+
+start();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

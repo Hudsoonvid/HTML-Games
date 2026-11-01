@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Village Raiders</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  .res { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; font-weight: 700; font-size: 14px; margin: 2px 0 6px; }
+  .res span { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-variant-numeric: tabular-nums; }
+  .bar { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin: 8px 0; padding: 0 8px; }
+  .bar .btn { padding: 9px 12px; }
+  .panel-pop { width: min(560px, calc(100vw - 16px)); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: none; flex-direction: column; gap: 8px; }
+  .panel-pop.on { display: flex; }
+  .panel-pop h3 { margin: 0; font-size: 16px; }
+  .grid-btns { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  .grid-btns button { text-align: left; font-size: 13px; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); cursor: pointer; }
+  .grid-btns button:disabled { opacity: .45; cursor: default; }
+  .grid-btns small { color: var(--muted); display: block; }
+  .troops { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .troops button { min-width: 64px; padding: 6px 8px; border-radius: 10px; border: 2px solid var(--line); background: var(--panel-2); color: var(--fg); cursor: pointer; font-size: 20px; }
+  .troops button.on { border-color: var(--accent-2); }
+  .troops button small { display: block; font-size: 12px; }
+  .toast { position: fixed; left: 50%; top: 70px; transform: translateX(-50%); background: #f8fafc; color: #000; padding: 8px 14px; border-radius: 8px; font-weight: 700; z-index: 30; max-width: 90vw; text-align: center; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏰 Village Raiders</h1>
+  <div class="stats"><span id="who"></span></div>
+</header>
+<div class="res" id="res"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="760" height="480"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<div class="bar" id="homeBar">
+  <button class="btn" id="attackBtn">⚔️ Attack</button>
+  <button class="btn alt" id="shopBtn">🛒 Build</button>
+  <button class="btn alt" id="armyBtn">🪖 Train troops</button>
+  <button class="btn alt" id="collectBtn">💰 Collect all</button>
+  <button class="btn alt" id="nameBtn">✏️ Name</button>
+</div>
+<div class="panel-pop" id="panel"></div>
+<div class="bar" id="battleBar" style="display:none"></div>
+<p class="help" id="help">Tap buildings to upgrade or collect. Build defenses and walls, train an army, then attack — you raid other players' villages, and they can raid yours while you're away.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const MAP = 22, TW = 32, TH = 16, OX = cv.width / 2, OY = 52;
+const ROOT = `${NET.prefix}/village`;
+// per-level tables are indexed by building level (1-based)
+const B = {
+  th: { name: 'Town Hall', icon: '🏛️', size: 3, hp: [0, 1500, 2200, 3000, 4000, 5200], cost: [0, 0, 1500, 5000, 14000, 35000], res: 'gold', time: [0, 0, 20, 40, 70, 110], color: '#a16207' },
+  gold: { name: 'Gold Mine', icon: '⛏️', size: 2, hp: [0, 400, 520, 640, 780, 950], cost: [0, 150, 400, 1200, 3000, 7000], res: 'elixir', time: [0, 5, 12, 25, 40, 60], rate: [0, 1.5, 2.5, 4, 6, 9], cap: [0, 600, 1200, 2500, 5000, 9000], color: '#eab308', max: [0, 2, 3, 4, 5, 6] },
+  elixir: { name: 'Elixir Collector', icon: '⚗️', size: 2, hp: [0, 400, 520, 640, 780, 950], cost: [0, 150, 400, 1200, 3000, 7000], res: 'gold', time: [0, 5, 12, 25, 40, 60], rate: [0, 1.5, 2.5, 4, 6, 9], cap: [0, 600, 1200, 2500, 5000, 9000], color: '#c026d3', max: [0, 2, 3, 4, 5, 6] },
+  gstore: { name: 'Gold Storage', icon: '🪙', size: 2, hp: [0, 600, 800, 1000, 1300, 1700], cost: [0, 300, 900, 2500, 6000, 14000], res: 'elixir', time: [0, 8, 15, 30, 50, 70], store: [0, 2500, 6000, 15000, 35000, 80000], color: '#ca8a04', max: [0, 1, 1, 2, 2, 3] },
+  estore: { name: 'Elixir Storage', icon: '🧪', size: 2, hp: [0, 600, 800, 1000, 1300, 1700], cost: [0, 300, 900, 2500, 6000, 14000], res: 'gold', time: [0, 8, 15, 30, 50, 70], store: [0, 2500, 6000, 15000, 35000, 80000], color: '#a21caf', max: [0, 1, 1, 2, 2, 3] },
+  camp: { name: 'Army Camp', icon: '⛺', size: 3, hp: [0, 300, 380, 460, 540, 640], cost: [0, 250, 1000, 3000, 8000, 18000], res: 'elixir', time: [0, 8, 20, 35, 55, 80], space: [0, 20, 30, 40, 50, 60], color: '#65a30d', max: [0, 1, 1, 2, 2, 3] },
+  barracks: { name: 'Barracks', icon: '🛖', size: 2, hp: [0, 350, 420, 500, 600, 720], cost: [0, 200, 800, 2500, 6000, 15000], res: 'elixir', time: [0, 6, 15, 30, 45, 70], color: '#b45309', max: [0, 1, 1, 1, 1, 1] },
+  cannon: { name: 'Cannon', icon: '💣', size: 2, hp: [0, 420, 500, 600, 720, 860], cost: [0, 250, 1000, 3000, 7500, 16000], res: 'gold', time: [0, 6, 15, 30, 45, 70], dps: [0, 9, 12, 16, 21, 27], range: 7.5, color: '#475569', max: [0, 2, 2, 3, 4, 5], defense: true },
+  archer: { name: 'Archer Tower', icon: '🏹', size: 2, hp: [0, 380, 450, 540, 650, 780], cost: [0, 1000, 2000, 5000, 10000, 20000], res: 'gold', time: [0, 10, 20, 35, 50, 75], dps: [0, 11, 14, 18, 23, 29], range: 9.5, color: '#92400e', max: [0, 1, 2, 2, 3, 4], defense: true },
+  mortar: { name: 'Mortar', icon: '🎯', size: 2, hp: [0, 400, 460, 540, 640, 760], cost: [0, 8000, 8000, 12000, 20000, 32000], res: 'gold', time: [0, 25, 25, 40, 60, 90], dps: [0, 6, 8, 10, 13, 17], range: 10.5, minRange: 3, splash: 1.6, color: '#334155', max: [0, 0, 0, 1, 1, 2], defense: true },
+  wall: { name: 'Wall', icon: '', size: 1, hp: [0, 300, 550, 900, 1400, 2100], cost: [0, 50, 200, 600, 1500, 3500], res: 'gold', time: [0, 0, 0, 0, 0, 0], color: '#9ca3af', max: [0, 25, 50, 75, 100, 125] }
+};
+const TROOPS = {
+  barb: { name: 'Barbarian', icon: '🪓', cost: 25, hp: 50, dps: 9, range: 0.7, speed: 1.6, space: 1, time: 1.5, prefer: null },
+  archer: { name: 'Archer', icon: '🏹', cost: 50, hp: 22, dps: 8, range: 3.5, speed: 1.8, space: 1, time: 2, prefer: null },
+  goblin: { name: 'Goblin', icon: '👺', cost: 30, hp: 28, dps: 12, range: 0.7, speed: 2.6, space: 1, time: 1.5, prefer: 'res', bonus: 2 },
+  giant: { name: 'Giant', icon: '🗿', cost: 250, hp: 320, dps: 12, range: 0.9, speed: 1.1, space: 5, time: 6, prefer: 'def' }
+};
+const RES_TYPES = new Set(['gold', 'elixir', 'gstore', 'estore', 'th']);
+
+// ---------- saved village ----------
+function freshVillage() {
+  const now = Date.now();
+  return {
+    id: 'v' + uid(), name: playerName(), gold: 800, elixir: 800, trophies: 0, builders: 1,
+    army: { barb: 10, archer: 5, goblin: 0, giant: 0 }, queue: [], seenLogs: [],
+    b: [
+      { t: 'th', l: 1, x: 10, y: 10 }, { t: 'gold', l: 1, x: 6, y: 9, at: now }, { t: 'elixir', l: 1, x: 14, y: 11, at: now },
+      { t: 'gstore', l: 1, x: 9, y: 6 }, { t: 'estore', l: 1, x: 12, y: 14 }, { t: 'camp', l: 1, x: 4, y: 14 },
+      { t: 'barracks', l: 1, x: 16, y: 6 }, { t: 'cannon', l: 1, x: 12, y: 7 }, { t: 'cannon', l: 1, x: 7, y: 13 }
+    ]
+  };
+}
+let V = Store.get('village', null) || freshVillage();
+const save = () => Store.set('village', V);
+const thLevel = () => V.b.find(x => x.t === 'th').l;
+const cap = res => V.b.filter(x => x.t === (res === 'gold' ? 'gstore' : 'estore')).reduce((s, x) => s + B[x.t].store[x.l], 1000);
+const armySpace = () => V.b.filter(x => x.t === 'camp').reduce((s, x) => s + B.camp.space[x.l], 0);
+const armyUsed = (a = V.army) => Object.entries(a).reduce((s, [k, n]) => s + TROOPS[k].space * n, 0) + V.queue.reduce((s, q) => s + TROOPS[q.t].space, 0);
+const busyBuilders = () => V.b.filter(x => x.until && x.until > Date.now()).length;
+const fmt = n => (n >= 10000 ? (n / 1000).toFixed(1) + 'k' : Math.floor(n).toString());
+
+function stored(b) { const cur = Math.min(B[b.t].cap[b.l], (Date.now() - (b.at || Date.now())) / 1000 * B[b.t].rate[b.l]); return Math.max(0, cur); }
+
+function tick() {
+  const now = Date.now();
+  // finish upgrades
+  V.b.forEach(b => { if (b.until && b.until <= now) { b.l++; delete b.until; toast(`${B[b.t].name} upgraded to level ${b.l}!`); if (b.t === 'th' && b.l >= 3) V.builders = 2; } });
+  // training
+  while (V.queue.length && V.queue[0].done <= now) {
+    const q = V.queue.shift();
+    V.army[q.t] = (V.army[q.t] || 0) + 1;
+  }
+  save();
+}
+
+// ---------- isometric helpers ----------
+const iso = (x, y) => ({ x: OX + (x - y) * TW / 2, y: OY + (x + y) * TH / 2 });
+function screenToTile(px, py) {
+  const dx = (px - OX) / (TW / 2), dy = (py - OY) / (TH / 2);
+  return { x: (dx + dy) / 2, y: (dy - dx) / 2 };
+}
+function occupiedBy(list, x, y, skip) { return list.find(b => b !== skip && x >= b.x && x < b.x + B[b.t].size && y >= b.y && y < b.y + B[b.t].size); }
+function canPlace(list, t, x, y, skip) {
+  const s = B[t].size;
+  if (x < 1 || y < 1 || x + s > MAP - 1 || y + s > MAP - 1) return false;
+  for (let i = 0; i < s; i++) for (let j = 0; j < s; j++) if (occupiedBy(list, x + i, y + j, skip)) return false;
+  return true;
+}
+
+function drawGround(highlight) {
+  ctx.fillStyle = '#14532d';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let y = 0; y < MAP; y++) for (let x = 0; x < MAP; x++) {
+    const p = iso(x, y);
+    ctx.fillStyle = (x + y) % 2 ? '#4d7c0f' : '#538a12';
+    if (x === 0 || y === 0 || x === MAP - 1 || y === MAP - 1) ctx.fillStyle = '#3f6212';
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + TW / 2, p.y + TH / 2); ctx.lineTo(p.x, p.y + TH); ctx.lineTo(p.x - TW / 2, p.y + TH / 2); ctx.fill();
+  }
+  if (highlight) highlight();
+}
+
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16);
+  const f = v => clamp(Math.round(v * k), 0, 255);
+  return `rgb(${f(n >> 16 & 255)},${f(n >> 8 & 255)},${f(n & 255)})`;
+}
+
+// a building drawn as an isometric box with its icon on top
+function drawBuilding(b, opts = {}) {
+  const def = B[b.t], s = def.size;
+  const h = b.t === 'wall' ? 9 : 12 + s * 6 + (b.l || 1) * 2;
+  const top = iso(b.x, b.y), right = iso(b.x + s, b.y), bottom = iso(b.x + s, b.y + s), left = iso(b.x, b.y + s);
+  const col = opts.ghost ? (opts.ok ? '#22c55e' : '#ef4444') : def.color;
+  ctx.globalAlpha = opts.ghost ? 0.6 : opts.dead ? 0.5 : 1;
+  if (opts.dead) {
+    ctx.fillStyle = '#44403c';
+    ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(right.x, right.y); ctx.lineTo(bottom.x, bottom.y); ctx.lineTo(left.x, left.y); ctx.fill();
+    ctx.globalAlpha = 1;
+    return;
+  }
+  const inset = b.t === 'wall' ? 0 : 3;
+  const T = { x: top.x, y: top.y + inset }, R = { x: right.x - inset * 2, y: right.y }, Bt = { x: bottom.x, y: bottom.y - inset }, L = { x: left.x + inset * 2, y: left.y };
+  ctx.fillStyle = shade(col, 0.75);
+  ctx.beginPath(); ctx.moveTo(L.x, L.y); ctx.lineTo(Bt.x, Bt.y); ctx.lineTo(Bt.x, Bt.y - h); ctx.lineTo(L.x, L.y - h); ctx.fill();
+  ctx.fillStyle = shade(col, 0.55);
+  ctx.beginPath(); ctx.moveTo(Bt.x, Bt.y); ctx.lineTo(R.x, R.y); ctx.lineTo(R.x, R.y - h); ctx.lineTo(Bt.x, Bt.y - h); ctx.fill();
+  ctx.fillStyle = shade(col, 1.05);
+  ctx.beginPath(); ctx.moveTo(T.x, T.y - h); ctx.lineTo(R.x, R.y - h); ctx.lineTo(Bt.x, Bt.y - h); ctx.lineTo(L.x, L.y - h); ctx.fill();
+  ctx.globalAlpha = 1;
+  if (def.icon) {
+    ctx.font = `${10 + s * 5}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(def.icon, (T.x + Bt.x) / 2, (T.y + Bt.y) / 2 - h - 2);
+    ctx.textBaseline = 'alphabetic';
+    if (!opts.ghost && b.t !== 'wall') {
+      ctx.font = 'bold 9px system-ui';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(b.l, L.x + 6, L.y - h + 4);
+    }
+  }
+  if (opts.hp != null && opts.hp < 1) {
+    const cx = (T.x + Bt.x) / 2, cy = T.y - h - 14;
+    ctx.fillStyle = '#111'; ctx.fillRect(cx - 14, cy, 28, 4);
+    ctx.fillStyle = opts.hp > 0.5 ? '#22c55e' : '#f59e0b'; ctx.fillRect(cx - 14, cy, 28 * opts.hp, 4);
+  }
+  if (opts.extra) opts.extra((T.x + Bt.x) / 2, T.y - h);
+}
+
+function sortedBuildings(list) { return list.slice().sort((a, b) => (a.x + a.y + B[a.t].size) - (b.x + b.y + B[b.t].size)); }
+
+// ---------- home screen ----------
+let mode = 'home', selected = null, placing = null, moving = null, hover = null;
+function hud() {
+  tick();
+  document.getElementById('res').innerHTML = `<span>🪙 ${fmt(V.gold)} / ${fmt(cap('gold'))}</span><span>💧 ${fmt(V.elixir)} / ${fmt(cap('elixir'))}</span><span>🏆 ${V.trophies}</span><span>👷 ${V.builders - busyBuilders()}/${V.builders}</span><span>🪖 ${armyUsed()}/${armySpace()}</span>`;
+  document.getElementById('who').textContent = `${V.name} · TH ${thLevel()}`;
+}
+
+function drawHome() {
+  drawGround(() => {
+    if (placing && hover) {
+      const ok = canPlace(V.b, placing, hover.x, hover.y, moving);
+      drawBuilding({ t: placing, x: hover.x, y: hover.y, l: 1 }, { ghost: true, ok });
+    }
+  });
+  sortedBuildings(V.b).forEach(b => {
+    if (b === moving) return;
+    drawBuilding(b, {
+      extra: (x, y) => {
+        if (b.until) {
+          const left = Math.ceil((b.until - Date.now()) / 1000);
+          ctx.font = 'bold 10px system-ui'; ctx.fillStyle = '#fde047'; ctx.textAlign = 'center';
+          ctx.fillText(`🔨 ${left}s`, x, y - 16);
+        } else if (B[b.t].rate && stored(b) >= B[b.t].cap[b.l] * 0.25) {
+          ctx.font = '13px system-ui'; ctx.textAlign = 'center';
+          ctx.fillText(b.t === 'gold' ? '🪙' : '💧', x, y - 16 + Math.sin(performance.now() / 200) * 2);
+        }
+        if (b === selected) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y + 8, 18, 0, 7); ctx.stroke(); }
+      }
+    });
+  });
+  if (V.queue.length) {
+    ctx.fillStyle = '#fff'; ctx.font = '12px system-ui'; ctx.textAlign = 'left';
+    const q = V.queue[0];
+    ctx.fillText(`Training ${TROOPS[q.t].icon} ${Math.max(0, Math.ceil((q.done - Date.now()) / 1000))}s (${V.queue.length} queued)`, 10, cv.height - 10);
+  }
+}
+
+function toast(msg, ms = 2400) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), ms);
+}
+
+const panel = document.getElementById('panel');
+function closePanel() { panel.classList.remove('on'); panel.innerHTML = ''; selected = null; }
+function showPanel(html) { panel.innerHTML = html; panel.classList.add('on'); }
+
+function spend(res, amount) {
+  if (V[res] < amount) { toast(`Not enough ${res === 'gold' ? 'gold 🪙' : 'elixir 💧'}`); return false; }
+  V[res] -= amount;
+  save();
+  hud();
+  return true;
+}
+
+function buildingPanel(b) {
+  selected = b;
+  const def = B[b.t], next = b.l + 1, maxL = def.hp.length - 1;
+  const thCap = b.t === 'th' ? maxL : Math.min(maxL, thLevel() + (b.t === 'wall' ? 0 : 0));
+  let html = `<h3>${def.icon} ${def.name} — level ${b.l}${b.until ? ' (upgrading)' : ''}</h3><div class="grid-btns">`;
+  if (def.rate) html += `<button id="pCollect">Collect ${b.t === 'gold' ? '🪙' : '💧'} ${Math.floor(stored(b))}<small>Makes ${def.rate[b.l]}/s, holds ${def.cap[b.l]}</small></button>`;
+  if (def.store) html += `<button disabled>Holds ${fmt(def.store[b.l])}<small>${b.t === 'gstore' ? 'gold' : 'elixir'} storage</small></button>`;
+  if (def.dps) html += `<button disabled>Damage ${def.dps[b.l]}/s<small>Range ${def.range}</small></button>`;
+  if (b.t === 'camp') html += `<button disabled>Houses ${def.space[b.l]} troops</button>`;
+  if (b.t === 'barracks') html += `<button id="pTrain">🪖 Train troops</button>`;
+  if (!b.until && next <= thCap) {
+    const c = def.cost[next], free = V.builders - busyBuilders() > 0 || def.time[next] === 0;
+    html += `<button id="pUp" ${V[def.res] < c || !free ? 'disabled' : ''}>⬆️ Upgrade to ${next}<small>${def.res === 'gold' ? '🪙' : '💧'} ${fmt(c)} · ${def.time[next] ? def.time[next] + 's' : 'instant'}${free ? '' : ' · no free builder'}</small></button>`;
+  } else if (!b.until) html += `<button disabled>Max level for your Town Hall</button>`;
+  html += `<button id="pMove">✋ Move</button><button id="pClose">Close</button></div>`;
+  showPanel(html);
+  const on = (id, fn) => { const el = panel.querySelector(id); if (el) el.onclick = fn; };
+  on('#pCollect', () => { collect(b); buildingPanel(b); });
+  on('#pTrain', trainPanel);
+  on('#pUp', () => {
+    const c = def.cost[next];
+    if (!spend(def.res, c)) return;
+    if (def.time[next]) b.until = Date.now() + def.time[next] * 1000;
+    else { b.l++; }
+    Sound.beep(700, 0.1, 'triangle');
+    save(); publishBase(true); hud(); buildingPanel(b);
+  });
+  on('#pMove', () => { moving = b; placing = b.t; closePanel(); toast('Tap where it should go'); });
+  on('#pClose', closePanel);
+}
+
+function collect(b) {
+  const res = b.t === 'gold' ? 'gold' : 'elixir';
+  const amount = Math.floor(Math.min(stored(b), cap(res) - V[res]));
+  if (amount <= 0) { if (stored(b) > 0) toast('Storage is full — upgrade or build storages'); return 0; }
+  V[res] += amount;
+  b.at = Date.now() - (stored(b) - amount) / B[b.t].rate[b.l] * 1000;
+  Sound.beep(1200, 0.05, 'triangle', 0.03);
+  save(); hud();
+  return amount;
+}
+
+function shopPanel() {
+  const th = thLevel();
+  let html = '<h3>🛒 Build</h3><div class="grid-btns">';
+  for (const [t, def] of Object.entries(B)) {
+    if (t === 'th') continue;
+    const have = V.b.filter(x => x.t === t).length, max = def.max[th] || 0;
+    const c = def.cost[1];
+    html += `<button data-t="${t}" ${have >= max || V[def.res] < c ? 'disabled' : ''}>${def.icon || '🧱'} ${def.name}<small>${def.res === 'gold' ? '🪙' : '💧'} ${fmt(c)} · ${have}/${max}${max === 0 ? ' (needs a bigger Town Hall)' : ''}</small></button>`;
+  }
+  html += '<button id="pClose">Close</button></div>';
+  showPanel(html);
+  panel.querySelectorAll('[data-t]').forEach(btn => btn.onclick = () => {
+    placing = btn.dataset.t;
+    moving = null;
+    closePanel();
+    toast(placing === 'wall' ? 'Tap to place walls (tap Done when finished)' : 'Tap the map to place it');
+    if (placing === 'wall') {
+      showPanel('<div class="grid-btns"><button id="pDone">✅ Done placing walls</button></div>');
+      panel.querySelector('#pDone').onclick = () => { placing = null; closePanel(); };
+    }
+  });
+  panel.querySelector('#pClose').onclick = closePanel;
+}
+
+function trainPanel() {
+  const space = armySpace(), used = armyUsed();
+  let html = `<h3>🪖 Army ${used}/${space}</h3><div class="grid-btns">`;
+  for (const [k, t] of Object.entries(TROOPS)) {
+    const can = used + t.space <= space && V.elixir >= t.cost;
+    html += `<button data-k="${k}" ${can ? '' : 'disabled'}>${t.icon} ${t.name} ×${V.army[k] || 0}<small>💧 ${t.cost} · ${t.time}s · ${t.space} space</small></button>`;
+  }
+  html += '<button id="pClose">Close</button></div>';
+  showPanel(html);
+  panel.querySelectorAll('[data-k]').forEach(btn => btn.onclick = () => {
+    const k = btn.dataset.k, t = TROOPS[k];
+    if (armyUsed() + t.space > armySpace() || !spend('elixir', t.cost)) return;
+    const startAt = V.queue.length ? V.queue[V.queue.length - 1].done : Date.now();
+    V.queue.push({ t: k, done: startAt + t.time * 1000 });
+    save(); hud(); trainPanel();
+  });
+  panel.querySelector('#pClose').onclick = closePanel;
+}
+
+// ---------- publishing my base / receiving raid reports ----------
+let lastPub = 0;
+// share my village so other players can raid it (on changes, and every 30s otherwise)
+function publishBase(force) {
+  if (!Relay.up || Date.now() - lastPub < (force ? 1000 : 30000)) return;
+  lastPub = Date.now();
+  const data = { id: V.id, name: V.name, th: thLevel(), tr: V.trophies, g: Math.floor(V.gold), e: Math.floor(V.elixir), ts: Date.now(), b: V.b.map(b => [b.t, b.l, b.x, b.y]) };
+  Relay.pub(`${ROOT}/base/${V.id}`, data, true);
+}
+function listenForRaids() {
+  Relay.sub(`${ROOT}/log/${V.id}/+`, (msg, topic) => {
+    if (!msg || !msg.id || V.seenLogs.includes(msg.id)) return;
+    V.seenLogs = [...V.seenLogs.slice(-40), msg.id];
+    const g = clamp(Math.floor(+msg.g || 0), 0, Math.floor(V.gold * 0.3)), e = clamp(Math.floor(+msg.e || 0), 0, Math.floor(V.elixir * 0.3));
+    V.gold -= g; V.elixir -= e;
+    const stars = clamp(+msg.s || 0, 0, 3);
+    if (stars) V.trophies = Math.max(0, V.trophies - clamp(+msg.tr || 0, 0, 40));
+    else V.trophies += 5;
+    save(); hud();
+    toast(stars ? `⚔️ ${String(msg.n).slice(0, 16)} raided you: ${stars}★, took 🪙${g} 💧${e}` : `🛡️ Your village held off ${String(msg.n).slice(0, 16)}! +5 🏆`, 5000);
+    Relay.links.forEach(l => l.publish(topic, '', true)); // clear the report
+  });
+}
+
+// ---------- battle ----------
+let BT = null;
+function validBase(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.b) || d.b.length > 250 || d.id === V.id) return false;
+  if (!d.b.some(x => x[0] === 'th')) return false;
+  return d.b.every(x => Array.isArray(x) && B[x[0]] && x[1] >= 1 && x[1] < B[x[0]].hp.length && x[2] >= 0 && x[3] >= 0 && x[2] + B[x[0]].size <= MAP && x[3] + B[x[0]].size <= MAP);
+}
+
+function botBase(th) {
+  const list = [{ t: 'th', l: th, x: 9, y: 9 }];
+  const add = (t, l) => {
+    for (let tries = 0; tries < 200; tries++) {
+      const r = 3 + Math.random() * 6, a = Math.random() * 7, s = B[t].size;
+      const x = Math.round(10 + Math.cos(a) * r - s / 2), y = Math.round(10 + Math.sin(a) * r - s / 2);
+      if (canPlace(list, t, x, y)) { list.push({ t, l, x, y }); return; }
+    }
+  };
+  for (const t of ['cannon', 'archer', 'mortar', 'gold', 'elixir', 'gstore', 'estore', 'camp', 'barracks']) {
+    const n = B[t].max[th];
+    for (let i = 0; i < n; i++) add(t, clamp(th - randInt(0, 1), 1, 5));
+  }
+  // a ring of walls
+  const r = 7;
+  for (let x = 10 - r; x <= 10 + r; x++) for (const y of [10 - r, 10 + r]) if (Math.random() < 0.85 && canPlace(list, 'wall', x, y)) list.push({ t: 'wall', l: th, x, y });
+  for (let y = 10 - r + 1; y < 10 + r; y++) for (const x of [10 - r, 10 + r]) if (Math.random() < 0.85 && canPlace(list, 'wall', x, y)) list.push({ t: 'wall', l: th, x, y });
+  return { id: 'bot', name: randomName(), th, tr: Math.max(0, V.trophies + randInt(-30, 30)), g: randInt(800, 2500) * th, e: randInt(800, 2500) * th, b: list.map(b => [b.t, b.l, b.x, b.y]) };
+}
+
+function findOpponent() {
+  if (!Object.values(V.army).some(n => n > 0)) return toast('Train some troops first!');
+  closePanel();
+  overlay(ov, '<h2>Searching for a village…</h2><div class="spinner"></div>');
+  const found = [];
+  const unsub = Relay.sub(`${ROOT}/base/+`, d => { if (validBase(d) && Date.now() - (+d.ts || 0) < 14 * 864e5) found.push(d); });
+  setTimeout(() => {
+    unsub();
+    const th = thLevel();
+    const fair = found.filter(d => Math.abs((+d.th || 1) - th) <= 1);
+    startBattle(fair.length ? pick(fair) : botBase(clamp(th + randInt(-1, 0), 1, 5)));
+  }, Relay.up ? 2600 : 900);
+}
+
+function startBattle(base) {
+  overlay(ov, null);
+  mode = 'battle';
+  const bs = base.b.map(([t, l, x, y]) => ({ t, l, x, y, hp: B[t].hp[l], max: B[t].hp[l], cd: 0 }));
+  const counted = bs.filter(b => b.t !== 'wall');
+  BT = {
+    base, bs, counted, troops: [], shots: [], left: { ...V.army }, sel: Object.keys(V.army).find(k => V.army[k] > 0),
+    time: 120, ended: false, loot: { g: 0, e: 0 }, pool: { g: Math.floor((+base.g || 0) * 0.2), e: Math.floor((+base.e || 0) * 0.2) }, started: false
+  };
+  document.getElementById('homeBar').style.display = 'none';
+  document.getElementById('help').textContent = 'Tap the grass outside the village to drop the selected troop. Destroy 50% for a star, the Town Hall for a star, and everything for three.';
+  renderBattleBar();
+}
+
+function renderBattleBar() {
+  const bar = document.getElementById('battleBar');
+  bar.style.display = 'flex';
+  bar.innerHTML = `<div class="troops">${Object.entries(TROOPS).map(([k, t]) => `<button data-k="${k}" class="${BT.sel === k ? 'on' : ''}" ${BT.left[k] ? '' : 'disabled'}>${t.icon}<small>×${BT.left[k] || 0}</small></button>`).join('')}</div><button class="btn alt" id="endBattle">🏳️ End battle</button>`;
+  bar.querySelectorAll('[data-k]').forEach(b => b.onclick = () => { BT.sel = b.dataset.k; renderBattleBar(); });
+  bar.querySelector('#endBattle').onclick = () => endBattle();
+}
+
+function destruction() { return BT.counted.filter(b => b.hp <= 0).length / BT.counted.length; }
+function stars() {
+  const d = destruction();
+  return (d >= 0.5 ? 1 : 0) + (BT.bs.some(b => b.t === 'th' && b.hp <= 0) ? 1 : 0) + (d >= 0.999 ? 1 : 0);
+}
+
+function deploy(tx, ty) {
+  const k = BT.sel;
+  if (!k || !BT.left[k]) return;
+  const ix = Math.floor(tx), iy = Math.floor(ty);
+  if (tx < 0 || ty < 0 || tx >= MAP || ty >= MAP) return;
+  // can't drop right next to buildings
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) if (occupiedBy(BT.bs.filter(b => b.hp > 0), ix + dx, iy + dy)) { toast('Drop troops on open grass'); return; }
+  BT.left[k]--;
+  BT.started = true;
+  const t = TROOPS[k];
+  BT.troops.push({ k, x: tx, y: ty, hp: t.hp, max: t.hp, cd: 0, target: null });
+  Sound.beep(400, 0.03, 'triangle', 0.03);
+  if (!BT.left[k]) BT.sel = Object.keys(BT.left).find(x => BT.left[x] > 0) || null;
+  renderBattleBar();
+}
+
+const centre = b => ({ x: b.x + B[b.t].size / 2, y: b.y + B[b.t].size / 2 });
+function edgeDist(tr, b) {
+  const s = B[b.t].size;
+  const dx = Math.max(b.x - tr.x, 0, tr.x - (b.x + s)), dy = Math.max(b.y - tr.y, 0, tr.y - (b.y + s));
+  return Math.hypot(dx, dy);
+}
+function chooseTarget(tr) {
+  const alive = BT.bs.filter(b => b.hp > 0 && b.t !== 'wall');
+  const pref = TROOPS[tr.k].prefer;
+  let pool = alive;
+  if (pref === 'def') pool = alive.filter(b => B[b.t].defense);
+  if (pref === 'res') pool = alive.filter(b => RES_TYPES.has(b.t));
+  if (!pool.length) pool = alive;
+  let best = null, bd = Infinity;
+  pool.forEach(b => { const d = edgeDist(tr, b); if (d < bd) { bd = d; best = b; } });
+  return best;
+}
+
+function battleStep(dt) {
+  const s = dt / 1000;
+  if (BT.started) BT.time -= s;
+  for (const tr of BT.troops) {
+    if (tr.hp <= 0) continue;
+    const T = TROOPS[tr.k];
+    if (!tr.target || tr.target.hp <= 0) tr.target = chooseTarget(tr);
+    const tg = tr.target;
+    if (!tg) continue;
+    tr.cd -= s;
+    if (edgeDist(tr, tg) <= T.range) {
+      if (tr.cd <= 0) {
+        tr.cd = 1;
+        const dmg = T.dps * (T.bonus && RES_TYPES.has(tg.t) ? T.bonus : 1);
+        if (T.range > 1) BT.shots.push({ x: tr.x, y: tr.y, tx: centre(tg).x, ty: centre(tg).y, t: 0, dur: 0.3, color: '#fef08a' });
+        hitBuilding(tg, dmg);
+      }
+    } else {
+      const c = centre(tg), d = Math.hypot(c.x - tr.x, c.y - tr.y);
+      const nx = tr.x + (c.x - tr.x) / d * T.speed * s, ny = tr.y + (c.y - tr.y) / d * T.speed * s;
+      const wall = BT.bs.find(b => b.t === 'wall' && b.hp > 0 && nx >= b.x && nx < b.x + 1 && ny >= b.y && ny < b.y + 1);
+      if (wall) {
+        // walls block the way: break through
+        if (tr.cd <= 0) { tr.cd = 1; hitBuilding(wall, T.dps); }
+      } else { tr.x = nx; tr.y = ny; }
+    }
+  }
+  for (const b of BT.bs) {
+    const def = B[b.t];
+    if (!def.defense || b.hp <= 0) continue;
+    b.cd -= s;
+    if (b.cd > 0) continue;
+    const c = centre(b);
+    let best = null, bd = Infinity;
+    for (const tr of BT.troops) {
+      if (tr.hp <= 0) continue;
+      const d = Math.hypot(tr.x - c.x, tr.y - c.y);
+      if (d <= def.range && d >= (def.minRange || 0) && d < bd) { bd = d; best = tr; }
+    }
+    if (!best) continue;
+    b.cd = b.t === 'mortar' ? 4 : 1;
+    const dmg = def.dps[b.l] * (b.t === 'mortar' ? 4 : 1);
+    BT.shots.push({ x: c.x, y: c.y, tx: best.x, ty: best.y, t: 0, dur: b.t === 'mortar' ? 1.2 : 0.25, color: b.t === 'cannon' ? '#111' : b.t === 'mortar' ? '#7c2d12' : '#fde68a', hit: () => {
+      if (def.splash) BT.troops.forEach(tr => { if (Math.hypot(tr.x - best.x, tr.y - best.y) < def.splash) tr.hp -= dmg; });
+      else best.hp -= dmg;
+    } });
+  }
+  BT.shots.forEach(sh => { sh.t += s; if (sh.t >= sh.dur && !sh.done) { sh.done = true; if (sh.hit) sh.hit(); } });
+  BT.shots = BT.shots.filter(sh => !sh.done);
+  BT.troops = BT.troops.filter(tr => tr.hp > 0);
+  const noTroops = !BT.troops.length && !Object.values(BT.left).some(n => n > 0);
+  if (BT.time <= 0 || destruction() >= 0.999 || (BT.started && noTroops)) endBattle();
+}
+
+function hitBuilding(b, dmg) {
+  if (b.hp <= 0) return;
+  b.hp -= dmg;
+  if (b.hp <= 0) {
+    b.hp = 0;
+    Sound.beep(120, 0.15, 'sawtooth', 0.04);
+    if (b.t !== 'wall') {
+      // each destroyed building hands over its share of the loot
+      const share = 1 / BT.counted.length;
+      BT.loot.g += Math.floor(BT.pool.g * share * (RES_TYPES.has(b.t) ? 2 : 0.6));
+      BT.loot.e += Math.floor(BT.pool.e * share * (RES_TYPES.has(b.t) ? 2 : 0.6));
+      BT.loot.g = Math.min(BT.loot.g, BT.pool.g); BT.loot.e = Math.min(BT.loot.e, BT.pool.e);
+    }
+  }
+}
+
+function endBattle() {
+  if (!BT || BT.ended) return;
+  BT.ended = true;
+  const st = stars(), d = Math.round(destruction() * 100);
+  const trophyWin = clamp(Math.round(20 + ((+BT.base.tr || 0) - V.trophies) / 12), 8, 40);
+  // quitting before dropping a single troop costs nothing
+  const trophyChange = !BT.started ? 0 : st ? trophyWin : -clamp(Math.round(trophyWin * 0.6), 5, 25);
+  // used troops are gone
+  for (const k of Object.keys(V.army)) V.army[k] = BT.left[k] || 0;
+  const g = Math.min(BT.loot.g, cap('gold') - V.gold), e = Math.min(BT.loot.e, cap('elixir') - V.elixir);
+  V.gold += Math.max(0, g); V.elixir += Math.max(0, e);
+  V.trophies = Math.max(0, V.trophies + trophyChange);
+  save();
+  if (BT.base.id !== 'bot' && Relay.up && BT.started) {
+    Relay.pub(`${ROOT}/log/${BT.base.id}/${V.id}`, { id: uid() + uid(), n: V.name, s: st, g: BT.loot.g, e: BT.loot.e, tr: st ? trophyWin : 0, ts: Date.now() }, true);
+  }
+  Sound.beep(st ? 880 : 200, 0.4, 'triangle');
+  overlay(ov, `<h2>${'⭐'.repeat(st) + '☆'.repeat(3 - st)}</h2><p>${d}% destroyed vs <b>${BT.base.name}</b></p><p>Loot: 🪙 ${BT.loot.g} · 💧 ${BT.loot.e}</p><p>Trophies ${trophyChange >= 0 ? '+' : ''}${trophyChange} 🏆</p><button class="btn" id="home">Return home</button>`);
+  ov.querySelector('#home').onclick = goHome;
+}
+
+function goHome() {
+  BT = null;
+  mode = 'home';
+  overlay(ov, null);
+  document.getElementById('battleBar').style.display = 'none';
+  document.getElementById('homeBar').style.display = 'flex';
+  document.getElementById('help').textContent = 'Tap buildings to upgrade or collect. Build defenses and walls, train an army, then attack — you raid other players’ villages, and they can raid yours while you’re away.';
+  hud();
+  publishBase(true);
+}
+
+function drawBattle() {
+  drawGround();
+  const list = sortedBuildings(BT.bs);
+  list.forEach(b => drawBuilding(b, { dead: b.hp <= 0, hp: b.hp / b.max }));
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const tr of BT.troops) {
+    const p = iso(tr.x, tr.y);
+    ctx.font = TROOPS[tr.k].space >= 5 ? '20px system-ui' : '13px system-ui';
+    ctx.fillText(TROOPS[tr.k].icon, p.x, p.y - 6);
+    ctx.fillStyle = '#111'; ctx.fillRect(p.x - 7, p.y - 18, 14, 2);
+    ctx.fillStyle = '#22c55e'; ctx.fillRect(p.x - 7, p.y - 18, 14 * tr.hp / tr.max, 2);
+  }
+  ctx.textBaseline = 'alphabetic';
+  for (const sh of BT.shots) {
+    const k = sh.t / sh.dur, x = sh.x + (sh.tx - sh.x) * k, y = sh.y + (sh.ty - sh.y) * k;
+    const p = iso(x, y), arc = sh.dur > 1 ? Math.sin(k * Math.PI) * 40 : 0;
+    ctx.fillStyle = sh.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y - 10 - arc, sh.dur > 1 ? 4 : 2.5, 0, 7); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(0,0,0,.55)';
+  ctx.fillRect(0, 0, cv.width, 30);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 14px system-ui';
+  ctx.textAlign = 'left';
+  ctx.fillText(`⚔️ ${BT.base.name} (TH${BT.base.th}, 🏆${BT.base.tr || 0})`, 10, 20);
+  ctx.textAlign = 'right';
+  ctx.fillText(`${'⭐'.repeat(stars())} ${Math.round(destruction() * 100)}%  ⏱ ${Math.max(0, Math.ceil(BT.time))}s  🪙${BT.loot.g} 💧${BT.loot.e}`, cv.width - 10, 20);
+}
+
+// ---------- input ----------
+cv.addEventListener('pointermove', e => {
+  if (mode !== 'home' || !placing) return;
+  const p = canvasPoint(cv, e), t = screenToTile(p.x, p.y), s = B[placing].size;
+  hover = { x: Math.round(t.x - s / 2), y: Math.round(t.y - s / 2) };
+});
+cv.addEventListener('pointerdown', e => {
+  const p = canvasPoint(cv, e), t = screenToTile(p.x, p.y);
+  if (mode === 'battle') { if (!BT.ended) deploy(t.x, t.y); return; }
+  if (placing) {
+    const s = B[placing].size;
+    hover = { x: Math.round(t.x - s / 2), y: Math.round(t.y - s / 2) };
+    if (!canPlace(V.b, placing, hover.x, hover.y, moving)) { Sound.beep(150, 0.08, 'square', 0.03); return; }
+    if (moving) { moving.x = hover.x; moving.y = hover.y; moving = null; placing = null; }
+    else {
+      const def = B[placing];
+      if (!spend(def.res, def.cost[1])) { placing = null; return; }
+      V.b.push({ t: placing, l: 1, x: hover.x, y: hover.y, at: Date.now() });
+      const left = def.max[thLevel()] - V.b.filter(x => x.t === placing).length;
+      if (placing !== 'wall' || left <= 0 || V[def.res] < def.cost[1]) { placing = null; if (panel.querySelector('#pDone')) closePanel(); }
+    }
+    Sound.beep(600, 0.06, 'triangle');
+    save(); hud(); publishBase(true);
+    return;
+  }
+  const b = occupiedBy(V.b, Math.floor(t.x), Math.floor(t.y));
+  if (b) {
+    if (B[b.t].rate && stored(b) >= 1 && collect(b)) return;
+    buildingPanel(b);
+  } else closePanel();
+});
+document.getElementById('attackBtn').onclick = findOpponent;
+document.getElementById('shopBtn').onclick = shopPanel;
+document.getElementById('armyBtn').onclick = trainPanel;
+document.getElementById('collectBtn').onclick = () => { let n = 0; V.b.forEach(b => { if (B[b.t].rate) n += collect(b) || 0; }); if (!n) toast('Nothing to collect yet'); };
+document.getElementById('nameBtn').onclick = () => {
+  showPanel(`<h3>Village name (other players see it)</h3><div class="grid-btns"><input id="pName" maxlength="16" style="padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--panel-2);color:var(--fg)"><button id="pSave">Save</button></div>`);
+  const input = panel.querySelector('#pName');
+  input.value = V.name;
+  panel.querySelector('#pSave').onclick = () => {
+    const n = input.value.trim().slice(0, 16);
+    if (n) { V.name = n; Store.set('player-name', n); save(); hud(); publishBase(true); }
+    closePanel();
+  };
+};
+
+let last = 0, hudT = 0;
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (mode === 'battle' && BT) { if (!BT.ended) battleStep(dt); drawBattle(); }
+  else drawHome();
+  hudT += dt;
+  if (hudT > 500) { hudT = 0; if (mode === 'home') { hud(); publishBase(); } }
+  requestAnimationFrame(loop);
+}
+
+Relay.start();
+listenForRaids();
+Relay.watch(() => publishBase(true));
+hud();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
