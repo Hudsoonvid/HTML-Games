@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slime Volley</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏐 Slime Volley</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="stage">
+  <canvas id="c" class="game" width="760" height="400"></canvas>
+</div>
+<p class="help">Bounce the ball over the net so it lands on the other side. Left slime: <kbd>A</kbd>/<kbd>D</kbd> to move, <kbd>W</kbd> to jump. Right slime (2 players): <kbd>←</kbd>/<kbd>→</kbd> and <kbd>↑</kbd>. On touch, hold your side of the screen to move toward your finger and tap above your slime to jump. First to 7!</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height, GROUND = H - 40, NETX = W / 2, NETH = 70, SR = 46, BR = 12, WIN = 7;
+let S, sl, ball, score, state = 'idle', last = 0, keys = {}, serve = 0, pause = 0, touch = {};
+
+function begin(s) {
+  S = s;
+  sl = [{ x: W / 4, y: GROUND, vx: 0, vy: 0, col: '#22d3ee' }, { x: W * 3 / 4, y: GROUND, vx: 0, vy: 0, col: '#f472b6' }];
+  score = [0, 0]; serve = 0;
+  resetBall();
+  state = 'play';
+  status();
+}
+
+function resetBall() { ball = { x: serve === 0 ? W / 4 : W * 3 / 4, y: 120, vx: 0, vy: 0 }; pause = 700; }
+
+function status() {
+  document.getElementById('stat').innerHTML = `<span style="color:#22d3ee">${S.mode === 'local' ? 'Left' : 'You'} <b>${score[0]}</b></span> <span style="color:#f472b6">${S.mode === 'local' ? 'Right' : 'CPU'} <b>${score[1]}</b></span>${S.mode === 'cpu' ? ` · CPU ${S.level.toFixed(2)}` : ''}`;
+}
+
+function control(i, s) {
+  const p = sl[i], lo = i ? NETX + SR + 4 : SR, hi = i ? W - SR : NETX - SR - 4;
+  let dir = 0, jump = false;
+  if (i === 0) { dir = (keys.d ? 1 : 0) - (keys.a ? 1 : 0); jump = keys.w; if (S.mode !== 'local') { dir += (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0); jump = jump || keys.ArrowUp; } }
+  else if (S.mode === 'local') { dir = (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0); jump = keys.ArrowUp; }
+  else {
+    // computer: predict where the ball comes down on its side and get slightly behind it
+    const L = S.level;
+    let px = ball.x, py = ball.y, vx = ball.vx, vy = ball.vy;
+    for (let k = 0; k < 120 && py < GROUND - SR * 0.6; k++) { vy += 900 / 60; px += vx / 60; py += vy / 60; if (px < BR || px > W - BR) vx = -vx; }
+    const target = px > NETX ? px + 14 + (1 - L) * rand(-20, 20) : W * 3 / 4;
+    dir = Math.abs(target - p.x) > 6 ? Math.sign(target - p.x) : 0;
+    jump = ball.x > NETX && Math.abs(ball.x - p.x) < 60 && ball.y > GROUND - 190 && ball.y < GROUND - 60 && Math.random() < 0.3 + L * 0.6;
+    p.speedK = 0.6 + L * 0.5;
+  }
+  const t = touch[i];
+  if (t) { if (Math.abs(t.x - p.x) > 10) dir = Math.sign(t.x - p.x); if (t.jump) { jump = true; t.jump = false; } }
+  p.vx = clamp(dir, -1, 1) * 330 * (p.speedK || 1);
+  if (jump && p.y >= GROUND) p.vy = -460;
+  p.vy += 1000 * s;
+  p.x = clamp(p.x + p.vx * s, lo, hi);
+  p.y = Math.min(GROUND, p.y + p.vy * s);
+  if (p.y >= GROUND) p.vy = 0;
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  control(0, s); control(1, s);
+  if (pause > 0) { pause -= dt; return; }
+  ball.vy += 900 * s;
+  ball.x += ball.vx * s; ball.y += ball.vy * s;
+  if (ball.x < BR) { ball.x = BR; ball.vx = Math.abs(ball.vx); }
+  if (ball.x > W - BR) { ball.x = W - BR; ball.vx = -Math.abs(ball.vx); }
+  if (ball.y < BR) { ball.y = BR; ball.vy = Math.abs(ball.vy); }
+  // net
+  if (Math.abs(ball.x - NETX) < BR + 4 && ball.y > GROUND - NETH) {
+    if (ball.y < GROUND - NETH + 10 && ball.vy > 0) { ball.vy = -Math.abs(ball.vy) * 0.8; ball.y = GROUND - NETH - BR; }
+    else { ball.vx = (ball.x < NETX ? -1 : 1) * Math.abs(ball.vx); ball.x = NETX + (ball.x < NETX ? -1 : 1) * (BR + 4); }
+  }
+  // slime bounce: slimes are half-circles
+  for (const p of sl) {
+    const dx = ball.x - p.x, dy = ball.y - p.y, d = Math.hypot(dx, dy);
+    if (d < SR + BR && dy < 0) {
+      const nx = dx / d, ny = dy / d;
+      ball.x = p.x + nx * (SR + BR); ball.y = p.y + ny * (SR + BR);
+      const rvx = ball.vx - p.vx, rvy = ball.vy - p.vy, vn = rvx * nx + rvy * ny;
+      if (vn < 0) { ball.vx -= 2 * vn * nx; ball.vy -= 2 * vn * ny; }
+      ball.vx += p.vx * 0.3; ball.vy = Math.min(ball.vy, -350) + p.vy * 0.2;
+      const sp = Math.hypot(ball.vx, ball.vy);
+      if (sp > 820) { ball.vx *= 820 / sp; ball.vy *= 820 / sp; }
+      Sound.beep(500, 0.03, 'triangle', 0.03);
+    }
+  }
+  if (ball.y > GROUND - BR) {
+    const side = ball.x < NETX ? 1 : 0;
+    score[side]++;
+    serve = side;
+    Sound.beep(side === 0 || S.mode === 'local' ? 880 : 200, 0.2, 'triangle', 0.05);
+    status();
+    if (score[side] >= WIN) {
+      state = 'over';
+      const title = S.mode === 'local' ? `${side ? 'Right' : 'Left'} slime wins! 🏐` : side === 0 ? 'You win! 🏐🏆' : 'The computer wins';
+      setTimeout(() => Lobby.end(S, { result: side === 0 ? 1 : 0, title, detail: `${score[0]} – ${score[1]}` }), 700);
+      return;
+    }
+    resetBall();
+  }
+}
+
+function drawSlime(p, look) {
+  ctx.fillStyle = p.col;
+  ctx.beginPath(); ctx.arc(p.x, p.y, SR, Math.PI, 0); ctx.fill();
+  const ex = p.x + (look ? 18 : -18) * 0.6, ey = p.y - SR * 0.55;
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ex, ey, 9, 0, 7); ctx.fill();
+  const a = Math.atan2(ball.y - ey, ball.x - ex);
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(ex + Math.cos(a) * 4, ey + Math.sin(a) * 4, 4, 0, 7); ctx.fill();
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0ea5e9'); g.addColorStop(1, '#bae6fd');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fde68a'; ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = '#f8fafc'; ctx.fillRect(NETX - 4, GROUND - NETH, 8, NETH);
+  if (!sl) return;
+  drawSlime(sl[0], true); drawSlime(sl[1], false);
+  ctx.fillStyle = '#facc15'; ctx.beginPath(); ctx.arc(ball.x, ball.y, BR, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#a16207'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,.15)'; ctx.beginPath(); ctx.ellipse(ball.x, GROUND + 4, 12 * (1 - (GROUND - ball.y) / 600), 4, 0, 0, 7); ctx.fill();
+  ctx.font = 'bold 40px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,.6)';
+  ctx.fillText(`${score[0]}  :  ${score[1]}`, W / 2, 50);
+}
+
+function loop(t) {
+  const dt = Math.min(33, t - last);
+  last = t;
+  if (state === 'play') { update(dt / 2); update(dt / 2); }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = true; if (e.key.startsWith('Arrow') || e.key === ' ') e.preventDefault(); });
+document.addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
+// touch: each half of the screen steers the slime on that side; a tap above your slime jumps
+const ptr = {};
+cv.addEventListener('pointerdown', e => {
+  if (!S) return;
+  const p = canvasPoint(cv, e), i = S.mode === 'local' && p.x > NETX ? 1 : 0;
+  ptr[e.pointerId] = i;
+  touch[i] = { x: p.x, jump: p.y < sl[i].y - SR - 10 };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => { const i = ptr[e.pointerId]; if (i != null) touch[i].x = canvasPoint(cv, e).x; });
+const up = e => { const i = ptr[e.pointerId]; if (i != null) delete touch[i]; delete ptr[e.pointerId]; };
+cv.addEventListener('pointerup', up);
+cv.addEventListener('pointercancel', up);
+document.getElementById('menu').onclick = () => { state = 'idle'; Lobby.open(); };
+requestAnimationFrame(loop);
+Lobby.open({ game: 'slime-volley', title: '🏐 Slime Volley', online: false, local: true, onStart: begin });
+</script>
+</body>
+</html>

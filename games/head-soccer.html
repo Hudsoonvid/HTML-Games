@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Head Soccer</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🥅 Head Soccer</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="stage">
+  <canvas id="c" class="game" width="800" height="420"></canvas>
+</div>
+<div class="touchpad"><button id="tl">◀</button><button id="tr">▶</button><button id="tj">⤒</button><button id="tk">🦶</button></div>
+<p class="help">Score in the goal on the right. Left player: <kbd>A</kbd>/<kbd>D</kbd> move, <kbd>W</kbd> jump, <kbd>S</kbd> or <kbd>Space</kbd> kick. Right player (2 players): <kbd>←</kbd>/<kbd>→</kbd>, <kbd>↑</kbd> jump, <kbd>↓</kbd> or <kbd>Enter</kbd> kick. Headers count! Most goals in 90 seconds wins (first to 7 wins early).</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height, GROUND = H - 40, GOAL_H = 130, GOAL_D = 50, HR = 30, BR = 13, MATCH = 90;
+let S, pl, ball, score, time, state = 'idle', last = 0, keys = {}, pause = 0, tbtn = {};
+
+function begin(s) {
+  S = s;
+  pl = [mk(W * 0.25, 1, '#2563eb', '🙂'), mk(W * 0.75, -1, '#dc2626', S.mode === 'cpu' ? '🤖' : '😎')];
+  score = [0, 0]; time = MATCH;
+  kickoff(0);
+  state = 'play';
+  status();
+}
+const mk = (x, face, col, e) => ({ x, y: GROUND, vx: 0, vy: 0, face, col, e, kick: 0, home: x });
+function kickoff(toward) {
+  ball = { x: W / 2, y: 120, vx: toward ? -40 : 40, vy: 0, spin: 0 };
+  pl.forEach(p => { p.x = p.home; p.y = GROUND; p.vx = p.vy = 0; });
+  pause = 900;
+}
+
+function status() {
+  document.getElementById('stat').innerHTML = `<span style="color:#60a5fa">${S.mode === 'local' ? 'Blue' : 'You'} <b>${score[0]}</b></span> <span style="color:#f87171">${S.mode === 'local' ? 'Red' : 'CPU'} <b>${score[1]}</b></span> ⏱ <b>${Math.ceil(Math.max(0, time))}</b>`;
+}
+
+function control(i, s) {
+  const p = pl[i];
+  let dir = 0, jump = false, kick = false;
+  if (i === 0) {
+    dir = (keys.d ? 1 : 0) - (keys.a ? 1 : 0) + (tbtn.r ? 1 : 0) - (tbtn.l ? 1 : 0);
+    jump = keys.w || tbtn.j; kick = keys.s || keys[' '] || tbtn.k;
+    if (S.mode !== 'local') { dir += (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0); jump = jump || keys.ArrowUp; kick = kick || keys.ArrowDown; }
+  } else if (S.mode === 'local') { dir = (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0); jump = keys.ArrowUp; kick = keys.ArrowDown || keys.Enter; }
+  else {
+    // computer: stay between the ball and its goal, attack when the ball is on its side
+    const L = S.level, behind = ball.x + 30;
+    const target = ball.x > W * 0.35 ? behind : Math.max(W * 0.6, ball.x + 120);
+    dir = Math.abs(target - p.x) > 8 ? Math.sign(target - p.x) : 0;
+    const near = Math.abs(ball.x - p.x) < 70;
+    jump = near && ball.y < GROUND - 70 && ball.y > GROUND - 200 && Math.random() < 0.2 + L * 0.5;
+    kick = near && ball.y > GROUND - 60 && ball.x < p.x && Math.random() < 0.2 + L * 0.6;
+    p.speedK = 0.55 + L * 0.55;
+  }
+  p.vx = clamp(dir, -1, 1) * 300 * (p.speedK || 1);
+  if (jump && p.y >= GROUND) p.vy = -480;
+  if (kick && p.kick <= 0) { p.kick = 260; }
+  p.kick -= s * 1000;
+  p.vy += 1100 * s;
+  p.x = clamp(p.x + p.vx * s, GOAL_D + HR, W - GOAL_D - HR);
+  p.y = Math.min(GROUND, p.y + p.vy * s);
+  if (p.y >= GROUND) p.vy = 0;
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  control(0, s); control(1, s);
+  time -= s;
+  if (time <= 0) return end();
+  if (pause > 0) { pause -= dt; return; }
+  ball.vy += 800 * s;
+  ball.vx *= Math.pow(0.85, s);
+  ball.x += ball.vx * s; ball.y += ball.vy * s;
+  ball.spin += ball.vx * s / BR;
+  if (ball.y > GROUND - BR) { ball.y = GROUND - BR; ball.vy = -Math.abs(ball.vy) * 0.65; ball.vx *= 0.97; }
+  if (ball.y < BR) { ball.y = BR; ball.vy = Math.abs(ball.vy); }
+  // goals: the crossbar is solid, the open mouth scores
+  for (const [gx, side] of [[GOAL_D, 1], [W - GOAL_D, 0]]) {
+    const inMouth = side === 1 ? ball.x < gx : ball.x > gx;
+    if (inMouth && ball.y > GROUND - GOAL_H + BR) {
+      score[side]++;
+      Sound.beep(side === 0 || S.mode === 'local' ? 900 : 200, 0.3, 'triangle', 0.05);
+      status();
+      if (score[side] >= 7) return end();
+      return kickoff(side);
+    }
+    if (Math.abs(ball.y - (GROUND - GOAL_H)) < BR + 4 && (side === 1 ? ball.x < gx + 6 : ball.x > gx - 6)) { ball.vy = -Math.abs(ball.vy) * 0.6 - 60; ball.y = GROUND - GOAL_H - BR - 4; }
+    if (side === 1 && ball.x < BR) { ball.x = BR; ball.vx = Math.abs(ball.vx); }
+    if (side === 0 && ball.x > W - BR) { ball.x = W - BR; ball.vx = -Math.abs(ball.vx); }
+  }
+  for (const p of pl) {
+    // the big head
+    const hy = p.y - 46, dx = ball.x - p.x, dy = ball.y - hy, d = Math.hypot(dx, dy);
+    if (d < HR + BR) {
+      const nx = dx / d, ny = dy / d;
+      ball.x = p.x + nx * (HR + BR); ball.y = hy + ny * (HR + BR);
+      const rv = (ball.vx - p.vx) * nx + (ball.vy - p.vy) * ny;
+      if (rv < 0) { ball.vx -= 1.7 * rv * nx; ball.vy -= 1.7 * rv * ny; }
+      ball.vx += p.vx * 0.4; ball.vy += p.vy * 0.3;
+      Sound.beep(400, 0.03, 'triangle', 0.03);
+    }
+    // body/feet push
+    if (Math.abs(ball.x - p.x) < 22 + BR && ball.y > p.y - 22) { ball.x = p.x + Math.sign(ball.x - p.x || p.face) * (22 + BR); ball.vx = p.vx + Math.sign(ball.x - p.x) * 80; }
+    // kick: the foot swings forward
+    if (p.kick > 0 && Math.abs(ball.x - (p.x + p.face * 30)) < 34 && ball.y > p.y - 50) {
+      ball.vx = p.face * 620; ball.vy = -340;
+      p.kick = 0;
+      Sound.beep(200, 0.06, 'square', 0.05);
+    }
+  }
+  const sp = Math.hypot(ball.vx, ball.vy);
+  if (sp > 950) { ball.vx *= 950 / sp; ball.vy *= 950 / sp; }
+  if (Math.random() < 0.05) status();
+}
+
+function end() {
+  state = 'over';
+  status();
+  const [a, b] = score;
+  const title = a === b ? `Draw, ${a}–${b}!` : S.mode === 'local' ? `${a > b ? 'Blue' : 'Red'} wins ${Math.max(a, b)}–${Math.min(a, b)}! ⚽` : a > b ? `You win ${a}–${b}! ⚽🏆` : `The computer wins ${b}–${a}`;
+  setTimeout(() => Lobby.end(S, { result: a === b ? 0.5 : a > b ? 1 : 0, title }), 600);
+}
+
+function drawPlayer(p) {
+  ctx.fillStyle = p.col;
+  ctx.fillRect(p.x - 14, p.y - 22, 28, 18);
+  ctx.fillStyle = '#111827';
+  const kickA = p.kick > 0 ? (1 - p.kick / 260) * 1.6 : 0;
+  ctx.save(); ctx.translate(p.x, p.y - 6); ctx.rotate(-p.face * kickA);
+  ctx.fillRect(-4, 0, 8, 6); ctx.fillStyle = '#f8fafc'; ctx.fillRect(p.face > 0 ? 0 : -16, 2, 16, 6);
+  ctx.restore();
+  ctx.font = `${HR * 2.1}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.save(); ctx.translate(p.x, p.y - 46); if (p.face < 0) ctx.scale(-1, 1); ctx.fillText(p.e, 0, 2); ctx.restore();
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1e3a8a'); g.addColorStop(1, '#60a5fa');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,.08)'; for (let i = 0; i < 40; i++) ctx.fillRect((i * 97) % W, 30 + (i * 53) % 120, 3, 3);
+  ctx.fillStyle = '#16a34a'; ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(W / 2, GROUND); ctx.lineTo(W / 2, H); ctx.stroke();
+  // goals with nets
+  [[0, GOAL_D], [W - GOAL_D, W]].forEach(([x0, x1]) => {
+    ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fillRect(x0, GROUND - GOAL_H, x1 - x0, GOAL_H);
+    ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1;
+    for (let y = GROUND - GOAL_H; y < GROUND; y += 12) { ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke(); }
+    ctx.fillStyle = '#f8fafc'; ctx.fillRect(x0, GROUND - GOAL_H - 6, x1 - x0, 6);
+  });
+  if (!pl) return;
+  pl.forEach(drawPlayer);
+  ctx.save(); ctx.translate(ball.x, ball.y); ctx.rotate(ball.spin);
+  ctx.font = `${BR * 2.2}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('⚽', 0, 1);
+  ctx.restore();
+  ctx.font = 'bold 36px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.textAlign = 'center';
+  ctx.fillText(`${score[0]} - ${score[1]}`, W / 2, 46);
+}
+
+function loop(t) {
+  const dt = Math.min(33, t - last);
+  last = t;
+  if (state === 'play') { update(dt / 2); if (state === 'play') update(dt / 2); }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = true; if (e.key.startsWith('Arrow') || e.key === ' ') e.preventDefault(); });
+document.addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
+[['tl', 'l'], ['tr', 'r'], ['tj', 'j'], ['tk', 'k']].forEach(([id, k]) => holdButton(document.getElementById(id), v => { tbtn[k] = v; }));
+document.getElementById('menu').onclick = () => { state = 'idle'; Lobby.open(); };
+requestAnimationFrame(loop);
+Lobby.open({ game: 'head-soccer', title: '🥅 Head Soccer', online: false, local: true, onStart: begin });
+</script>
+</body>
+</html>
