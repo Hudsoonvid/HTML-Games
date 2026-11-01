@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cube 3D</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #c { width: min(560px, calc(100vw - 24px)); aspect-ratio: 1; height: auto; }
+  #moves { display: grid; grid-template-columns: repeat(6, auto); gap: 6px; justify-content: center; margin: 8px 0; }
+  #moves button { min-width: 48px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🧊 Cube 3D</h1>
+  <div class="stats">Moves <b id="mv">0</b> Time <b id="time">0:00</b> Best <b id="best">–</b></div>
+</header>
+<div class="controls"><button class="btn" id="scramble">🔀 Scramble</button><button class="btn alt" id="undo">↶ Undo</button><button class="btn alt" id="reset">↺ Solved cube</button></div>
+<div class="stage">
+  <canvas id="c" class="game"></canvas>
+  <div class="overlay hidden" id="ov"></div>
+</div>
+<div id="moves"></div>
+<p class="help">Drag the cube to look around it. Turn a face with the buttons: <b>U</b>p, <b>D</b>own, <b>L</b>eft, <b>R</b>ight, <b>F</b>ront, <b>B</b>ack turn that face clockwise (as you look at it); the ′ buttons turn it the other way. Keyboard: the letter keys, with <kbd>Shift</kbd> for ′. Scramble, then get every face back to one colour!</p>
+<script src="shared.js"></script>
+<script src="gl3d.js"></script>
+<script>
+const cv = document.getElementById('c'), ov = document.getElementById('ov');
+// face colours by outward direction
+const FACE = { '1,0,0': '#ef4444', '-1,0,0': '#f97316', '0,1,0': '#f8fafc', '0,-1,0': '#facc15', '0,0,1': '#22c55e', '0,0,-1': '#3b82f6' };
+// move name → axis, layer, direction (clockwise as seen from that face)
+const MOVES = { U: ['y', 1, -1], D: ['y', -1, 1], R: ['x', 1, -1], L: ['x', -1, 1], F: ['z', 1, -1], B: ['z', -1, 1] };
+let scrambled = false, R, cubies, yaw = -0.6, pitch = 0.5, anim = null, queue = [], hist = [], moves = 0, startT = 0, timing = false, best = Store.get('cube-best', null), cubieMesh = [];
+
+function rotMat(axis, q) {
+  // integer rotation by q quarter turns about an axis (q = ±1)
+  const c = 0, s = q;
+  if (axis === 'x') return [[1, 0, 0], [0, c, -s], [0, s, c]];
+  if (axis === 'y') return [[c, 0, s], [0, 1, 0], [-s, 0, c]];
+  return [[c, -s, 0], [s, c, 0], [0, 0, 1]];
+}
+const mulMV = (m, v) => [0, 1, 2].map(i => m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]);
+const mulMM = (a, b) => [0, 1, 2].map(i => [0, 1, 2].map(j => a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j]));
+
+function reset() {
+  cubies = [];
+  for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
+    if (!x && !y && !z) continue;
+    cubies.push({ home: [x, y, z], pos: [x, y, z], rot: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], mesh: meshFor(x, y, z) });
+  }
+  hist = []; moves = 0; timing = false; anim = null; queue = [];
+  overlay(ov, null);
+  hud();
+}
+
+function meshFor(x, y, z) {
+  const key = [x, y, z].join();
+  if (cubieMesh[key]) return cubieMesh[key];
+  const b = GL3D.builder(), s = 0.48, k = 0.42, e = 0.495;
+  b.cube(0, 0, 0, s * 2, s * 2, s * 2, [0.06, 0.06, 0.08]);
+  // a sticker on each outward face
+  const st = (n, col) => {
+    const c = GL3D.rgb(col);
+    const [nx, ny, nz] = n;
+    if (nx) b.quad(...(nx > 0 ? [[e, -k, k], [e, -k, -k], [e, k, -k], [e, k, k]] : [[-e, -k, -k], [-e, -k, k], [-e, k, k], [-e, k, -k]]), c);
+    if (ny) b.quad(...(ny > 0 ? [[-k, e, k], [k, e, k], [k, e, -k], [-k, e, -k]] : [[-k, -e, -k], [k, -e, -k], [k, -e, k], [-k, -e, k]]), c);
+    if (nz) b.quad(...(nz > 0 ? [[-k, -k, e], [k, -k, e], [k, k, e], [-k, k, e]] : [[k, -k, -e], [-k, -k, -e], [-k, k, -e], [k, k, -e]]), c);
+  };
+  if (x) st([x, 0, 0], FACE[[x, 0, 0].join()]);
+  if (y) st([0, y, 0], FACE[[0, y, 0].join()]);
+  if (z) st([0, 0, z], FACE[[0, 0, z].join()]);
+  return (cubieMesh[key] = R.mesh(b));
+}
+
+function hud() {
+  document.getElementById('mv').textContent = moves;
+  const s = timing ? (performance.now() - startT) / 1000 : 0;
+  document.getElementById('time').textContent = `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  document.getElementById('best').textContent = best == null ? '–' : `${Math.floor(best / 60)}:${String(best % 60).padStart(2, '0')}`;
+}
+
+function turn(name, opts = {}) {
+  const prime = name.endsWith("'"), [axis, layer, dir] = MOVES[name[0]];
+  queue.push({ axis, layer, q: prime ? -dir : dir, name, quiet: opts.quiet, fast: opts.fast, undo: opts.undo });
+}
+
+function finishMove(m) {
+  const rm = rotMat(m.axis, m.q), ai = { x: 0, y: 1, z: 2 }[m.axis];
+  cubies.forEach(c => { if (c.pos[ai] === m.layer) { c.pos = mulMV(rm, c.pos); c.rot = mulMM(rm, c.rot); } });
+  if (!m.quiet) {
+    if (!m.undo) hist.push(m.name);
+    moves++;
+    if (!timing && hist.length) { timing = true; startT = performance.now(); }
+    Sound.beep(380 + Math.random() * 80, 0.04, 'triangle', 0.03);
+    if (solved() && timing && scrambled) {
+      timing = false; scrambled = false;
+      const secs = Math.round((performance.now() - startT) / 1000);
+      if (best == null || secs < best) { best = secs; Store.set('cube-best', best); }
+      Sound.beep(988, 0.4, 'triangle');
+      overlay(ov, `<h2>Solved! 🎉</h2><p>${moves} moves in ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}</p><button class="btn" onclick="overlay(ov,null);scramble()">Scramble again</button>`);
+    }
+  }
+  hud();
+}
+
+// solved when every sticker facing a direction has that face's colour
+function solved() {
+  return cubies.every(c => [[1, 0, 0], [0, 1, 0], [0, 0, 1]].every((n, i) => {
+    if (!c.home[i]) return true;
+    const home = [0, 0, 0]; home[i] = c.home[i];
+    const now = mulMV(c.rot, home);
+    // the face this sticker points at must be the face whose centre has the same colour
+    return FACE[now.join()] === FACE[home.join()] || false;
+  }));
+}
+
+function scramble() {
+  reset();
+  scrambled = true;
+  const names = Object.keys(MOVES);
+  let prev = '';
+  for (let i = 0; i < 22; i++) { let n; do { n = pick(names); } while (n === prev); prev = n; turn(n + (Math.random() < 0.5 ? "'" : ''), { quiet: true, fast: true }); }
+}
+
+function render(t) {
+  R.resize();
+  const d = 9.5, eye = [Math.sin(yaw) * Math.cos(pitch) * d, Math.sin(pitch) * d, Math.cos(yaw) * Math.cos(pitch) * d];
+  R.camera(eye, [0, 0, 0]);
+  R.begin();
+  if (!anim && queue.length) anim = { ...queue.shift(), t: 0 };
+  let animRot = null;
+  if (anim) {
+    anim.t += anim.fast ? 0.25 : 0.12;
+    const a = Math.min(1, anim.t) * anim.q * Math.PI / 2;
+    animRot = anim.axis === 'x' ? M4.rotX(a) : anim.axis === 'y' ? M4.rotY(a) : M4.rotZ(a);
+    if (anim.t >= 1) { const m = anim; anim = null; animRot = null; finishMove(m); }
+  }
+  const ai = anim ? { x: 0, y: 1, z: 2 }[anim.axis] : -1;
+  cubies.forEach(c => {
+    const r = c.rot;
+    // column-major 4x4 from the integer rotation, placed at the cubie's position
+    const m = new Float32Array([r[0][0], r[1][0], r[2][0], 0, r[0][1], r[1][1], r[2][1], 0, r[0][2], r[1][2], r[2][2], 0, c.pos[0], c.pos[1], c.pos[2], 1]);
+    R.draw(c.mesh, anim && c.pos[ai] === anim.layer ? M4.mul(animRot || M4.identity(), m) : m);
+  });
+  if (timing) hud();
+}
+
+function loop(t) { if (R) render(t); requestAnimationFrame(loop); }
+
+if (!GL3D.supported()) overlay(ov, '<h2>3D not available</h2><p>This game needs WebGL, which your browser or device has turned off.</p>');
+else {
+  R = GL3D.create(cv, { fog: [0.08, 0.09, 0.16], fogNear: 30, fogFar: 60, ambient: 0.7, light: [-0.3, -0.6, -1], fov: 40 });
+  reset();
+  requestAnimationFrame(loop);
+}
+document.getElementById('moves').innerHTML = ['U', 'D', 'L', 'R', 'F', 'B'].map(n => `<button class="btn alt" data-m="${n}">${n}</button>`).join('') + ['U', 'D', 'L', 'R', 'F', 'B'].map(n => `<button class="btn alt" data-m="${n}'">${n}′</button>`).join('');
+document.querySelectorAll('#moves button').forEach(b => { b.onclick = () => turn(b.dataset.m); });
+document.getElementById('scramble').onclick = scramble;
+document.getElementById('reset').onclick = reset;
+document.getElementById('undo').onclick = () => { const n = hist.pop(); if (n) turn(n.endsWith("'") ? n[0] : n + "'", { undo: true }); };
+document.addEventListener('keydown', e => { const k = e.key.toUpperCase(); if (MOVES[k]) turn(k + (e.shiftKey ? "'" : '')); });
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (!drag) return; yaw -= (e.clientX - drag.x) * 0.01; pitch = clamp(pitch + (e.clientY - drag.y) * 0.01, -1.4, 1.4); drag = { x: e.clientX, y: e.clientY }; });
+cv.addEventListener('pointerup', () => { drag = null; });
+</script>
+</body>
+</html>
