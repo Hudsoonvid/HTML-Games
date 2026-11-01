@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tower Rush</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>👑 Tower Rush</h1>
+  <div class="stats">⏱ <b id="time">3:00</b> 👑 <b id="crowns">0 – 0</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="420" height="720"></canvas>
+</div>
+<p class="help">Tap a card at the bottom, then tap your half of the arena to deploy it (cards cost purple elixir, which refills over time). Troops march down their lane, cross the bridges and attack the nearest enemy. Knock down the enemy's side towers and then their king tower. Destroy the king tower to win at once — otherwise the most towers destroyed after 3 minutes wins.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height, FIELD = 600, RIVER = FIELD / 2, BRIDGES = [90, 330], MATCH = 180000;
+const CARDS = {
+  knight: { e: '🛡️', name: 'Knight', cost: 3, n: 1, hp: 700, dmg: 75, range: 22, rate: 1100, sp: 45, r: 12 },
+  archers: { e: '🏹', name: 'Archers', cost: 3, n: 2, hp: 180, dmg: 40, range: 110, rate: 1100, sp: 45, r: 9 },
+  giant: { e: '🗿', name: 'Giant', cost: 5, n: 1, hp: 2000, dmg: 120, range: 22, rate: 1500, sp: 30, r: 16, buildings: true },
+  goblins: { e: '👺', name: 'Goblins', cost: 2, n: 3, hp: 110, dmg: 45, range: 18, rate: 900, sp: 75, r: 8 },
+  bomber: { e: '💣', name: 'Bomber', cost: 3, n: 1, hp: 220, dmg: 90, range: 95, rate: 1700, sp: 45, r: 10, splash: 40 },
+  skeletons: { e: '💀', name: 'Skeletons', cost: 3, n: 8, hp: 45, dmg: 35, range: 16, rate: 1000, sp: 65, r: 6 },
+  fireball: { e: '🔥', name: 'Fireball', cost: 4, spell: true, dmg: 330, radius: 55 },
+  musketeer: { e: '🎯', name: 'Musketeer', cost: 4, n: 1, hp: 420, dmg: 100, range: 130, rate: 1100, sp: 45, r: 11 }
+};
+const DECK = Object.keys(CARDS);
+let S, me, units, towers, elixir, hand, nextCard, sel = null, state = 'idle', last = 0, startT, snapT = 0, unitId = 0, fx = [], aiT = 0, oppHand, oppElixir, crowns;
+// world coordinates: side 0 (host) defends the bottom half, side 1 the top. The guest's view is turned round.
+const flip = () => S && S.mode === 'online' && S.seat === 1;
+const toView = (x, y) => (flip() ? { x: W - x, y: FIELD - y } : { x, y });
+
+function makeTowers() {
+  const t = [];
+  [0, 1].forEach(side => {
+    const by = side === 0 ? FIELD - 40 : 40, py = side === 0 ? FIELD - 110 : 110;
+    t.push({ side, king: true, x: W / 2, y: by, hp: 2400, max: 2400, range: 120, dmg: 70, rate: 1000, cd: 0, r: 26, active: false });
+    t.push({ side, king: false, x: BRIDGES[0], y: py, hp: 1400, max: 1400, range: 130, dmg: 55, rate: 900, cd: 0, r: 20 });
+    t.push({ side, king: false, x: BRIDGES[1], y: py, hp: 1400, max: 1400, range: 130, dmg: 55, rate: 900, cd: 0, r: 20 });
+  });
+  return t;
+}
+
+function begin(s) {
+  S = s;
+  me = S.mode === 'online' ? S.seat : 0;
+  S.on('deploy', d => { if (S.host && d && CARDS[d.k] && state === 'play') deploy(1, d.k, d.x, d.y, true); });
+  S.on('snap', d => { if (!S.host && d) applySnap(d); });
+  S.on('end', d => { if (!S.host && d) finish(d.w, d.c, true); });
+  S.startRound(() => ({}), () => {
+    units = []; towers = makeTowers(); fx = [];
+    elixir = 5; oppElixir = 5;
+    hand = shuffle(DECK.slice()); nextCard = hand.splice(4);
+    oppHand = shuffle(DECK.slice());
+    crowns = [0, 0];
+    startT = performance.now();
+    sel = null; aiT = 2000;
+    state = 'play';
+  });
+}
+
+// deploy for a side: the guest asks the host, which runs the battle; elixir is checked by whoever taps
+function deploy(side, k, x, y, fromNet) {
+  const C = CARDS[k];
+  if (!fromNet) {
+    const have = side === me ? elixir : oppElixir;
+    if (have < C.cost) return false;
+    if (side === me) elixir -= C.cost; else oppElixir -= C.cost;
+    if (S.human && !S.host) { S.send('deploy', { k, x: Math.round(x), y: Math.round(y) }); return true; }
+  }
+  if (C.spell) {
+    addFx({ x, y, t: 0, r: C.radius, kind: 'boom' });
+    units.forEach(u => { if (u.side !== side && Math.hypot(u.x - x, u.y - y) < C.radius) u.hp -= C.dmg; });
+    towers.forEach(t => { if (t.side !== side && t.hp > 0 && Math.hypot(t.x - x, t.y - y) < C.radius + t.r) hurtTower(t, C.dmg * 0.4); });
+    Sound.beep(90, 0.4, 'sawtooth', 0.06);
+    return true;
+  }
+  for (let i = 0; i < C.n; i++) {
+    const a = (i / C.n) * Math.PI * 2;
+    units.push({ id: unitId++, side, k, x: x + (C.n > 1 ? Math.cos(a) * 14 : 0), y: y + (C.n > 1 ? Math.sin(a) * 14 : 0), hp: C.hp, max: C.hp, cd: 500 });
+  }
+  Sound.beep(500, 0.06, 'triangle', 0.04);
+  return true;
+}
+// effects made by the battle are flagged so the next snapshot carries them to the guest
+function addFx(f) { f.fresh = true; fx.push(f); }
+
+function hurtTower(t, n) {
+  if (t.hp <= 0) return;
+  t.hp -= n;
+  if (!t.king) towers.find(k => k.king && k.side === t.side).active = true;
+  if (t.king) t.active = true;
+  if (t.hp <= 0) {
+    t.hp = 0;
+    crowns[1 - t.side] += t.king ? 3 - crowns[1 - t.side] : 1;
+    Sound.beep(150, 0.5, 'sawtooth', 0.06);
+    addFx({ x: t.x, y: t.y, t: 0, r: 50, kind: 'boom' });
+    if (t.king) finish(1 - t.side, crowns);
+  }
+}
+
+// next waypoint: troops on the wrong side of the river line up with the nearest bridge, then cross it
+function stepToward(u, tx, ty, sp) {
+  const uSide = u.y > RIVER ? 1 : -1, tSide = ty > RIVER ? 1 : -1;
+  let gx = tx, gy = ty;
+  if (uSide !== tSide) {
+    const bx = Math.abs(u.x - BRIDGES[0]) < Math.abs(u.x - BRIDGES[1]) ? BRIDGES[0] : BRIDGES[1];
+    gx = bx;
+    gy = Math.abs(u.x - bx) > 8 ? RIVER + uSide * 30 : RIVER - uSide * 30;
+  }
+  const dx = gx - u.x, dy = gy - u.y, d = Math.hypot(dx, dy);
+  if (d > 1) { const k = Math.min(sp, d); u.x += dx / d * k; u.y += dy / d * k; }
+}
+
+function update(dt) {
+  const t = dt / 1000;
+  const regen = (performance.now() - startT > MATCH - 60000 ? 2 : 1) * t / 2.8;
+  elixir = Math.min(10, elixir + regen);
+  oppElixir = Math.min(10, oppElixir + regen);
+  if (S.human && !S.host) { interp(dt); return; }
+  // computer opponent (vs CPU, or standing in for a missing player)
+  if (S.ai) {
+    aiT -= dt;
+    if (aiT <= 0) {
+      aiT = rand(900, 2200) * (1.3 - S.level * 0.6);
+      const side = 1 - me, card = oppHand[0], C = CARDS[card];
+      const wait = C.cost + (S.level > 0.5 ? randInt(0, 3) : 0);
+      if (oppElixir >= Math.min(10, wait)) {
+        // defend against troops in its half, otherwise push a lane
+        const threats = units.filter(u => u.side !== side && (side === 1 ? u.y < RIVER + 40 : u.y > RIVER - 40));
+        let x, y;
+        if (C.spell) { const tg = threats[0] || units.find(u => u.side !== side) || towers.find(tw => tw.side !== side && tw.hp > 0 && !tw.king); x = tg.x; y = tg.y; }
+        else if (threats.length && Math.random() < 0.4 + S.level * 0.5) { x = threats[0].x + rand(-20, 20); y = side === 1 ? Math.min(RIVER - 30, threats[0].y - 40) : Math.max(RIVER + 30, threats[0].y + 40); }
+        else { x = pick(BRIDGES) + rand(-20, 20); y = side === 1 ? RIVER - 50 : RIVER + 50; }
+        if (C.spell || (side === 1 ? y < RIVER - 10 : y > RIVER + 10)) { deploy(side, card, clamp(x, 20, W - 20), clamp(y, 20, FIELD - 20)); oppHand.push(oppHand.shift()); }
+      }
+    }
+  }
+  for (const u of units) {
+    if (u.hp <= 0) continue;
+    const C = CARDS[u.k];
+    // pick the nearest target (buildings only for giants)
+    let best = null, bd = Infinity;
+    const consider = o => { const d = Math.hypot(o.x - u.x, o.y - u.y); if (d < bd) { bd = d; best = o; } };
+    towers.forEach(tw => { if (tw.side !== u.side && tw.hp > 0) consider(tw); });
+    if (!C.buildings) units.forEach(o => { if (o.side !== u.side && o.hp > 0 && Math.hypot(o.x - u.x, o.y - u.y) < 160) consider(o); });
+    u.cd -= dt;
+    const reach = C.range + C.r + (best && best.r ? best.r : CARDS[best && best.k] ? CARDS[best.k].r : 0);
+    if (best && bd <= reach) {
+      if (u.cd <= 0) {
+        u.cd = C.rate;
+        if (C.splash) { units.forEach(o => { if (o.side !== u.side && Math.hypot(o.x - best.x, o.y - best.y) < C.splash) o.hp -= C.dmg; }); towers.forEach(tw => { if (tw.side !== u.side && Math.hypot(tw.x - best.x, tw.y - best.y) < C.splash + tw.r) hurtTower(tw, C.dmg); }); addFx({ x: best.x, y: best.y, t: 0, r: C.splash, kind: 'splash' }); }
+        else if (best.king !== undefined) hurtTower(best, C.dmg); else best.hp -= C.dmg;
+        if (C.range > 40) addFx({ x: u.x, y: u.y, tx: best.x, ty: best.y, t: 0, kind: 'shot' });
+      }
+    } else if (best) stepToward(u, best.x, best.y, C.sp * t);
+  }
+  // towers shoot the nearest troop in range
+  for (const tw of towers) {
+    if (tw.hp <= 0 || (tw.king && !tw.active)) continue;
+    tw.cd -= dt;
+    if (tw.cd > 0) continue;
+    let tg = null, bd = tw.range;
+    units.forEach(u => { if (u.side !== tw.side && u.hp > 0) { const d = Math.hypot(u.x - tw.x, u.y - tw.y); if (d < bd) { bd = d; tg = u; } } });
+    if (tg) { tw.cd = tw.rate; tg.hp -= tw.dmg; addFx({ x: tw.x, y: tw.y, tx: tg.x, ty: tg.y, t: 0, kind: 'shot' }); }
+  }
+  // gently separate overlapping troops
+  for (let i = 0; i < units.length; i++) for (let j = i + 1; j < units.length; j++) {
+    const a = units[i], b = units[j], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy), min = (CARDS[a.k].r + CARDS[b.k].r) * 0.8;
+    if (d < min && d > 0) { const p = (min - d) / 2; a.x -= dx / d * p; a.y -= dy / d * p; b.x += dx / d * p; b.y += dy / d * p; }
+  }
+  units = units.filter(u => u.hp > 0);
+  const left = MATCH - (performance.now() - startT);
+  if (left <= 0 && state === 'play') {
+    const w = crowns[0] === crowns[1] ? (() => { const hp = s => towers.filter(t => t.side === s).reduce((a, t) => a + t.hp, 0); return hp(0) === hp(1) ? -1 : hp(0) > hp(1) ? 0 : 1; })() : crowns[0] > crowns[1] ? 0 : 1;
+    finish(w, crowns);
+  }
+  if (S.human) { snapT += dt; if (snapT > 100) { snapT = 0; S.send('snap', snap()); } }
+}
+
+function snap() {
+  const f = fx.filter(e => e.fresh);
+  f.forEach(e => { e.fresh = false; });
+  return { u: units.map(u => [u.id, u.side, u.k, Math.round(u.x), Math.round(u.y), Math.round(u.hp)]), t: towers.map(t => [Math.round(t.hp), t.active ? 1 : 0]), c: crowns, f: f.map(e => [e.kind, Math.round(e.x), Math.round(e.y), Math.round(e.tx || 0), Math.round(e.ty || 0), e.r || 0]) };
+}
+function applySnap(d) {
+  const prev = new Map(units.map(u => [u.id, u]));
+  units = d.u.map(([id, side, k, x, y, hp]) => { const o = prev.get(id); return { id, side, k, x: o ? o.x : x, y: o ? o.y : y, tx: x, ty: y, hp, max: CARDS[k].hp }; });
+  d.t.forEach(([hp, act], i) => { towers[i].hp = hp; towers[i].active = !!act; });
+  crowns = d.c;
+  d.f.forEach(([kind, x, y, tx, ty, r]) => fx.push({ kind, x, y, tx, ty, r, t: 0 }));
+}
+function interp(dt) { units.forEach(u => { if (u.tx != null) { const k = Math.min(1, dt / 100); u.x += (u.tx - u.x) * k; u.y += (u.ty - u.y) * k; } }); }
+
+function finish(w, c, fromNet) {
+  if (state !== 'play') return;
+  state = 'over';
+  if (S.human && S.host && !fromNet) S.send('end', { w, c });
+  const mine = c[me], theirs = c[1 - me];
+  const title = w < 0 ? 'Draw!' : w === me ? `Victory! 👑 ${mine}–${theirs}` : `${S.opp.name} wins ${theirs}–${mine}`;
+  Sound.beep(w === me ? 988 : 150, 0.5, 'triangle');
+  setTimeout(() => Lobby.end(S, { result: w < 0 ? 0.5 : w === me ? 1 : 0, title }), 1400);
+}
+
+function drawField() {
+  ctx.fillStyle = '#65a30d'; ctx.fillRect(0, 0, W, FIELD);
+  for (let i = 0; i < 12; i++) { ctx.fillStyle = i % 2 ? '#6aad10' : '#65a30d'; ctx.fillRect(0, i * FIELD / 12, W, FIELD / 12); }
+  ctx.fillStyle = '#38bdf8'; ctx.fillRect(0, RIVER - 18, W, 36);
+  BRIDGES.forEach(bx => { const v = toView(bx, RIVER); ctx.fillStyle = '#a16207'; ctx.fillRect(v.x - 22, RIVER - 22, 44, 44); });
+  // deploy zone hint
+  if (sel) { ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fillRect(0, RIVER + 18, W, FIELD - RIVER - 18); }
+}
+
+function draw() {
+  ctx.fillStyle = '#1e293b'; ctx.fillRect(0, 0, W, H);
+  drawField();
+  if (!towers) return;
+  towers.forEach(t => {
+    const v = toView(t.x, t.y);
+    if (t.hp <= 0) { ctx.fillStyle = '#57534e'; ctx.beginPath(); ctx.arc(v.x, v.y, t.r * 0.8, 0, 7); ctx.fill(); return; }
+    const mine = t.side === me;
+    ctx.fillStyle = mine ? '#2563eb' : '#dc2626';
+    ctx.fillRect(v.x - t.r, v.y - t.r, t.r * 2, t.r * 2);
+    ctx.font = `${t.r * 1.2}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t.king ? '👑' : '🏰', v.x, v.y);
+    ctx.fillStyle = '#111'; ctx.fillRect(v.x - t.r, v.y - t.r - 9, t.r * 2, 5);
+    ctx.fillStyle = mine ? '#60a5fa' : '#f87171'; ctx.fillRect(v.x - t.r, v.y - t.r - 9, t.r * 2 * t.hp / t.max, 5);
+  });
+  units.slice().sort((a, b) => toView(a.x, a.y).y - toView(b.x, b.y).y).forEach(u => {
+    const C = CARDS[u.k], v = toView(u.x, u.y), mine = u.side === me;
+    ctx.fillStyle = mine ? 'rgba(37,99,235,.55)' : 'rgba(220,38,38,.55)';
+    ctx.beginPath(); ctx.arc(v.x, v.y + C.r * 0.4, C.r, 0, 7); ctx.fill();
+    ctx.font = `${C.r * 1.8}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(C.e, v.x, v.y);
+    if (u.hp < u.max) { ctx.fillStyle = '#111'; ctx.fillRect(v.x - 10, v.y - C.r - 6, 20, 3); ctx.fillStyle = mine ? '#60a5fa' : '#f87171'; ctx.fillRect(v.x - 10, v.y - C.r - 6, 20 * Math.max(0, u.hp) / u.max, 3); }
+  });
+  fx.forEach(f => {
+    f.t += 16;
+    const v = toView(f.x, f.y);
+    if (f.kind === 'shot') { const e = toView(f.tx, f.ty), k = Math.min(1, f.t / 150); ctx.fillStyle = '#fde047'; ctx.beginPath(); ctx.arc(v.x + (e.x - v.x) * k, v.y + (e.y - v.y) * k, 3, 0, 7); ctx.fill(); }
+    else { ctx.fillStyle = f.kind === 'boom' ? `rgba(249,115,22,${0.7 - f.t / 600})` : `rgba(253,224,71,${0.6 - f.t / 500})`; ctx.beginPath(); ctx.arc(v.x, v.y, f.r * (0.6 + f.t / 600), 0, 7); ctx.fill(); }
+  });
+  fx = fx.filter(f => f.t < (f.kind === 'shot' ? 150 : 400));
+  // hand + elixir
+  ctx.fillStyle = '#0f172a'; ctx.fillRect(0, FIELD, W, H - FIELD);
+  ctx.fillStyle = '#1e1b4b'; ctx.fillRect(10, FIELD + 8, W - 20, 14);
+  ctx.fillStyle = '#c026d3'; ctx.fillRect(10, FIELD + 8, (W - 20) * elixir / 10, 14);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'center'; ctx.fillText(`💧 ${Math.floor(elixir)} / 10`, W / 2, FIELD + 19);
+  (hand || []).forEach((k, i) => {
+    const C = CARDS[k], x = 12 + i * 92, y = FIELD + 30, can = elixir >= C.cost;
+    ctx.fillStyle = sel === i ? '#4338ca' : '#334155';
+    ctx.beginPath(); ctx.roundRect(x, y, 84, 82, 10); ctx.fill();
+    if (sel === i) { ctx.strokeStyle = '#fde047'; ctx.lineWidth = 3; ctx.stroke(); }
+    ctx.globalAlpha = can ? 1 : 0.4;
+    ctx.font = '32px system-ui'; ctx.textBaseline = 'middle'; ctx.fillText(C.e, x + 42, y + 34);
+    ctx.font = '11px system-ui'; ctx.fillStyle = '#fff'; ctx.fillText(C.name, x + 42, y + 62);
+    ctx.fillStyle = '#e879f9'; ctx.font = 'bold 12px system-ui'; ctx.fillText(`💧${C.cost}`, x + 70, y + 12);
+    ctx.globalAlpha = 1;
+  });
+  if (state === 'play') {
+    const left = Math.max(0, MATCH - (performance.now() - startT));
+    document.getElementById('time').textContent = `${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}${left < 60000 ? ' ⚡2×' : ''}`;
+    document.getElementById('crowns').textContent = `${crowns[me]} – ${crowns[1 - me]}`;
+    document.getElementById('vs').innerHTML = `<b style="color:#60a5fa">${S.me.name}</b> vs <b style="color:#f87171">${S.opp.name}</b>`;
+  }
+}
+
+function loop(t) {
+  const dt = Math.min(50, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (state !== 'play') return;
+  const p = canvasPoint(cv, e);
+  if (p.y > FIELD + 26) { const i = Math.floor((p.x - 12) / 92); if (i >= 0 && i < 4) sel = sel === i ? null : i; return; }
+  if (sel == null) return;
+  const k = hand[sel], C = CARDS[k];
+  if (elixir < C.cost) { Sound.beep(160, 0.05, 'square', 0.03); return; }
+  if (!C.spell && p.y < RIVER + 20) { Sound.beep(160, 0.05, 'square', 0.03); return; }
+  // convert the tap from my view to world coordinates
+  const w = flip() ? { x: W - p.x, y: FIELD - p.y } : p;
+  if (deploy(me, k, clamp(w.x, 15, W - 15), clamp(w.y, 15, FIELD - 15))) {
+    hand.splice(sel, 1);
+    hand.push(nextCard.shift());
+    nextCard.push(k);
+    sel = null;
+  }
+});
+document.getElementById('menu').onclick = () => { state = 'idle'; Lobby.open(); };
+requestAnimationFrame(loop);
+Lobby.open({ game: 'tower-rush', title: '👑 Tower Rush', onStart: begin });
+</script>
+</body>
+</html>
