@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slope 3D</title>
+<link rel="stylesheet" href="shared.css">
+<style>#c { width: min(820px, calc(100vw - 24px)); aspect-ratio: 16 / 10; height: auto; }</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>📐 Slope 3D</h1>
+  <div class="stats">Score <b id="score">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="left">◀</button><button id="right">▶</button></div>
+<p class="help">Steer the ball with <kbd>←</kbd><kbd>→</kbd> / <kbd>A</kbd><kbd>D</kbd>, or hold the left/right half of the screen. Stay on the neon slope, avoid the red blocks and don't fall through the gaps. It keeps getting faster!</p>
+<script src="shared.js"></script>
+<script src="gl3d.js"></script>
+<script>
+const cv = document.getElementById('c'), ov = document.getElementById('ov');
+const LANES = 5, LW = 2, ROW = 4, DROP = 0.32, CHUNK = 24;
+let R, rows, chunks, ball, ballMesh, state = 'ready', last = 0, input = 0, keyL = false, keyR = false, best = Store.get('slope-best', 0), score = 0;
+const groundY = z => -z * DROP;
+
+// a row: which lanes have floor, and which have a red block
+function makeRow(i) {
+  const hard = Math.min(1, i / 400);
+  const floor = Array(LANES).fill(true), block = Array(LANES).fill(false);
+  if (i > 12) {
+    if (Math.random() < 0.14 + hard * 0.2) { const g = randInt(0, LANES - 1); floor[g] = false; if (Math.random() < hard) floor[clamp(g + pick([-1, 1]), 0, LANES - 1)] = false; }
+    if (Math.random() < 0.12 + hard * 0.18) { const b = randInt(0, LANES - 1); if (floor[b]) block[b] = true; }
+    // never close every lane
+    if (floor.every((f, k) => !f || block[k])) { floor[2] = true; block[2] = false; }
+  }
+  return { floor, block };
+}
+
+function buildChunk(c) {
+  const b = GL3D.builder();
+  for (let i = c * CHUNK; i < (c + 1) * CHUNK; i++) {
+    const row = rows[i] || (rows[i] = makeRow(i));
+    const z0 = i * ROW, y0 = groundY(z0), y1 = groundY(z0 + ROW);
+    row.floor.forEach((f, k) => {
+      if (!f) return;
+      const x0 = (k - LANES / 2) * LW, x1 = x0 + LW;
+      const col = (i + k) % 2 ? [0.1, 0.9, 0.45] : [0.05, 0.6, 0.35];
+      b.quad([x0, y0, -z0], [x1, y0, -z0], [x1, y1, -z0 - ROW], [x0, y1, -z0 - ROW], col);
+      // side walls on the outer edges
+      if (k === 0) b.quad([x0, y0 - 1, -z0], [x0, y0, -z0], [x0, y1, -z0 - ROW], [x0, y1 - 1, -z0 - ROW], [0.05, 0.3, 0.2]);
+      if (k === LANES - 1) b.quad([x1, y0, -z0], [x1, y0 - 1, -z0], [x1, y1 - 1, -z0 - ROW], [x1, y1, -z0 - ROW], [0.05, 0.3, 0.2]);
+      if (row.block[k]) b.box(x0 + 0.25, (y0 + y1) / 2, -z0 - ROW * 0.65, LW - 0.5, 1.4, 1.2, [0.95, 0.15, 0.2]);
+    });
+  }
+  return R.mesh(b);
+}
+
+function newGame() {
+  rows = [];
+  if (chunks) chunks.forEach(ch => R.free(ch.m));
+  chunks = [];
+  ball = { x: 0, z: 2, y: 0.5, vy: 0, vx: 0, speed: 14, spin: 0, falling: false };
+  score = 0;
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() { document.getElementById('score').textContent = score; document.getElementById('best').textContent = best; }
+
+function floorAt(x, z) {
+  const i = Math.floor(z / ROW), row = rows[i];
+  if (!row) return null;
+  const k = Math.floor(x / LW + LANES / 2);
+  if (k < 0 || k >= LANES || !row.floor[k]) return null;
+  return { y: groundY(z), block: row.block[k] && (z % ROW) > ROW * 0.6 && (z % ROW) < ROW * 0.6 + 1.3, row: i };
+}
+
+function update(dt) {
+  const t = dt / 1000;
+  ball.speed = Math.min(42, 14 + ball.z / 120);
+  const steer = (keyR ? 1 : 0) - (keyL ? 1 : 0) + input;
+  ball.vx += (clamp(steer, -1, 1) * 22 - ball.vx * 4) * t;
+  ball.x += ball.vx * t;
+  ball.z += ball.speed * t;
+  ball.spin += ball.speed * t;
+  const f = ball.falling ? null : floorAt(ball.x, ball.z);
+  const gy = groundY(ball.z) + 0.5;
+  if (f && ball.y <= gy + 0.05) { ball.y = gy; ball.vy = 0; }
+  else { ball.vy -= 30 * t; ball.y += ball.vy * t; if (ball.y < gy - 0.6) ball.falling = true; }
+  if (f && f.block && ball.y < gy + 0.6) return die('Smashed into a block!');
+  if (ball.y < groundY(ball.z) - 14) return die('You fell off the slope!');
+  score = Math.floor(ball.z / ROW);
+  // stream track chunks around the ball
+  const need = Math.floor(ball.z / ROW / CHUNK);
+  for (let c = Math.max(0, need - 1); c <= need + 3; c++) if (!chunks.find(ch => ch.c === c)) chunks.push({ c, m: buildChunk(c) });
+  chunks = chunks.filter(ch => { if (ch.c < need - 1) { R.free(ch.m); return false; } return true; });
+  hud();
+}
+
+function die(why) {
+  state = 'over';
+  if (recordBest('slope-best', score)) best = score;
+  hud();
+  Sound.beep(110, 0.5, 'sawtooth', 0.06);
+  overlay(ov, `<h2>${why}</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Roll again</button>`);
+}
+
+function render() {
+  R.resize();
+  const b = ball || { x: 0, y: 0.5, z: 2, spin: 0 };
+  R.camera([b.x * 0.6, b.y + 3.2, -b.z + 7], [b.x, b.y, -b.z - 6]);
+  R.begin();
+  (chunks || []).forEach(ch => R.draw(ch.m));
+  if (ballMesh && ball) R.draw(ballMesh, M4.chain(M4.translate(b.x, b.y, -b.z), M4.rotX(-b.spin * 2)));
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  if (R) render();
+  requestAnimationFrame(loop);
+}
+
+if (!GL3D.supported()) overlay(ov, '<h2>3D not available</h2><p>This game needs WebGL, which your browser or device has turned off.</p>');
+else {
+  R = GL3D.create(cv, { fog: [0.02, 0.02, 0.08], fogNear: 30, fogFar: 85, ambient: 0.55, light: [-0.3, -1, -0.4], fov: 65 });
+  const bm = GL3D.builder();
+  bm.sphere(0, 0, 0, 0.5, [0.9, 0.9, 1], 14);
+  bm.box(-0.52, -0.06, -0.06, 1.04, 0.12, 0.12, [0.2, 0.6, 1]);
+  ballMesh = R.mesh(bm);
+  rows = []; chunks = [{ c: 0, m: buildChunk(0) }, { c: 1, m: buildChunk(1) }];
+  ball = { x: 0, z: 2, y: 0.5, vy: 0, vx: 0, speed: 14, spin: 0 };
+  hud();
+  overlay(ov, '<h2>📐 Slope 3D</h2><p>Steer left and right. Don\'t fall!</p><button class="btn" onclick="newGame()">Play</button>');
+  requestAnimationFrame(loop);
+}
+document.addEventListener('keydown', e => { if (e.key === 'ArrowLeft' || e.key === 'a') keyL = true; if (e.key === 'ArrowRight' || e.key === 'd') keyR = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play' && R) newGame(); });
+document.addEventListener('keyup', e => { if (e.key === 'ArrowLeft' || e.key === 'a') keyL = false; if (e.key === 'ArrowRight' || e.key === 'd') keyR = false; });
+cv.addEventListener('pointerdown', e => { const r = cv.getBoundingClientRect(); input = e.clientX - r.left < r.width / 2 ? -1 : 1; });
+cv.addEventListener('pointermove', e => { if (input) { const r = cv.getBoundingClientRect(); input = e.clientX - r.left < r.width / 2 ? -1 : 1; } });
+const stopIn = () => { input = 0; };
+cv.addEventListener('pointerup', stopIn);
+cv.addEventListener('pointercancel', stopIn);
+holdButton(document.getElementById('left'), v => { keyL = v; });
+holdButton(document.getElementById('right'), v => { keyR = v; });
+</script>
+</body>
+</html>

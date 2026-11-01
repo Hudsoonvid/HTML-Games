@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snow Rider 3D</title>
+<link rel="stylesheet" href="shared.css">
+<style>#c { width: min(820px, calc(100vw - 24px)); aspect-ratio: 16 / 10; height: auto; }</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🛷 Snow Rider 3D</h1>
+  <div class="stats">Distance <b id="dist">0</b>m 🎁 <b id="gifts">0</b> Best <b id="best">0</b>m</div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="left">◀</button><button id="jump">⤒</button><button id="right">▶</button></div>
+<p class="help">Steer the sled with <kbd>←</kbd><kbd>→</kbd> (or hold the left/right side of the screen) and press <kbd>Space</kbd>/<kbd>↑</kbd> (or tap with two fingers / the ⤒ button) to jump over logs. Dodge the trees, rocks and snowmen and collect presents. You speed up as you go!</p>
+<script src="shared.js"></script>
+<script src="gl3d.js"></script>
+<script>
+const cv = document.getElementById('c'), ov = document.getElementById('ov');
+const HALF = 9, DROP = 0.18;
+let R, meshes = {}, objs, sled, state = 'ready', last = 0, keyL = false, keyR = false, input = 0, best = Store.get('snowrider-best', 0), gifts = 0, nextZ, terrain = [], terrainMesh;
+const hillY = z => -z * DROP;
+
+function buildMeshes() {
+  const tree = GL3D.builder();
+  tree.cylinder(0, 0, 0.25, 0, 1, [0.4, 0.25, 0.1], 8);
+  [[1, 2.4, 1.6], [2, 3.4, 1.2], [3, 4.2, 0.8]].forEach(([y0, y1, r]) => {
+    for (let i = 0; i < 8; i++) { const a0 = i / 8 * Math.PI * 2, a1 = (i + 1) / 8 * Math.PI * 2; tree.tri([0, y1, 0], [Math.cos(a1) * r, y0, Math.sin(a1) * r], [Math.cos(a0) * r, y0, Math.sin(a0) * r], [0.1, 0.45, 0.2]); }
+  });
+  tree.cylinder(0, 0, 0.6, 2.2, 2.35, [0.95, 0.97, 1], 8);
+  meshes.tree = R.mesh(tree);
+  const rock = GL3D.builder();
+  rock.sphere(0, 0.3, 0, 0.9, [0.5, 0.5, 0.55], 6);
+  meshes.rock = R.mesh(rock);
+  const snowman = GL3D.builder();
+  snowman.sphere(0, 0.7, 0, 0.75, [0.97, 0.97, 1], 10).sphere(0, 1.75, 0, 0.5, [0.97, 0.97, 1], 10).box(-0.08, 1.7, 0.42, 0.16, 0.12, 0.4, [1, 0.5, 0.1]).cylinder(0, 0, 0.45, 2.15, 2.25, [0.1, 0.1, 0.1], 10).cylinder(0, 0, 0.3, 2.25, 2.7, [0.1, 0.1, 0.1], 10);
+  meshes.snowman = R.mesh(snowman);
+  const log = GL3D.builder();
+  log.box(-2.2, 0, -0.35, 4.4, 0.6, 0.7, [0.45, 0.28, 0.12]);
+  meshes.log = R.mesh(log);
+  const gift = GL3D.builder();
+  gift.cube(0, 0.45, 0, 0.8, 0.8, 0.8, [0.9, 0.15, 0.25]).cube(0, 0.45, 0, 0.84, 0.84, 0.2, [1, 0.85, 0.2]).cube(0, 0.45, 0, 0.2, 0.84, 0.84, [1, 0.85, 0.2]);
+  meshes.gift = R.mesh(gift);
+  const s = GL3D.builder();
+  s.box(-0.5, 0.1, -1, 1, 0.25, 2, [0.85, 0.15, 0.15]).box(-0.55, 0, -1.05, 0.1, 0.1, 2.1, [0.75, 0.75, 0.8]).box(0.45, 0, -1.05, 0.1, 0.1, 2.1, [0.75, 0.75, 0.8]);
+  s.box(-0.3, 0.35, -0.2, 0.6, 0.7, 0.5, [0.15, 0.4, 0.9]).sphere(0, 1.25, 0, 0.28, [1, 0.85, 0.7], 8).cube(0, 1.5, 0, 0.5, 0.18, 0.5, [0.9, 0.1, 0.2]);
+  meshes.sled = R.mesh(s);
+  // snowy slope strip, re-anchored as you go
+  const g = GL3D.builder();
+  for (let i = 0; i < 60; i++) {
+    const z0 = i * 4, z1 = z0 + 4;
+    g.quad([-40, hillY(z0), -z0], [40, hillY(z0), -z0], [40, hillY(z1), -z1], [-40, hillY(z1), -z1], i % 2 ? [0.93, 0.96, 1] : [0.88, 0.92, 0.98]);
+    g.quad([-HALF - 0.4, hillY(z0) + 0.02, -z0], [-HALF, hillY(z0) + 0.02, -z0], [-HALF, hillY(z1) + 0.02, -z1], [-HALF - 0.4, hillY(z1) + 0.02, -z1], [0.6, 0.75, 0.95]);
+    g.quad([HALF, hillY(z0) + 0.02, -z0], [HALF + 0.4, hillY(z0) + 0.02, -z0], [HALF + 0.4, hillY(z1) + 0.02, -z1], [HALF, hillY(z1) + 0.02, -z1], [0.6, 0.75, 0.95]);
+  }
+  terrainMesh = R.mesh(g);
+}
+
+function spawnRow(z) {
+  const hard = Math.min(1, z / 2500);
+  const n = randInt(1, 2 + Math.floor(hard * 3));
+  if (Math.random() < 0.12 + hard * 0.1) { objs.push({ k: 'log', x: rand(-HALF + 2.4, HALF - 2.4), z, r: 2.2 }); return; }
+  for (let i = 0; i < n; i++) objs.push({ k: pick(['tree', 'tree', 'rock', 'snowman']), x: rand(-HALF + 0.8, HALF - 0.8), z: z + rand(-2, 2), r: 0.9 });
+  if (Math.random() < 0.45) objs.push({ k: 'gift', x: rand(-HALF + 1, HALF - 1), z: z + rand(-3, 3), r: 0.8 });
+  // trees line the edges
+  objs.push({ k: 'tree', x: -HALF - rand(1.5, 6), z: z + rand(-3, 3), deco: true }, { k: 'tree', x: HALF + rand(1.5, 6), z: z + rand(-3, 3), deco: true });
+}
+
+function newGame() {
+  objs = []; nextZ = 30;
+  sled = { x: 0, z: 0, y: 0, vy: 0, vx: 0, speed: 16, air: false, tilt: 0 };
+  gifts = 0;
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('dist').textContent = sled ? Math.floor(sled.z) : 0;
+  document.getElementById('gifts').textContent = gifts;
+  document.getElementById('best').textContent = best;
+}
+
+function jump() { if (state === 'play' && !sled.air) { sled.air = true; sled.vy = 9; Sound.beep(600, 0.06, 'triangle', 0.04); } }
+
+function update(dt) {
+  const t = dt / 1000;
+  sled.speed = Math.min(40, 16 + sled.z / 90);
+  const steer = clamp((keyR ? 1 : 0) - (keyL ? 1 : 0) + input, -1, 1);
+  sled.vx += (steer * 14 - sled.vx * 3.5) * t;
+  sled.x = clamp(sled.x + sled.vx * t, -HALF + 0.6, HALF - 0.6);
+  sled.tilt += (steer * 0.35 - sled.tilt) * Math.min(1, 8 * t);
+  sled.z += sled.speed * t;
+  if (sled.air) { sled.vy -= 28 * t; sled.y += sled.vy * t; if (sled.y <= 0) { sled.y = 0; sled.air = false; sled.vy = 0; } }
+  while (nextZ < sled.z + 120) { spawnRow(nextZ); nextZ += rand(7, 12) - Math.min(4, sled.z / 800); }
+  for (const o of objs) {
+    if (o.deco || o.got) continue;
+    const dz = Math.abs(o.z - sled.z);
+    if (o.k === 'log') { if (dz < 0.8 && Math.abs(o.x - sled.x) < o.r + 0.4 && sled.y < 0.5) return crash('You hit a log! Jump next time.'); continue; }
+    if (dz < 1 && Math.abs(o.x - sled.x) < o.r * 0.8 + 0.4) {
+      if (o.k === 'gift') { o.got = true; gifts++; Sound.beep(1100, 0.08, 'triangle', 0.04); continue; }
+      if (sled.y < 1.6) return crash(`Crashed into a ${o.k === 'snowman' ? 'snowman ⛄' : o.k}!`);
+    }
+  }
+  objs = objs.filter(o => o.z > sled.z - 10 && !o.got);
+  hud();
+}
+
+function crash(why) {
+  state = 'over';
+  const d = Math.floor(sled.z);
+  if (recordBest('snowrider-best', d)) best = d;
+  hud();
+  Sound.beep(100, 0.5, 'sawtooth', 0.06);
+  overlay(ov, `<h2>${why}</h2><p>${d} m · ${gifts} presents</p><button class="btn" onclick="newGame()">Ride again</button>`);
+}
+
+function render() {
+  R.resize();
+  const s = sled || { x: 0, z: 0, y: 0, tilt: 0 };
+  const sy = hillY(s.z) + s.y;
+  R.camera([s.x * 0.5, sy + 4.2, -s.z + 8], [s.x * 0.8, sy, -s.z - 8]);
+  R.begin();
+  // terrain strip follows the sled in 8-unit steps so its stripes stay put
+  const base = Math.floor(s.z / 8) * 8 - 12;
+  R.draw(terrainMesh, M4.translate(0, hillY(base), -base));
+  (objs || []).forEach(o => { if (o.z < s.z + 110) R.draw(meshes[o.k], M4.chain(M4.translate(o.x, hillY(o.z), -o.z), o.k === 'gift' ? M4.rotY(performance.now() / 500) : M4.identity())); });
+  R.draw(meshes.sled, M4.chain(M4.translate(s.x, sy, -s.z), M4.rotZ(-s.tilt), M4.rotX(Math.atan(DROP))));
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  if (R) render();
+  requestAnimationFrame(loop);
+}
+
+if (!GL3D.supported()) overlay(ov, '<h2>3D not available</h2><p>This game needs WebGL, which your browser or device has turned off.</p>');
+else {
+  R = GL3D.create(cv, { fog: [0.75, 0.85, 0.97], fogNear: 40, fogFar: 110, ambient: 0.6, light: [-0.5, -1, -0.3], fov: 62 });
+  buildMeshes();
+  objs = []; nextZ = 30;
+  sled = { x: 0, z: 0, y: 0, vy: 0, vx: 0, speed: 16, air: false, tilt: 0 };
+  for (let z = 30; z < 120; z += 9) spawnRow(z);
+  hud();
+  overlay(ov, '<h2>🛷 Snow Rider 3D</h2><p>Steer around trees, jump the logs, grab the presents.</p><button class="btn" onclick="newGame()">Ride</button>');
+  requestAnimationFrame(loop);
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a') keyL = true;
+  if (e.key === 'ArrowRight' || e.key === 'd') keyR = true;
+  if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w') { if (state === 'play') jump(); else if (R && !e.repeat) newGame(); }
+});
+document.addEventListener('keyup', e => { if (e.key === 'ArrowLeft' || e.key === 'a') keyL = false; if (e.key === 'ArrowRight' || e.key === 'd') keyR = false; });
+let pts = 0;
+cv.addEventListener('pointerdown', e => { pts++; if (pts > 1) return jump(); const r = cv.getBoundingClientRect(); input = e.clientX - r.left < r.width / 2 ? -1 : 1; });
+const stopIn = () => { pts = Math.max(0, pts - 1); if (!pts) input = 0; };
+cv.addEventListener('pointerup', stopIn);
+cv.addEventListener('pointercancel', stopIn);
+holdButton(document.getElementById('left'), v => { keyL = v; });
+holdButton(document.getElementById('right'), v => { keyR = v; });
+document.getElementById('jump').addEventListener('pointerdown', jump);
+</script>
+</body>
+</html>
