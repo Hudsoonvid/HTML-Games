@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Typing Race</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #track { width: min(680px, calc(100vw - 16px)); margin: 6px auto; background: #1f2937; border-radius: 12px; padding: 8px 12px; }
+  .lane { position: relative; height: 44px; border-bottom: 2px dashed #374151; }
+  .lane:last-child { border: 0; }
+  .lane .car { position: absolute; top: 4px; font-size: 30px; transition: left .25s linear; transform: scaleX(-1); }
+  .lane .who { position: absolute; left: 0; bottom: 2px; font-size: 12px; color: var(--muted); }
+  .lane .flag { position: absolute; right: 0; top: 8px; font-size: 22px; }
+  #text { width: min(680px, calc(100vw - 16px)); margin: 8px auto; font-size: 21px; line-height: 1.6; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; user-select: none; }
+  #text .done { color: #4ade80; }
+  #text .bad { background: #7f1d1d; color: #fecaca; }
+  #text .cur { border-bottom: 3px solid #facc15; }
+  #text .todo { color: var(--muted); }
+  #inp { display: block; width: min(680px, calc(100vw - 16px)); margin: 0 auto; font-size: 20px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: #0b1020; color: var(--fg); }
+  #count { text-align: center; font-size: 46px; font-weight: 800; min-height: 56px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏆 Typing Race</h1>
+  <div class="stats">WPM <b id="wpm">0</b> Accuracy <b id="acc">100%</b> Best <b id="best">0</b></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div id="track"></div>
+<div id="count"></div>
+<div id="text"></div>
+<input id="inp" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type here when the race starts…">
+<p class="help">Race to type the passage first. Mistakes turn red — fix them with backspace before you can move on. Your words per minute (WPM) and accuracy are shown at the top.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const PASSAGES = [
+  'The quick brown fox jumps over the lazy dog while the cat watches from the warm windowsill.',
+  'A small boat drifted across the calm lake as the sun rose slowly over the distant hills.',
+  'Practice makes progress, so keep your fingers on the home row and your eyes on the screen.',
+  'The robot rolled into the kitchen, beeped twice, and carefully made a perfect slice of toast.',
+  'Every great adventure begins with a single step and a backpack full of snacks.',
+  'Bright lanterns floated over the river as music drifted through the warm summer night.',
+  'She packed her telescope, a thermos of cocoa, and a map of the stars before climbing the hill.',
+  'Thunder rolled across the valley, and the horses gathered close beneath the old oak tree.',
+  'A curious penguin waddled up to the camera, tilted its head, and tapped the lens with its beak.',
+  'The library was silent except for the soft rustle of pages and the ticking of a tall clock.',
+  'Building a sandcastle is easy; keeping it standing when the tide comes in is the real challenge.',
+  'The chef tossed the pizza dough high into the air and caught it with a grin.',
+  'Our team trained every morning, rain or shine, and it showed when the big game finally arrived.',
+  'Deep in the forest, a hidden waterfall sparkled like a curtain of tiny diamonds.',
+  'He forgot his umbrella again, so he ran from shop to shop under the dripping awnings.',
+  'The spaceship hummed quietly as the crew gazed at the blue planet slowly turning below.',
+  'Fresh bread, ripe tomatoes, and a little olive oil can make a simple lunch feel like a feast.',
+  'The puzzle had a thousand pieces, and the very last one was hiding under the sofa.',
+  'Wind turbines turned slowly on the ridge, catching the breeze that swept in from the sea.',
+  'A good friend tells you the truth, shares their fries, and laughs at your terrible jokes.',
+  'The marathon runners crossed the bridge as the crowd cheered and waved colourful flags.',
+  'Snowflakes drifted past the window while the kettle whistled and the fire crackled.',
+  'The detective studied the muddy footprints, then smiled and closed her notebook.',
+  'Coding is like solving a riddle: you break the big problem into small, friendly pieces.'
+];
+const track = document.getElementById('track'), textEl = document.getElementById('text'), inp = document.getElementById('inp'), countEl = document.getElementById('count');
+let S, me, passage, typed = '', errors = 0, keys = 0, startT = 0, state = 'idle', prog = [0, 0], finishT = [0, 0], botT = null, sendT = 0, best = Store.get('typing-race-best', 0);
+const nameOf = i => (S.mode === 'local' ? (i ? 'Ghost' : 'You') : i === me ? 'You' : S.opp.name);
+
+function begin(s) {
+  S = s;
+  S.on('prog', d => { if (d && state !== 'idle') { prog[1 - me] = clamp(d.n | 0, 0, passage.length); if (d.done && !finishT[1 - me]) { finishT[1 - me] = d.t || (performance.now() - startT); checkEnd(); } renderTrack(); } });
+  S.startRound(() => ({ text: pick(PASSAGES) }), cfg => {
+    me = S.mode === 'online' ? S.seat : 0;
+    passage = cfg.text;
+    typed = ''; errors = 0; keys = 0; prog = [0, 0]; finishT = [0, 0];
+    inp.value = ''; inp.disabled = true;
+    state = 'count';
+    renderTrack(); renderText();
+    let n = 3;
+    countEl.textContent = n;
+    const r = S.round;
+    const tick = () => {
+      if (r !== S.round) return;
+      n--;
+      if (n > 0) { countEl.textContent = n; Sound.beep(440, 0.1, 'square', 0.04); setTimeout(tick, 800); }
+      else { countEl.textContent = 'GO!'; Sound.beep(880, 0.2, 'square', 0.05); startRace(); setTimeout(() => { if (state === 'race') countEl.textContent = ''; }, 700); }
+    };
+    setTimeout(tick, 800);
+  });
+}
+
+function startRace() {
+  state = 'race';
+  startT = performance.now();
+  inp.disabled = false;
+  inp.focus();
+  // computer typist (or the ghost in practice mode): speed follows the level
+  if (S.ai || S.mode === 'local') {
+    const lv = S.mode === 'local' ? Math.min(1, best / 120) : S.level;
+    const cps = (18 + lv * 85) * 5 / 60;
+    const r = S.round;
+    const step = () => {
+      if (r !== S.round || state !== 'race') return;
+      const o = S.mode === 'local' ? 1 : 1 - me;
+      prog[o] = Math.min(passage.length, prog[o] + 1);
+      if (prog[o] >= passage.length && !finishT[o]) { finishT[o] = performance.now() - startT; checkEnd(); }
+      renderTrack();
+      if (prog[o] < passage.length) setTimeout(step, (1000 / cps) * rand(0.6, 1.4) + (Math.random() < 0.04 ? rand(200, 700) : 0));
+    };
+    setTimeout(step, 600);
+  }
+}
+
+function renderTrack() {
+  track.innerHTML = [0, 1].map(i => `<div class="lane"><span class="who">${nameOf(i)}${finishT[i] ? ` · ${wpmOf(finishT[i])} wpm` : ''}</span><span class="car" style="left:calc(${(prog[i] / (passage ? passage.length : 1)) * 88}% )">${i ? '🚙' : '🏎️'}</span><span class="flag">🏁</span></div>`).join('');
+}
+const wpmOf = ms => Math.round((passage.length / 5) / (ms / 60000));
+
+function renderText() {
+  let ok = 0;
+  while (ok < typed.length && typed[ok] === passage[ok]) ok++;
+  const bad = typed.length - ok;
+  textEl.innerHTML = `<span class="done">${esc(passage.slice(0, ok))}</span><span class="bad">${esc(passage.slice(ok, ok + bad))}</span><span class="cur">${esc(passage[ok + bad] || '')}</span><span class="todo">${esc(passage.slice(ok + bad + 1))}</span>`;
+  return ok;
+}
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+inp.addEventListener('input', () => {
+  if (state !== 'race') return;
+  const v = inp.value;
+  if (v.length > typed.length) { keys++; const i = v.length - 1; if (v[i] !== passage[i]) { errors++; Sound.beep(160, 0.04, 'square', 0.02); } }
+  // no typing past an uncorrected mistake (allow up to 5 wrong characters)
+  let ok = 0;
+  while (ok < v.length && v[ok] === passage[ok]) ok++;
+  typed = v.length - ok > 5 ? v.slice(0, ok + 5) : v;
+  inp.value = typed;
+  const good = renderText();
+  prog[me] = good;
+  const el = performance.now() - startT;
+  document.getElementById('wpm').textContent = Math.round((good / 5) / (el / 60000)) || 0;
+  document.getElementById('acc').textContent = Math.round(((keys - errors) / Math.max(1, keys)) * 100) + '%';
+  renderTrack();
+  const done = good >= passage.length;
+  if (done && !finishT[me]) { finishT[me] = el; inp.disabled = true; checkEnd(); }
+  if (S.human && (done || el - sendT > 150)) { sendT = el; S.send('prog', { n: good, done, t: done ? Math.round(el) : 0 }); }
+});
+
+function checkEnd() {
+  const mine = finishT[me], theirs = finishT[S.mode === 'local' ? 1 : 1 - me];
+  if (!mine && !theirs) return;
+  // whoever finished first wins; wait for my finish to show my WPM unless they already won
+  if (state !== 'race') return;
+  if (mine && (!theirs || mine <= theirs)) end(true);
+  else if (theirs && (!mine || theirs < mine)) end(false);
+}
+
+function end(won) {
+  state = 'done';
+  inp.disabled = true;
+  const w = finishT[me] ? wpmOf(finishT[me]) : Math.round((prog[me] / 5) / ((performance.now() - startT) / 60000));
+  if (finishT[me] && w > best) { best = w; Store.set('typing-race-best', best); document.getElementById('best').textContent = best; }
+  Sound.beep(won ? 880 : 200, 0.3, 'triangle');
+  const title = won ? `You win at ${w} WPM! 🏆` : `${nameOf(S.mode === 'local' ? 1 : 1 - me)} finished first`;
+  setTimeout(() => Lobby.end(S, { result: won ? 1 : 0, title, detail: `Your speed: ${w} WPM · accuracy ${document.getElementById('acc').textContent}` }), 900);
+}
+
+document.getElementById('menu').onclick = () => Lobby.open();
+document.getElementById('best').textContent = best;
+textEl.onclick = () => inp.focus();
+Lobby.open({ game: 'typing-race', title: '🏆 Typing Race', local: false, onStart: begin });
+</script>
+</body>
+</html>

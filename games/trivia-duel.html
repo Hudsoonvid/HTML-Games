@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trivia Duel</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #qbox { width: min(640px, calc(100vw - 16px)); margin: 8px auto; }
+  #q { font-size: 22px; font-weight: 700; text-align: center; min-height: 64px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  #opts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+  #opts button { font: inherit; font-size: 17px; padding: 16px 10px; border-radius: 12px; border: 2px solid var(--line); background: var(--panel-2); color: var(--fg); cursor: pointer; min-height: 64px; }
+  #opts button.mine { border-color: #facc15; }
+  #opts button.right { background: #166534; border-color: #22c55e; }
+  #opts button.wrong { background: #7f1d1d; border-color: #ef4444; }
+  #opts button .tag { font-size: 12px; display: block; color: #fde68a; }
+  #timer { height: 8px; border-radius: 4px; background: #334155; overflow: hidden; margin-top: 10px; }
+  #timer i { display: block; height: 100%; background: #38bdf8; width: 100%; }
+  @media (max-width: 520px) { #opts { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>❓ Trivia Duel</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div id="qbox"><div id="q">Get ready…</div><div id="timer"><i></i></div><div id="opts"></div></div>
+<p class="help">Ten questions, head to head. Pick an answer before the timer runs out — a right answer scores 100 points plus a bonus for speed. Highest score after ten questions wins.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+// [question, correct answer, three wrong answers]
+const BANK = [
+  ['What is the largest planet in our solar system?', 'Jupiter', 'Saturn', 'Neptune', 'Earth'],
+  ['How many continents are there?', '7', '5', '6', '8'],
+  ['What gas do plants take in from the air?', 'Carbon dioxide', 'Oxygen', 'Nitrogen', 'Helium'],
+  ['What is the boiling point of water at sea level in °C?', '100', '90', '80', '120'],
+  ['Which ocean is the largest?', 'Pacific', 'Atlantic', 'Indian', 'Arctic'],
+  ['How many legs does a spider have?', '8', '6', '10', '12'],
+  ['What is the capital of France?', 'Paris', 'Lyon', 'Marseille', 'Nice'],
+  ['What is the capital of Japan?', 'Tokyo', 'Kyoto', 'Osaka', 'Nagoya'],
+  ['What is the capital of Australia?', 'Canberra', 'Sydney', 'Melbourne', 'Perth'],
+  ['What is the capital of Canada?', 'Ottawa', 'Toronto', 'Vancouver', 'Montreal'],
+  ['What is the capital of Italy?', 'Rome', 'Milan', 'Venice', 'Naples'],
+  ['What is the capital of Egypt?', 'Cairo', 'Alexandria', 'Giza', 'Luxor'],
+  ['What is the capital of Brazil?', 'Brasília', 'Rio de Janeiro', 'São Paulo', 'Salvador'],
+  ['What is the capital of Spain?', 'Madrid', 'Barcelona', 'Seville', 'Valencia'],
+  ['What is the capital of Kenya?', 'Nairobi', 'Mombasa', 'Kisumu', 'Nakuru'],
+  ['What is the capital of South Korea?', 'Seoul', 'Busan', 'Incheon', 'Daegu'],
+  ['Which planet is known as the Red Planet?', 'Mars', 'Venus', 'Mercury', 'Jupiter'],
+  ['Which planet is closest to the Sun?', 'Mercury', 'Venus', 'Mars', 'Earth'],
+  ['How many planets are in our solar system?', '8', '9', '7', '10'],
+  ['What is the hardest natural substance?', 'Diamond', 'Gold', 'Iron', 'Quartz'],
+  ['What is H2O better known as?', 'Water', 'Salt', 'Hydrogen', 'Air'],
+  ['What is the chemical symbol for gold?', 'Au', 'Ag', 'Gd', 'Go'],
+  ['What is the chemical symbol for iron?', 'Fe', 'Ir', 'In', 'I'],
+  ['What is the chemical symbol for sodium?', 'Na', 'So', 'Sd', 'S'],
+  ['Which organ pumps blood around the body?', 'Heart', 'Lungs', 'Liver', 'Kidney'],
+  ['How many bones are in the adult human body?', '206', '186', '226', '196'],
+  ['What is the largest organ of the human body?', 'Skin', 'Liver', 'Brain', 'Heart'],
+  ['What is the fastest land animal?', 'Cheetah', 'Lion', 'Pronghorn', 'Greyhound'],
+  ['What is the largest mammal?', 'Blue whale', 'Elephant', 'Giraffe', 'Orca'],
+  ['What do bees make?', 'Honey', 'Milk', 'Silk', 'Wax only'],
+  ['What is a baby kangaroo called?', 'Joey', 'Kid', 'Cub', 'Pup'],
+  ['What is a group of lions called?', 'Pride', 'Pack', 'Herd', 'Flock'],
+  ['Which bird is a symbol of peace?', 'Dove', 'Eagle', 'Crow', 'Parrot'],
+  ['How many hearts does an octopus have?', '3', '1', '2', '4'],
+  ['Which animal is known as the ship of the desert?', 'Camel', 'Horse', 'Elephant', 'Donkey'],
+  ['What is the tallest animal?', 'Giraffe', 'Elephant', 'Ostrich', 'Moose'],
+  ['What is 7 × 8?', '56', '54', '64', '48'],
+  ['What is 12 × 12?', '144', '124', '132', '154'],
+  ['What is the square root of 81?', '9', '8', '7', '11'],
+  ['What is 15% of 200?', '30', '15', '25', '35'],
+  ['How many sides does a hexagon have?', '6', '5', '7', '8'],
+  ['How many degrees are in a right angle?', '90', '45', '180', '100'],
+  ['What is the next prime number after 7?', '11', '9', '13', '10'],
+  ['How many minutes are in a day?', '1440', '1240', '1640', '960'],
+  ['What is 2 to the power of 10?', '1024', '1000', '512', '2048'],
+  ['What is the Roman numeral for 50?', 'L', 'C', 'D', 'X'],
+  ['How many sides does a triangle have?', '3', '4', '2', '5'],
+  ['What is 1000 ÷ 8?', '125', '120', '150', '128'],
+  ['Who painted the Mona Lisa?', 'Leonardo da Vinci', 'Michelangelo', 'Raphael', 'Van Gogh'],
+  ['Who wrote Romeo and Juliet?', 'William Shakespeare', 'Charles Dickens', 'Jane Austen', 'Mark Twain'],
+  ['Which instrument has 88 keys?', 'Piano', 'Organ', 'Guitar', 'Harp'],
+  ['How many strings does a standard guitar have?', '6', '4', '5', '8'],
+  ['What colour do you get by mixing blue and yellow?', 'Green', 'Purple', 'Orange', 'Brown'],
+  ['What colour do you get by mixing red and white?', 'Pink', 'Purple', 'Orange', 'Peach'],
+  ['How many colours are in a rainbow?', '7', '6', '5', '8'],
+  ['Which country is home to the pyramids of Giza?', 'Egypt', 'Mexico', 'Peru', 'Sudan'],
+  ['Which country has the most people?', 'India', 'China', 'USA', 'Indonesia'],
+  ['Which is the longest river in the world?', 'Nile', 'Amazon', 'Yangtze', 'Mississippi'],
+  ['What is the highest mountain on Earth?', 'Mount Everest', 'K2', 'Kilimanjaro', 'Denali'],
+  ['Which desert is the largest hot desert?', 'Sahara', 'Gobi', 'Kalahari', 'Arabian'],
+  ['In which country is the Great Barrier Reef?', 'Australia', 'Fiji', 'Indonesia', 'Philippines'],
+  ['Which country is shaped like a boot?', 'Italy', 'Greece', 'Spain', 'Portugal'],
+  ['Which continent is the coldest?', 'Antarctica', 'Europe', 'Asia', 'North America'],
+  ['How many players are on a soccer team on the field?', '11', '10', '9', '12'],
+  ['How many players are on a basketball team on court?', '5', '6', '7', '4'],
+  ['In which sport would you perform a slam dunk?', 'Basketball', 'Volleyball', 'Tennis', 'Baseball'],
+  ['How many rings are on the Olympic flag?', '5', '4', '6', '7'],
+  ['In tennis, what is a score of zero called?', 'Love', 'Nil', 'Zip', 'Duck'],
+  ['How many points is a touchdown worth in American football?', '6', '7', '3', '5'],
+  ['Which sport uses a shuttlecock?', 'Badminton', 'Squash', 'Tennis', 'Table tennis'],
+  ['How long is a marathon (approx.)?', '42 km', '26 km', '50 km', '35 km'],
+  ['What is the main language spoken in Brazil?', 'Portuguese', 'Spanish', 'English', 'French'],
+  ['What is the currency of Japan?', 'Yen', 'Won', 'Yuan', 'Ringgit'],
+  ['What is the currency of the United Kingdom?', 'Pound', 'Euro', 'Dollar', 'Franc'],
+  ['How many days are in a leap year?', '366', '365', '364', '360'],
+  ['Which month has the fewest days?', 'February', 'April', 'June', 'November'],
+  ['How many hours are in a week?', '168', '144', '172', '160'],
+  ['What is frozen water called?', 'Ice', 'Steam', 'Mist', 'Dew'],
+  ['What force pulls objects toward Earth?', 'Gravity', 'Magnetism', 'Friction', 'Inertia'],
+  ['What is the centre of an atom called?', 'Nucleus', 'Electron', 'Proton', 'Core'],
+  ['What do caterpillars turn into?', 'Butterflies', 'Beetles', 'Bees', 'Spiders'],
+  ['What star is at the centre of our solar system?', 'The Sun', 'Polaris', 'Sirius', 'Vega'],
+  ['What is the natural satellite of Earth?', 'The Moon', 'Mars', 'Phobos', 'Titan'],
+  ['What part of the plant makes food using sunlight?', 'Leaf', 'Root', 'Stem', 'Flower'],
+  ['Which blood cells fight infection?', 'White blood cells', 'Red blood cells', 'Platelets', 'Plasma'],
+  ['How many teeth does an adult human usually have?', '32', '28', '30', '36'],
+  ['What is the largest bone in the human body?', 'Femur', 'Spine', 'Skull', 'Humerus'],
+  ['What does a thermometer measure?', 'Temperature', 'Pressure', 'Humidity', 'Speed'],
+  ['What is the opposite of north?', 'South', 'East', 'West', 'Up'],
+  ['Which shape has four equal sides and four right angles?', 'Square', 'Rectangle', 'Rhombus', 'Trapezoid'],
+  ['What is the freezing point of water in °F?', '32', '0', '10', '212'],
+  ['Which metal is liquid at room temperature?', 'Mercury', 'Lead', 'Tin', 'Zinc'],
+  ['What is the most common gas in Earth\'s air?', 'Nitrogen', 'Oxygen', 'Carbon dioxide', 'Argon'],
+  ['Which planet has the most famous rings?', 'Saturn', 'Uranus', 'Jupiter', 'Neptune'],
+  ['What do you call a word that means the opposite?', 'Antonym', 'Synonym', 'Homonym', 'Acronym'],
+  ['What is the plural of mouse?', 'Mice', 'Mouses', 'Meese', 'Mousen'],
+  ['Which letter is a vowel?', 'E', 'B', 'K', 'T'],
+  ['How many letters are in the English alphabet?', '26', '24', '25', '28'],
+  ['What is the opposite of ancient?', 'Modern', 'Old', 'Historic', 'Antique'],
+  ['Which fruit is known for keeping the doctor away?', 'Apple', 'Banana', 'Orange', 'Grape'],
+  ['Which vegetable makes people cry when cut?', 'Onion', 'Carrot', 'Potato', 'Pepper'],
+  ['What is guacamole mainly made from?', 'Avocado', 'Peas', 'Cucumber', 'Lime'],
+  ['Which nut is used to make marzipan?', 'Almond', 'Peanut', 'Walnut', 'Cashew'],
+  ['What is the main ingredient in bread?', 'Flour', 'Sugar', 'Rice', 'Corn'],
+  ['Which food is made by bees?', 'Honey', 'Jam', 'Syrup', 'Butter'],
+  ['What colour are emeralds?', 'Green', 'Red', 'Blue', 'Purple'],
+  ['Which is the smallest prime number?', '2', '1', '3', '0'],
+  ['What shape is a stop sign?', 'Octagon', 'Hexagon', 'Circle', 'Triangle'],
+  ['How many sides does a pentagon have?', '5', '6', '4', '8'],
+  ['Which direction does the sun rise?', 'East', 'West', 'North', 'South'],
+  ['What tool is used to look at stars?', 'Telescope', 'Microscope', 'Periscope', 'Stethoscope'],
+  ['Which machine is used to see tiny things?', 'Microscope', 'Telescope', 'Barometer', 'Compass'],
+  ['What does a compass needle point to?', 'North', 'South', 'East', 'Up'],
+  ['How many weeks are in a year?', '52', '48', '50', '56'],
+  ['What is the largest country by area?', 'Russia', 'Canada', 'China', 'USA'],
+  ['What is the smallest country in the world?', 'Vatican City', 'Monaco', 'Malta', 'San Marino'],
+  ['Which country gifted the Statue of Liberty to the USA?', 'France', 'Spain', 'England', 'Italy'],
+  ['Which planet spins on its side?', 'Uranus', 'Neptune', 'Venus', 'Mars'],
+  ['What is the largest internal organ?', 'Liver', 'Heart', 'Stomach', 'Lungs'],
+  ['Which animal can change its colour to blend in?', 'Chameleon', 'Iguana', 'Gecko', 'Frog'],
+  ['What is the home of a bee called?', 'Hive', 'Nest', 'Den', 'Burrow'],
+  ['Which sea creature has eight arms and ink?', 'Octopus', 'Jellyfish', 'Starfish', 'Crab']
+];
+const qEl = document.getElementById('q'), optsEl = document.getElementById('opts'), bar = document.querySelector('#timer i');
+const N = 10, TIME = 15000;
+let S, me, qs, qi, scores, answers, qStart, state = 'idle', timerId = null, early = {};
+const nameOf = i => (i === me ? 'You' : S.opp.name);
+
+function begin(s) {
+  S = s;
+  S.on('ans', d => { if (!d) return; if (d.q === qi && state === 'ask') { answers[1 - me] = d; maybeReveal(); } else if (d.q > qi) early[d.q] = d; });
+  S.startRound(() => ({ qs: shuffle(BANK.map((_, i) => i)).slice(0, N).map(i => ({ i, order: shuffle([0, 1, 2, 3]) })) }), cfg => {
+    me = S.mode === 'online' ? S.seat : 0;
+    qs = cfg.qs; qi = -1; scores = [0, 0]; early = {};
+    next();
+  });
+}
+
+function status() {
+  document.getElementById('stat').textContent = `Question ${Math.min(qi + 1, N)}/${N}`;
+  document.getElementById('vs').innerHTML = `<b>${S.me.name}: ${scores[me]}</b> vs <b>${S.opp.name}: ${scores[1 - me]}</b>`;
+}
+
+function next() {
+  qi++;
+  if (qi >= N) return finish();
+  answers = [null, null];
+  if (early[qi]) { answers[1 - me] = early[qi]; delete early[qi]; }
+  const Q = qs[qi], row = BANK[Q.i];
+  qEl.textContent = row[0];
+  optsEl.innerHTML = Q.order.map(k => `<button data-k="${k}">${row[k + 1]}</button>`).join('');
+  optsEl.querySelectorAll('button').forEach(b => { b.onclick = () => answer(+b.dataset.k); });
+  qStart = performance.now();
+  state = 'ask';
+  status();
+  clearInterval(timerId);
+  timerId = setInterval(() => {
+    const left = Math.max(0, TIME - (performance.now() - qStart));
+    bar.style.width = (left / TIME) * 100 + '%';
+    if (left <= 0 && state === 'ask') { if (!answers[me]) answer(-1); }
+  }, 50);
+  // the computer answers after a "thinking" pause; better players are faster and right more often
+  if (S.ai) {
+    const r = S.round, q = qi, L = S.level;
+    const t = rand(2500, 9000) * (1.2 - L * 0.6);
+    setTimeout(() => {
+      if (r !== S.round || q !== qi || state !== 'ask') return;
+      const right = Math.random() < 0.35 + L * 0.6;
+      answers[1 - me] = { q, k: right ? 0 : randInt(1, 3), t: Math.round(performance.now() - qStart) };
+      maybeReveal();
+    }, Math.min(t, TIME - 500));
+  }
+  maybeReveal();
+}
+
+function answer(k) {
+  if (state !== 'ask' || answers[me]) return;
+  const t = Math.round(performance.now() - qStart);
+  answers[me] = { q: qi, k, t };
+  if (S.human) S.send('ans', answers[me]);
+  optsEl.querySelectorAll('button').forEach(b => { if (+b.dataset.k === k) b.classList.add('mine'); b.disabled = true; });
+  Sound.beep(500, 0.04, 'triangle', 0.03);
+  maybeReveal();
+}
+
+function pts(a) { return a && a.k === 0 ? 100 + Math.round(Math.max(0, TIME - a.t) / TIME * 100) : 0; }
+
+function maybeReveal() {
+  if (state !== 'ask' || !answers[0] || !answers[1]) {
+    if (state === 'ask' && answers[me] && !answers[1 - me]) qEl.dataset.wait = '1';
+    return;
+  }
+  state = 'reveal';
+  clearInterval(timerId);
+  const gain = answers.map(pts);
+  scores[0] += gain[0]; scores[1] += gain[1];
+  optsEl.querySelectorAll('button').forEach(b => {
+    const k = +b.dataset.k;
+    b.disabled = true;
+    if (k === 0) b.classList.add('right');
+    else if (k === answers[me].k) b.classList.add('wrong');
+    const who = [0, 1].filter(i => answers[i].k === k).map(i => nameOf(i));
+    if (who.length) b.innerHTML += `<span class="tag">${who.join(' & ')}</span>`;
+  });
+  Sound.beep(gain[me] ? 880 : 200, 0.15, 'triangle', 0.05);
+  status();
+  const r = S.round;
+  setTimeout(() => { if (r === S.round) next(); }, 2200);
+}
+
+function finish() {
+  state = 'done';
+  clearInterval(timerId);
+  const a = scores[me], b = scores[1 - me];
+  const title = a === b ? `It's a tie at ${a}!` : a > b ? `You win ${a}–${b}! 🧠` : `${S.opp.name} wins ${b}–${a}`;
+  Lobby.end(S, { result: a === b ? 0.5 : a > b ? 1 : 0, title });
+}
+
+document.getElementById('menu').onclick = () => Lobby.open();
+document.addEventListener('keydown', e => { if (state === 'ask' && e.key >= '1' && e.key <= '4') { const b = optsEl.querySelectorAll('button')[+e.key - 1]; if (b) answer(+b.dataset.k); } });
+Lobby.open({ game: 'trivia-duel', title: '❓ Trivia Duel', local: false, onStart: begin });
+</script>
+</body>
+</html>
