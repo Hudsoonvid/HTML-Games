@@ -6,18 +6,20 @@
 <title>Rock Paper Scissors</title>
 <link rel="stylesheet" href="shared.css">
 <style>
-  .arena { display: flex; gap: 40px; align-items: center; justify-content: center; margin: 20px 0; }
-  .hand { font-size: 96px; width: 140px; height: 140px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--panel); border: 3px solid var(--line); }
+  .arena { display: flex; gap: clamp(16px, 6vw, 40px); align-items: center; justify-content: center; margin: 16px 0; }
+  .hand { font-size: clamp(60px, 18vw, 96px); width: clamp(100px, 28vw, 140px); aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--panel); border: 3px solid var(--line); }
   .hand.win { border-color: var(--good); box-shadow: 0 0 24px rgba(34,197,94,.5); }
   .hand.lose { border-color: var(--bad); opacity: .7; }
   .hand.shake { animation: shake .5s ease-in-out; }
+  .hand.ready { border-color: var(--accent-2); }
   @keyframes shake { 25%, 75% { transform: translateY(-16px); } 50% { transform: translateY(6px); } }
   .vs { font-size: 26px; color: var(--muted); font-weight: 800; }
   .choices { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
-  .choices button { font-size: 44px; width: 86px; height: 86px; border-radius: 18px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; }
-  .choices button:hover { transform: translateY(-3px); background: #2c3060; }
+  .choices button { font-size: 40px; width: 82px; height: 82px; border-radius: 18px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; touch-action: manipulation; }
+  .choices button:disabled { opacity: .4; cursor: default; }
+  .choices button.picked { outline: 3px solid var(--accent-2); opacity: 1; }
   .choices small { display: block; font-size: 11px; color: var(--muted); }
-  .lbl { text-align: center; color: var(--muted); font-size: 13px; }
+  .lbl { text-align: center; color: var(--muted); font-size: 13px; margin-top: 4px; }
   #rules { color: var(--muted); font-size: 13px; text-align: center; max-width: 560px; }
 </style>
 </head>
@@ -25,22 +27,24 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>✊ Rock Paper Scissors</h1>
-  <div class="stats">You <b id="you">0</b> CPU <b id="cpu">0</b> Ties <b id="ties">0</b></div>
+  <div class="stats">First to <b>3</b></div>
 </header>
 <div class="controls">
-  <select id="mode"><option value="3">Classic</option><option value="5">+ Lizard &amp; Spock</option></select>
-  <button class="btn alt" id="reset">Reset score</button>
+  <select id="variant"><option value="3">Classic</option><option value="5">+ Lizard &amp; Spock</option></select>
+  <button class="btn alt" id="menu">Change mode</button>
 </div>
+<div class="vsbar" id="vs"></div>
 <div class="arena">
-  <div><div class="hand" id="ph">❔</div><div class="lbl">You</div></div>
+  <div><div class="hand" id="ph">❔</div><div class="lbl" id="pname">You</div></div>
   <div class="vs">VS</div>
-  <div><div class="hand" id="ch">❔</div><div class="lbl">CPU</div></div>
+  <div><div class="hand" id="ch">❔</div><div class="lbl" id="oname">Opponent</div></div>
 </div>
 <div class="msg" id="msg">Choose your move!</div>
 <div class="choices" id="choices"></div>
 <p id="rules"></p>
-<p class="help">The CPU learns: it watches the patterns in your choices and tries to predict your next move. Can you stay unpredictable? Keys <kbd>1</kbd>–<kbd>5</kbd>.</p>
+<p class="help">Play online against other players, or against a computer that learns your patterns — the smarter it is, the more it predicts you. Keys <kbd>1</kbd>–<kbd>5</kbd>.</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const MOVES = [
   { n: 'Rock', e: '✊', beats: { 2: 'crushes', 3: 'crushes' } },
@@ -49,82 +53,122 @@ const MOVES = [
   { n: 'Lizard', e: '🦎', beats: { 4: 'poisons', 1: 'eats' } },
   { n: 'Spock', e: '🖖', beats: { 2: 'smashes', 0: 'vaporizes' } }
 ];
-let K, history = [], score = { you: 0, cpu: 0, ties: 0 }, busy = false;
+const TARGET = 3;
+let S, K = 3, round, score, picks, history = [], busy;
+const $ = id => document.getElementById(id);
+const beats = (a, b) => MOVES[a].beats[b] != null;
 
-function setup() {
-  K = +document.getElementById('mode').value;
-  history = [];
-  const el = document.getElementById('choices');
+function buildButtons() {
+  const el = $('choices');
   el.innerHTML = '';
   for (let i = 0; i < K; i++) {
     const b = document.createElement('button');
     b.innerHTML = `${MOVES[i].e}<small>${MOVES[i].n}</small>`;
-    b.onclick = () => play(i);
+    b.onclick = () => choose(i);
     el.appendChild(b);
   }
   const rules = [];
   for (let a = 0; a < K; a++) for (const [b, verb] of Object.entries(MOVES[a].beats)) if (+b < K) rules.push(`${MOVES[a].n} ${verb} ${MOVES[b].n}`);
-  document.getElementById('rules').textContent = rules.join(' · ');
-  render();
+  $('rules').textContent = rules.join(' · ');
 }
 
-const beats = (a, b) => MOVES[a].beats[b] != null;
+function hud() {
+  $('vs').innerHTML = `<b>${S.me.name}</b> ${score[0]} – ${score[1]} <b>${S.opp.name}</b>`;
+  $('pname').textContent = 'You';
+  $('oname').textContent = S.opp.name;
+}
 
-// Predict the player's next move from what followed their last two moves before.
-function predict() {
-  const counts = Array(K).fill(1);
+// Predict the player's next move from what followed their last moves before.
+function aiPick() {
   const n = history.length;
-  if (n >= 2) {
-    for (let i = 2; i < n; i++) if (history[i - 2] === history[n - 2] && history[i - 1] === history[n - 1]) counts[history[i]] += 3;
-  }
-  if (n >= 1) for (let i = 1; i < n; i++) if (history[i - 1] === history[n - 1]) counts[history[i]] += 1;
-  history.forEach(m => { counts[m] += 0.2; });
-  let total = counts.reduce((a, b) => a + b, 0), r = Math.random() * total;
-  for (let i = 0; i < K; i++) { r -= counts[i]; if (r <= 0) return i; }
-  return K - 1;
+  if (n < 2 || Math.random() > 0.15 + S.level * 0.75) return randInt(0, K - 1);
+  const counts = Array(K).fill(1);
+  for (let i = 2; i < n; i++) if (history[i - 2] === history[n - 2] && history[i - 1] === history[n - 1] && history[i] < K) counts[history[i]] += 3;
+  for (let i = 1; i < n; i++) if (history[i - 1] === history[n - 1] && history[i] < K) counts[history[i]] += 1;
+  let r = Math.random() * counts.reduce((a, b) => a + b, 0), guess = 0;
+  for (let i = 0; i < K; i++) { r -= counts[i]; if (r <= 0) { guess = i; break; } }
+  const counters = [];
+  for (let i = 0; i < K; i++) if (beats(i, guess)) counters.push(i);
+  return pick(counters);
 }
 
-function counter(m) {
-  const options = [];
-  for (let i = 0; i < K; i++) if (beats(i, m)) options.push(i);
-  return pick(options);
+function begin(s) {
+  S = s;
+  S.on('pick', d => {
+    if (!d || typeof d.i !== 'number' || d.i < 0 || d.i >= K) return;
+    picks[d.r] = picks[d.r] || [null, null];
+    picks[d.r][1] = d.i;
+    if (d.r === round) { $('ch').classList.add('ready'); $('msg').textContent = `${S.opp.name} has chosen…`; }
+    resolve();
+  });
+  S.startRound(() => ({ k: +$('variant').value }), cfg => {
+    K = cfg.k === 5 ? 5 : 3;
+    $('variant').value = K;
+    $('variant').disabled = S.human;
+    round = 0;
+    score = [0, 0];
+    picks = {};
+    buildButtons();
+    newRound();
+  });
 }
 
-function play(i) {
-  if (busy) return;
+function newRound() {
+  round++;
+  busy = false;
+  picks[round] = picks[round] || [null, null];
+  $('ph').className = 'hand'; $('ch').className = 'hand' + (picks[round][1] != null ? ' ready' : '');
+  $('ph').textContent = '❔'; $('ch').textContent = '❔';
+  $('msg').textContent = picks[round][1] != null ? `${S.opp.name} has chosen…` : 'Choose your move!';
+  [...$('choices').children].forEach(b => { b.disabled = false; b.classList.remove('picked'); });
+  hud();
+}
+
+function choose(i) {
+  if (!S || busy || i >= K || picks[round][0] != null) return;
+  picks[round][0] = i;
+  [...$('choices').children].forEach((b, k) => { b.disabled = true; b.classList.toggle('picked', k === i); });
+  $('ph').classList.add('ready');
+  Sound.beep(500, 0.04, 'triangle', 0.03);
+  if (S.ai) {
+    const r = round;
+    const ai = aiPick();
+    setTimeout(() => { if (r === round) { picks[r][1] = ai; resolve(); } }, S.delay(250, 700));
+  } else S.send('pick', { r: round, i });
+  if (picks[round][1] == null) $('msg').textContent = `Waiting for ${S.opp.name}…`;
+  resolve();
+}
+
+function resolve() {
+  const p = picks[round];
+  if (!p || p[0] == null || p[1] == null || busy) return;
   busy = true;
-  const guess = history.length >= 3 ? predict() : randInt(0, K - 1);
-  const c = counter(guess);
-  history.push(i);
-  const ph = document.getElementById('ph'), ch = document.getElementById('ch');
-  ph.className = 'hand shake'; ch.className = 'hand shake';
-  ph.textContent = '✊'; ch.textContent = '✊';
-  document.getElementById('msg').textContent = 'Rock… paper… scissors…';
+  const [mine, theirs] = p;
+  history.push(mine);
+  $('ph').className = 'hand shake'; $('ch').className = 'hand shake';
+  $('ph').textContent = '✊'; $('ch').textContent = '✊';
+  $('msg').textContent = 'Rock… paper… scissors…';
   setTimeout(() => {
-    ph.className = 'hand'; ch.className = 'hand';
-    ph.textContent = MOVES[i].e; ch.textContent = MOVES[c].e;
+    $('ph').className = 'hand'; $('ch').className = 'hand';
+    $('ph').textContent = MOVES[mine].e; $('ch').textContent = MOVES[theirs].e;
     let text;
-    if (i === c) { score.ties++; text = 'Tie!'; Sound.beep(440, 0.1, 'triangle'); }
-    else if (beats(i, c)) { score.you++; text = `You win — ${MOVES[i].n} ${MOVES[i].beats[c]} ${MOVES[c].n}!`; ph.classList.add('win'); ch.classList.add('lose'); Sound.beep(880, 0.15, 'triangle'); }
-    else { score.cpu++; text = `CPU wins — ${MOVES[c].n} ${MOVES[c].beats[i]} ${MOVES[i].n}.`; ch.classList.add('win'); ph.classList.add('lose'); Sound.beep(200, 0.15, 'sawtooth'); }
-    document.getElementById('msg').textContent = text;
-    Store.set('rps-score', score);
-    render();
-    busy = false;
+    if (mine === theirs) { text = 'Tie!'; Sound.beep(440, 0.1, 'triangle'); }
+    else if (beats(mine, theirs)) { score[0]++; text = `You win the round — ${MOVES[mine].n} ${MOVES[mine].beats[theirs]} ${MOVES[theirs].n}!`; $('ph').classList.add('win'); $('ch').classList.add('lose'); Sound.beep(880, 0.15, 'triangle'); }
+    else { score[1]++; text = `${S.opp.name} wins the round — ${MOVES[theirs].n} ${MOVES[theirs].beats[mine]} ${MOVES[mine].n}.`; $('ch').classList.add('win'); $('ph').classList.add('lose'); Sound.beep(200, 0.15, 'sawtooth'); }
+    $('msg').textContent = text;
+    hud();
+    if (score[0] >= TARGET || score[1] >= TARGET) {
+      const won = score[0] > score[1];
+      setTimeout(() => Lobby.end(S, { result: won ? 1 : 0, title: won ? 'You win the match! 🎉' : `${S.opp.name} wins the match`, detail: `${score[0]} – ${score[1]}` }), 1100);
+    } else setTimeout(newRound, 1400);
   }, 520);
 }
 
-function render() {
-  document.getElementById('you').textContent = score.you;
-  document.getElementById('cpu').textContent = score.cpu;
-  document.getElementById('ties').textContent = score.ties;
-}
-
-score = Store.get('rps-score', score);
-document.getElementById('mode').onchange = setup;
-document.getElementById('reset').onclick = () => { score = { you: 0, cpu: 0, ties: 0 }; Store.set('rps-score', score); history = []; render(); };
-document.addEventListener('keydown', e => { const n = +e.key; if (n >= 1 && n <= K) play(n - 1); });
-setup();
+document.addEventListener('keydown', e => { const n = +e.key; if (n >= 1 && n <= K) choose(n - 1); });
+$('variant').onchange = () => { if (S && !S.human) Lobby.open(); };
+$('menu').onclick = () => Lobby.open();
+buildButtons();
+Lobby.open({ game: 'rock-paper-scissors', title: '✊ Rock Paper Scissors', local: false, onStart: begin });
 </script>
 </body>
 </html>

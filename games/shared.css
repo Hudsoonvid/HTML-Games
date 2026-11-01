@@ -142,3 +142,24 @@ canvas.game {
 }
 .touchpad button.on { background: var(--accent); }
 @media (pointer: coarse) { .touchpad { display: flex; } }
+
+/* ---------- mode menu / matchmaking (net.js) ---------- */
+.lobby { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(8, 9, 20, .82); backdrop-filter: blur(3px); overflow: auto; }
+.lobby.hidden { display: none; }
+.lobby-card { width: min(380px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 22px 20px; display: flex; flex-direction: column; gap: 12px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.lobby-card h2 { margin: 0 0 4px; font-size: 24px; }
+.lobby-card p { margin: 0; color: var(--muted); }
+.lobby-card .hint { font-size: 12px; color: var(--muted); }
+.btn.big { padding: 13px 16px; font-size: 17px; border-radius: 12px; }
+.lobby-name { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); justify-content: center; }
+.lobby-name input { flex: 1; min-width: 0; max-width: 200px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); font-size: 15px; }
+.lobby-diff { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; text-align: left; }
+.lobby-diff .row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.lobby-diff .row span { flex: 1; color: var(--muted); }
+.lobby-diff .row label { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+.lobby-diff input[type=range] { width: 100%; accent-color: var(--accent); margin: 6px 0 2px; }
+.spinner { width: 42px; height: 42px; margin: 6px auto; border-radius: 50%; border: 4px solid var(--panel-2); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.vsbar { display: flex; gap: 10px; align-items: center; justify-content: center; font-size: 14px; color: var(--muted); margin: 4px 0; flex-wrap: wrap; }
+.vsbar b { color: var(--fg); }
+.vsbar .turn { padding: 2px 8px; border-radius: 999px; background: var(--accent); color: #fff; font-weight: 700; }

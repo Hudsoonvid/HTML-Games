@@ -39,7 +39,7 @@
 <main>
   <section class="hero">
     <h1>HTML Games Arcade</h1>
-    <p><b id="count">64</b> games that run right in your browser — no installs, no ads, no tracking.</p>
+    <p><b id="count">150</b> games that run right in your browser — no installs, no ads, no tracking.</p>
   </section>
   <div class="toolbar">
     <label class="search"><span>🔎</span><input id="q" type="search" placeholder="Search games… (press / )" autocomplete="off"></label>
@@ -59,85 +59,24 @@
 <script>
 const CATS = {
   Arcade: '#8b5cf6',
+  'Mobile Hits': '#ec4899',
+  'Ad Games': '#f97316',
   Skill: '#f59e0b',
   Puzzle: '#22d3ee',
   Word: '#22c55e',
   Board: '#f472b6',
   'Cards & Dice': '#ef4444'
 };
-const GAMES = [
-  ['snake', 'Snake', '🐍', 'Arcade', 'Eat apples and grow longer without biting yourself.'],
-  ['blockfall', 'Blockfall', '🧱', 'Arcade', 'Classic falling-blocks puzzler with hold, ghost piece and levels.'],
-  ['brick-breaker', 'Brick Breaker', '🏏', 'Arcade', 'Bounce the ball, smash bricks, catch power-ups.'],
-  ['pong', 'Pong', '🏓', 'Arcade', 'The original paddle duel — vs the CPU or a friend.'],
-  ['alien-invasion', 'Alien Invasion', '👾', 'Arcade', 'Hold off waves of marching aliens from behind your bunkers.'],
-  ['asteroids', 'Asteroids', '☄️', 'Arcade', 'Thrust, rotate and blast drifting space rocks.'],
-  ['flappy', 'Flappy', '🐤', 'Arcade', 'Tap to flap through an endless line of pipes.'],
-  ['dino-run', 'Dino Run', '🦖', 'Arcade', 'Jump cacti and duck birds in an endless desert run.'],
-  ['road-hopper', 'Road Hopper', '🐸', 'Arcade', 'Hop across traffic and ride logs to reach home.'],
-  ['maze-muncher', 'Maze Muncher', '🟡', 'Arcade', 'Gobble every dot while four ghosts hunt you down.'],
-  ['missile-defense', 'Missile Defense', '🚀', 'Arcade', 'Intercept incoming missiles to protect six cities.'],
-  ['cave-flyer', 'Cave Flyer', '🚁', 'Arcade', 'Hold to climb, release to fall through a narrowing cave.'],
-  ['sky-jumper', 'Sky Jumper', '🦘', 'Arcade', 'Bounce from platform to platform, ever upward.'],
-  ['light-cycles', 'Light Cycles', '🏍️', 'Arcade', 'Trap up to three bots with your light trail.'],
-  ['star-shooter', 'Star Shooter', '🌠', 'Arcade', 'Vertical space shooter with power-ups and bosses.'],
-  ['lunar-lander', 'Lunar Lander', '🌙', 'Arcade', 'Feather the thrusters and touch down gently.'],
-  ['stack-tower', 'Stack Tower', '🏗️', 'Arcade', 'Time each drop to build the tallest tower.'],
-  ['fruit-catcher', 'Fruit Catcher', '🧺', 'Arcade', 'Catch falling fruit in your basket, dodge the bombs.'],
-  ['bubble-shooter', 'Bubble Shooter', '🫧', 'Arcade', 'Aim, bounce and pop clusters of matching bubbles.'],
-  ['air-hockey', 'Air Hockey', '🏒', 'Arcade', 'Fast-paced puck physics against a CPU opponent.'],
-  ['artillery', 'Artillery', '💣', 'Arcade', 'Angle, power and wind — a turn-based tank duel.'],
-  ['pixel-jumper', 'Pixel Jumper', '🍄', 'Arcade', 'A three-level side-scrolling platformer.'],
-  ['whack-a-mole', 'Whack-a-Mole', '🔨', 'Skill', '30 seconds to bop as many moles as you can.'],
-  ['simon', 'Simon Says', '🚦', 'Skill', 'Repeat the ever-growing sequence of lights and tones.'],
-  ['reaction-time', 'Reaction Time', '⚡', 'Skill', 'How fast can you click when the screen turns green?'],
-  ['aim-trainer', 'Aim Trainer', '🎯', 'Skill', 'Hit 30 targets as quickly and accurately as possible.'],
-  ['typing-rush', 'Typing Rush', '⌨️', 'Skill', 'Type the falling words before they hit the ground.'],
-  ['piano-tiles', 'Piano Tiles', '🎹', 'Skill', "Tap the black tiles and don't miss a beat."],
-  ['color-match', 'Color Match', '🎨', 'Skill', 'A speedy brain teaser: meaning vs ink colour.'],
-  ['quick-math', 'Quick Math', '➗', 'Skill', 'Solve as many sums as you can in 60 seconds.'],
-  ['gem-clicker', 'Gem Clicker', '💎', 'Skill', 'Click, upgrade and automate your way to riches.'],
-  ['2048', '2048', '🔢', 'Puzzle', 'Slide and merge tiles to reach 2048.'],
-  ['minesweeper', 'Minesweeper', '🚩', 'Puzzle', 'Clear the field without setting off a mine.'],
-  ['sudoku', 'Sudoku', '🧮', 'Puzzle', 'Freshly generated puzzles with notes and hints.'],
-  ['sliding-puzzle', 'Sliding Puzzle', '🧩', 'Puzzle', 'The classic 8, 15 and 24 tile puzzles.'],
-  ['memory-match', 'Memory Match', '🃏', 'Puzzle', 'Flip cards and find all the pairs.'],
-  ['lights-out', 'Lights Out', '💡', 'Puzzle', 'Toggle lights in a cross pattern until all are off.'],
-  ['box-pusher', 'Box Pusher', '📦', 'Puzzle', '14 hand-made crate-pushing levels.'],
-  ['nonogram', 'Nonogram', '🖼️', 'Puzzle', 'Use number clues to paint a hidden picture.'],
-  ['maze-runner', 'Maze Runner', '🌀', 'Puzzle', 'Escape randomly generated mazes that keep growing.'],
-  ['peg-solitaire', 'Peg Solitaire', '🟠', 'Puzzle', 'Jump pegs until only one remains.'],
-  ['tower-of-hanoi', 'Tower of Hanoi', '🗼', 'Puzzle', 'Move the tower one disk at a time.'],
-  ['flood-it', 'Flood It', '🌊', 'Puzzle', 'Flood the board with one colour in limited moves.'],
-  ['gem-swap', 'Gem Swap', '💠', 'Puzzle', 'Match-3 with cascades — 30 moves to score big.'],
-  ['same-game', 'SameGame', '🟪', 'Puzzle', 'Pop groups of blocks; bigger groups score more.'],
-  ['code-breaker', 'Code Breaker', '🔐', 'Puzzle', 'Deduce the hidden colour code in 10 guesses.'],
-  ['pipes', 'Pipes', '🔌', 'Puzzle', 'Rotate tiles to connect every pipe to the power.'],
-  ['word-guess', 'Word Guess', '🟩', 'Word', 'Find the 5-letter word in six tries. Daily and unlimited.'],
-  ['hangman', 'Hangman', '🪢', 'Word', 'Guess the word letter by letter across seven categories.'],
-  ['word-search', 'Word Search', '🔍', 'Word', 'Find the hidden words in a grid of letters.'],
-  ['word-scramble', 'Word Scramble', '🔤', 'Word', 'Unscramble words against the clock.'],
-  ['tic-tac-toe', 'Tic-Tac-Toe', '❌', 'Board', 'Noughts and crosses with an unbeatable CPU.'],
-  ['connect-four', 'Connect Four', '🔴', 'Board', 'Drop discs and line up four before the CPU does.'],
-  ['checkers', 'Checkers', '⛀', 'Board', 'Draughts with forced captures, kings and a smart CPU.'],
-  ['reversi', 'Reversi', '⚫', 'Board', 'Outflank and flip your opponent’s discs.'],
-  ['gomoku', 'Gomoku', '⚪', 'Board', 'Five in a row on a 15×15 board.'],
-  ['dots-and-boxes', 'Dots & Boxes', '🔲', 'Board', 'Draw lines, close boxes, don’t give away chains.'],
-  ['battleship', 'Battleship', '🚢', 'Board', 'Hunt down and sink the enemy fleet.'],
-  ['mancala', 'Mancala', '🫘', 'Board', 'Sow and capture seeds in this ancient game.'],
-  ['solitaire', 'Solitaire', '🂡', 'Cards & Dice', 'Klondike with drag-and-drop, undo and hints.'],
-  ['blackjack', 'Blackjack', '♠️', 'Cards & Dice', 'Beat the dealer to 21. Split, double and bet.'],
-  ['yacht-dice', 'Yacht Dice', '🎲', 'Cards & Dice', 'Roll five dice and fill the 13-box scorecard.'],
-  ['higher-lower', 'Higher or Lower', '⬆️', 'Cards & Dice', 'Guess if the next card is higher or lower.'],
-  ['rock-paper-scissors', 'Rock Paper Scissors', '✊', 'Cards & Dice', 'Against a CPU that learns your patterns.']
-].map(([id, name, icon, cat, desc]) => ({ id, name, icon, cat, desc }));
+// @GAMES-START (written by tools/build.js)
+const GAMES = [["snake","Snake","🐍","Arcade","Eat apples and grow longer without biting yourself."],["blockfall","Blockfall","🧱","Arcade","Classic falling-blocks puzzler with hold, ghost piece and levels."],["brick-breaker","Brick Breaker","🏏","Arcade","Bounce the ball, smash bricks, catch power-ups."],["pong","Pong","🏓","Arcade","The original paddle duel — online, vs the CPU or a friend.","online"],["alien-invasion","Alien Invasion","👾","Arcade","Hold off waves of marching aliens from behind your bunkers."],["asteroids","Asteroids","☄️","Arcade","Thrust, rotate and blast drifting space rocks."],["flappy","Flappy","🐤","Arcade","Tap to flap through an endless line of pipes."],["dino-run","Dino Run","🦖","Arcade","Jump cacti and duck birds in an endless desert run."],["road-hopper","Road Hopper","🐸","Arcade","Hop across traffic and ride logs to reach home."],["maze-muncher","Maze Muncher","🟡","Arcade","Gobble every dot while four ghosts hunt you down."],["missile-defense","Missile Defense","🚀","Arcade","Intercept incoming missiles to protect six cities."],["cave-flyer","Cave Flyer","🚁","Arcade","Hold to climb, release to fall through a narrowing cave."],["sky-jumper","Sky Jumper","🦘","Arcade","Bounce from platform to platform, ever upward."],["light-cycles","Light Cycles","🏍️","Arcade","Trap your rivals with your light trail — online or vs bots.","online"],["star-shooter","Star Shooter","🌠","Arcade","Vertical space shooter with power-ups and bosses."],["lunar-lander","Lunar Lander","🌙","Arcade","Feather the thrusters and touch down gently."],["stack-tower","Stack Tower","🏗️","Arcade","Time each drop to build the tallest tower."],["fruit-catcher","Fruit Catcher","🧺","Arcade","Catch falling fruit in your basket, dodge the bombs."],["bubble-shooter","Bubble Shooter","🫧","Arcade","Aim, bounce and pop clusters of matching bubbles."],["air-hockey","Air Hockey","🏒","Arcade","Fast puck physics — online, vs the CPU or a friend.","online"],["artillery","Artillery","💣","Arcade","Angle, power and wind — a turn-based tank duel.","online"],["pixel-jumper","Pixel Jumper","🍄","Arcade","A three-level side-scrolling platformer."],["whack-a-mole","Whack-a-Mole","🔨","Skill","30 seconds to bop as many moles as you can."],["simon","Simon Says","🚦","Skill","Repeat the ever-growing sequence of lights and tones."],["reaction-time","Reaction Time","⚡","Skill","How fast can you click when the screen turns green?"],["aim-trainer","Aim Trainer","🖱️","Skill","Hit 30 targets as quickly and accurately as possible."],["typing-rush","Typing Rush","⌨️","Skill","Type the falling words before they hit the ground."],["piano-tiles","Piano Tiles","🎹","Skill","Tap the black tiles and don't miss a beat."],["color-match","Color Match","🎨","Skill","A speedy brain teaser: meaning vs ink colour."],["quick-math","Quick Math","➗","Skill","Solve as many sums as you can in 60 seconds."],["gem-clicker","Gem Clicker","💎","Skill","Click, upgrade and automate your way to riches."],["2048","2048","🔢","Puzzle","Slide and merge tiles to reach 2048."],["minesweeper","Minesweeper","🚩","Puzzle","Clear the field without setting off a mine."],["sudoku","Sudoku","🧮","Puzzle","Freshly generated puzzles with notes and hints."],["sliding-puzzle","Sliding Puzzle","🧩","Puzzle","The classic 8, 15 and 24 tile puzzles."],["memory-match","Memory Match","🃏","Puzzle","Flip cards and find all the pairs."],["lights-out","Lights Out","💡","Puzzle","Toggle lights in a cross pattern until all are off."],["box-pusher","Box Pusher","📦","Puzzle","14 hand-made crate-pushing levels."],["nonogram","Nonogram","🖼️","Puzzle","Use number clues to paint a hidden picture."],["maze-runner","Maze Runner","🌀","Puzzle","Escape randomly generated mazes that keep growing."],["peg-solitaire","Peg Solitaire","🟠","Puzzle","Jump pegs until only one remains."],["tower-of-hanoi","Tower of Hanoi","🗼","Puzzle","Move the tower one disk at a time."],["flood-it","Flood It","🌊","Puzzle","Flood the board with one colour in limited moves."],["gem-swap","Gem Swap","💠","Puzzle","Match-3 with cascades — 30 moves to score big."],["same-game","SameGame","🟪","Puzzle","Pop groups of blocks; bigger groups score more."],["code-breaker","Code Breaker","🔐","Puzzle","Deduce the hidden colour code in 10 guesses."],["pipes","Pipes","🔌","Puzzle","Rotate tiles to connect every pipe to the power."],["word-guess","Word Guess","🟩","Word","Find the 5-letter word in six tries. Daily and unlimited."],["hangman","Hangman","🪢","Word","Guess the word letter by letter across seven categories."],["word-search","Word Search","🔍","Word","Find the hidden words in a grid of letters."],["word-scramble","Word Scramble","🔤","Word","Unscramble words against the clock."],["tic-tac-toe","Tic-Tac-Toe","❌","Board","Noughts and crosses — online, vs the CPU or a friend.","online"],["connect-four","Connect Four","🔴","Board","Drop discs and line up four first.","online"],["checkers","Checkers","⛀","Board","Draughts with forced captures and kings.","online"],["reversi","Reversi","⚫","Board","Outflank and flip your opponent’s discs.","online"],["gomoku","Gomoku","⚪","Board","Five in a row on a 15×15 board.","online"],["dots-and-boxes","Dots & Boxes","🔲","Board","Draw lines, close boxes, don’t give away chains.","online"],["battleship","Battleship","🚢","Board","Hunt down and sink the enemy fleet.","online"],["mancala","Mancala","🫘","Board","Sow and capture seeds in this ancient game.","online"],["solitaire","Solitaire","🂡","Cards & Dice","Klondike with drag-and-drop, undo and hints."],["blackjack","Blackjack","♠️","Cards & Dice","Beat the dealer to 21. Split, double and bet."],["yacht-dice","Yacht Dice","⚄","Cards & Dice","Roll five dice and fill the 13-box scorecard."],["higher-lower","Higher or Lower","⬆️","Cards & Dice","Guess if the next card is higher or lower."],["rock-paper-scissors","Rock Paper Scissors","✊","Cards & Dice","First to three — against players online or a CPU that learns you.","online"]].map(([id, name, icon, cat, desc, flag]) => ({ id, name, icon, cat, desc, flag }));
+// @GAMES-END
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem('html-games:' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem('html-games:' + k, JSON.stringify(v)); } catch (e) { /* ignore */ } }
 };
 let cat = store.get('launcher-cat', 'All');
-if (cat !== 'All' && !CATS[cat]) cat = 'All';
+if (cat !== 'All' && cat !== 'online' && cat !== '3d' && !CATS[cat]) cat = 'All';
 const q = document.getElementById('q');
 document.getElementById('count').textContent = GAMES.length;
 
@@ -147,7 +86,7 @@ function card(g) {
   a.href = `games/${g.id}.html`;
   const c = CATS[g.cat];
   a.innerHTML = `<div class="icon" style="background:linear-gradient(135deg, ${c}55, ${c}22); box-shadow: inset 0 0 0 1px ${c}66">${g.icon}</div>
-    <div style="min-width:0"><div class="t">${g.name}</div><div class="d">${g.desc}</div><div class="cat" style="color:${c}">${g.cat}</div></div>`;
+    <div style="min-width:0"><div class="t">${g.name}</div><div class="d">${g.desc}</div><div class="cat" style="color:${c}">${g.cat}${g.flag === 'online' ? ' · 🌐 online' : g.flag === '3d' ? ' · 3D' : ''}</div></div>`;
   a.addEventListener('click', () => {
     const recent = store.get('launcher-recent', []).filter(id => id !== g.id);
     recent.unshift(g.id);
@@ -159,11 +98,12 @@ function card(g) {
 function renderChips() {
   const el = document.getElementById('chips');
   el.innerHTML = '';
-  ['All', ...Object.keys(CATS)].forEach(name => {
+  ['All', 'online', '3d', ...Object.keys(CATS)].forEach(name => {
     const b = document.createElement('button');
     b.className = 'chip' + (name === cat ? ' on' : '');
-    const n = name === 'All' ? GAMES.length : GAMES.filter(g => g.cat === name).length;
-    b.innerHTML = `${name}<span class="n">${n}</span>`;
+    const n = name === 'All' ? GAMES.length : GAMES.filter(g => g.cat === name || g.flag === name).length;
+    const label = { online: '🌐 Online', '3d': '🧊 3D' }[name] || name;
+    b.innerHTML = `${label}<span class="n">${n}</span>`;
     b.onclick = () => { cat = name; store.set('launcher-cat', cat); renderChips(); render(); };
     el.appendChild(b);
   });
@@ -171,7 +111,8 @@ function renderChips() {
 
 function render() {
   const term = q.value.trim().toLowerCase();
-  const match = g => (cat === 'All' || g.cat === cat) && (!term || (g.name + ' ' + g.desc + ' ' + g.cat).toLowerCase().includes(term));
+  const inCat = g => cat === 'All' || g.cat === cat || (cat === 'online' && g.flag === 'online') || (cat === '3d' && g.flag === '3d');
+  const match = g => inCat(g) && (!term || (g.name + ' ' + g.desc + ' ' + g.cat).toLowerCase().includes(term));
   const list = document.getElementById('list');
   list.innerHTML = '';
   const groups = cat === 'All' && !term ? Object.keys(CATS) : [null];
