@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Obby 3D</title>
+<link rel="stylesheet" href="shared.css">
+<style>#c { width: min(860px, calc(100vw - 24px)); aspect-ratio: 16 / 10; height: auto; }</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🧗 Obby 3D</h1>
+  <div class="stats">Stage <b id="stage">1</b>/<b id="stages">0</b> Deaths <b id="deaths">0</b> Time <b id="time">0:00</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="jump">⤒</button></div>
+<p class="help"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>/arrows to run, <kbd>Space</kbd> to jump, drag to turn the camera. On touch: left half is a joystick, drag the right half to look, and tap ⤒ (or the right half) to jump. Red bricks are lava! Blue pads bounce you high, grey platforms move and flashing ones fall away. Touch a green flag to save your progress.</p>
+<script src="shared.js"></script>
+<script src="gl3d.js"></script>
+<script>
+const cv = document.getElementById('c'), ov = document.getElementById('ov');
+let R, plats, P, camYaw = 0, camPitch = 0.45, keys = {}, joy = null, state = 'ready', last = 0, deaths = 0, startT = 0, checkpoint = 0, best = Store.get('obby-best', 0), M = {};
+
+// the course: a seeded path of platforms; types add variety as it goes on
+function rng(seed) { return () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }; }
+function buildCourse() {
+  const r = rng(12345);
+  plats = [{ x: 0, y: 0, z: 0, w: 8, h: 1, d: 8, k: 'start', cp: 0 }];
+  let x = 0, y = 0, z = 0, dir = 0, cp = 1, prev = plats[0];
+  // keep every jump makeable: edge-to-edge gaps stay within reach, and steps up are at most one block
+  const place = (nx, ny, nz, w, d) => {
+    const reach = ny > prev.y ? 3.2 : 3.9;
+    let dx = nx - prev.x, dz = nz - prev.z;
+    for (let k = 0; k < 20; k++) {
+      const ex = Math.max(0, Math.abs(dx) - (w + prev.w) / 2), ez = Math.max(0, Math.abs(dz) - (d + prev.d) / 2);
+      if (Math.hypot(ex, ez) <= reach) break;
+      dx *= 0.9; dz *= 0.9;
+    }
+    return [prev.x + dx, prev.z + dz];
+  };
+  for (let i = 1; i <= 46; i++) {
+    const hard = Math.min(1, i / 40);
+    if (i % 8 === 0) { // checkpoint island
+      [x, z] = place(x, y, z - 6, 6, 6);
+      prev = { x, y, z, w: 6, h: 1, d: 6, k: 'check', cp: cp++ };
+      plats.push(prev);
+      continue;
+    }
+    if (r() < 0.25) dir = clamp(dir + (r() < 0.5 ? -1 : 1), -1, 1);
+    const size = 3 - hard * 1.2 + r();
+    const ny = prev.k === 'bounce' ? y + 3 : y + (r() < 0.35 ? 1 : r() < 0.15 ? -1 : 0);
+    const roll = r();
+    let k = 'plain';
+    if (i > 4 && roll < 0.16 && prev.k !== 'bounce') k = 'lava';
+    else if (i > 6 && roll < 0.3) k = 'move';
+    else if (i > 10 && roll < 0.42) k = 'fall';
+    else if (i > 3 && roll < 0.5 && prev.k !== 'bounce') k = 'bounce';
+    const tx = x + dir * (1 + r() * 2), tz = z - (prev.d / 2 + size / 2 + 1.6 + r() * (1.2 + hard * 1.6));
+    y = ny;
+    if (k === 'lava') {
+      // a lava floor with a narrow safe strip across it
+      [x, z] = place(tx, y, tz, 5, 3);
+      plats.push({ x, y, z, w: 5, h: 0.6, d: 3, k: 'lava' });
+      prev = { x: x + (r() < 0.5 ? -1.6 : 1.6), y: y + 0.5, z, w: 1.2, h: 0.4, d: 3, k: 'plain' };
+      plats.push(prev);
+      y = prev.y; x = prev.x;
+      continue;
+    }
+    [x, z] = place(tx, y, tz, size, size);
+    prev = { x, y, z, w: size, h: 1, d: size, k, ph: r() * 6, ax: r() < 0.5 ? 'x' : 'y', ox: x, oy: y };
+    // moving platforms only slide sideways when they are next to a step up
+    if (k === 'move' && prev.ax === 'y') prev.ax = 'x';
+    plats.push(prev);
+  }
+  [x, z] = place(x, y, z - 8, 8, 8);
+  plats.push({ x, y, z, w: 8, h: 1, d: 8, k: 'finish' });
+  document.getElementById('stages').textContent = cp;
+}
+
+const COL = { start: [0.6, 0.6, 0.65], plain: [0.95, 0.75, 0.2], lava: [0.95, 0.15, 0.1], move: [0.55, 0.55, 0.62], fall: [0.85, 0.5, 0.95], bounce: [0.2, 0.55, 1], check: [0.2, 0.85, 0.35], finish: [1, 0.85, 0.2] };
+function boxMesh(col) { const b = GL3D.builder(); b.box(-0.5, -0.5, -0.5, 1, 1, 1, [[col[0] * 0.85, col[1] * 0.85, col[2] * 0.85], [col[0] * 0.85, col[1] * 0.85, col[2] * 0.85], col, GL3D.shade(col, 0.5), GL3D.shade(col, 0.75), GL3D.shade(col, 0.75)]); return R.mesh(b); }
+
+function respawn() {
+  const c = plats.find(p => (p.k === 'check' || p.k === 'start') && p.cp === checkpoint);
+  P = { x: c.x, y: c.y + c.h / 2 + 0.01, z: c.z, vx: 0, vy: 0, vz: 0, ground: null, face: 0 };
+  plats.forEach(p => { if (p.k === 'fall') { p.gone = false; p.t = 0; p.y = p.oy; } });
+}
+
+function newGame() {
+  checkpoint = 0; deaths = 0;
+  startT = performance.now();
+  respawn();
+  camYaw = 0;
+  state = 'play';
+  overlay(ov, null);
+}
+
+function hud() {
+  document.getElementById('stage').textContent = checkpoint + 1;
+  document.getElementById('deaths').textContent = deaths;
+  const s = state === 'play' ? (performance.now() - startT) / 1000 : 0;
+  document.getElementById('time').textContent = `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+}
+
+function die() { deaths++; Sound.beep(140, 0.25, 'sawtooth', 0.05); respawn(); }
+
+function jump() { if (state === 'play' && P.ground) { P.vy = 9.5; P.ground = null; Sound.beep(520, 0.05, 'triangle', 0.03); } }
+
+function update(dt) {
+  const t = Math.min(0.033, dt / 1000), now = performance.now() / 1000;
+  // moving and falling platforms
+  for (const p of plats) {
+    p.dx = 0; p.dy = 0;
+    if (p.k === 'move') { const nx = p.ax === 'x' ? p.ox + Math.sin(now * 1.2 + p.ph) * 2.5 : p.ox, ny = p.ax === 'y' ? p.oy + Math.sin(now * 1.2 + p.ph) * 1.5 : p.oy; p.dx = nx - p.x; p.dy = ny - p.y; p.x = nx; p.y = ny; }
+    if (p.k === 'fall' && p.t > 0) { p.t += t; if (p.t > 0.6) { p.y -= 12 * t; if (p.t > 3) { p.gone = true; } } }
+    if (p.k === 'fall' && p.gone && p.t > 5) { p.gone = false; p.t = 0; p.y = p.oy; }
+    if (p.gone && p.t) p.t += t;
+  }
+  let f = 0, s = 0;
+  if (keys.w || keys.ArrowUp) f += 1;
+  if (keys.s || keys.ArrowDown) f -= 1;
+  if (keys.a || keys.ArrowLeft) s -= 1;
+  if (keys.d || keys.ArrowRight) s += 1;
+  if (joy && joy.cur) { f += clamp(-(joy.cur.y - joy.y) / 45, -1, 1); s += clamp((joy.cur.x - joy.x) / 45, -1, 1); }
+  const m = Math.hypot(f, s);
+  const sp = 6.5;
+  let mx = 0, mz = 0;
+  if (m > 0.05) {
+    const k = Math.min(1, m) / m;
+    mx = (Math.sin(camYaw) * f + Math.cos(camYaw) * s) * k * sp;
+    mz = (-Math.cos(camYaw) * f + Math.sin(camYaw) * s) * k * sp;
+    P.face = Math.atan2(mx, -mz);
+  }
+  // ride moving platforms
+  if (P.ground) { P.x += P.ground.dx; P.y += P.ground.dy; }
+  P.vy -= 24 * t;
+  P.x += mx * t; P.z += mz * t;
+  const ny = P.y + P.vy * t;
+  let landed = null;
+  for (const p of plats) {
+    if (p.gone) continue;
+    const top = p.y + p.h / 2;
+    const inX = Math.abs(P.x - p.x) < p.w / 2 + 0.3, inZ = Math.abs(P.z - p.z) < p.d / 2 + 0.3;
+    if (!inX || !inZ) continue;
+    if (P.vy <= 0 && P.y >= top - 0.05 && ny <= top) {
+      landed = p;
+      P.y = top;
+      break;
+    }
+  }
+  if (landed) {
+    P.vy = 0;
+    P.ground = landed;
+    if (landed.k === 'lava') return die();
+    if (landed.k === 'bounce') { P.vy = 15; P.ground = null; Sound.beep(800, 0.1, 'triangle', 0.04); }
+    if (landed.k === 'fall' && !landed.t) landed.t = 0.001;
+    if (landed.k === 'check' && landed.cp > checkpoint) { checkpoint = landed.cp; Sound.beep(880, 0.2, 'triangle', 0.05); }
+    if (landed.k === 'finish') {
+      state = 'won';
+      const secs = Math.round((performance.now() - startT) / 1000);
+      if (!best || secs < best) { best = secs; Store.set('obby-best', best); }
+      Sound.beep(988, 0.4, 'triangle');
+      overlay(ov, `<h2>🏆 You beat the obby!</h2><p>${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} · ${deaths} deaths · best ${Math.floor(best / 60)}:${String(best % 60).padStart(2, '0')}</p><button class="btn" onclick="newGame()">Play again</button>`);
+    }
+  } else { P.y = ny; P.ground = null; }
+  if (P.y < -25) die();
+  hud();
+}
+
+function render() {
+  R.resize();
+  const p = P;
+  const cx = p.x - Math.sin(camYaw) * Math.cos(camPitch) * 9, cy = p.y + 1 + Math.sin(camPitch) * 9, cz = p.z + Math.cos(camYaw) * Math.cos(camPitch) * 9;
+  R.camera([cx, cy, cz], [p.x, p.y + 1, p.z]);
+  R.begin();
+  for (const q of plats) {
+    if (q.gone) continue;
+    const flash = q.k === 'fall' && q.t > 0 && Math.floor(q.t * 10) % 2;
+    R.draw(M[q.k], M4.chain(M4.translate(q.x, q.y, q.z), M4.scale(q.w, q.h, q.d)), flash ? [1.6, 1.6, 1.6] : undefined);
+    if (q.k === 'check' || q.k === 'finish') R.draw(M.flag, M4.translate(q.x + q.w / 2 - 0.5, q.y + q.h / 2, q.z - q.d / 2 + 0.5), q.k === 'finish' ? [1, 0.85, 0.2] : q.cp <= checkpoint ? [0.3, 1, 0.4] : [1, 1, 1]);
+  }
+  R.draw(M.player, M4.chain(M4.translate(p.x, p.y, p.z), M4.rotY(-p.face)));
+}
+
+function loop(t) {
+  const dt = t - last;
+  last = t;
+  if (state === 'play') update(dt);
+  if (R && P) render();
+  requestAnimationFrame(loop);
+}
+
+if (!GL3D.supported()) overlay(ov, '<h2>3D not available</h2><p>This game needs WebGL, which your browser or device has turned off.</p>');
+else {
+  R = GL3D.create(cv, { fog: [0.55, 0.78, 1], fogNear: 30, fogFar: 85, ambient: 0.55, light: [-0.4, -1, -0.5], fov: 62 });
+  Object.keys(COL).forEach(k => { M[k] = boxMesh(COL[k]); });
+  const pl = GL3D.builder();
+  pl.cube(0, 0.35, 0, 0.28, 0.7, 0.28, [0.2, 0.3, 0.8]).cube(0, 1.0, 0, 0.6, 0.65, 0.35, [0.95, 0.3, 0.3]).cube(0, 1.6, 0, 0.5, 0.5, 0.5, [1, 0.85, 0.3]).cube(0, 1.65, -0.26, 0.3, 0.12, 0.04, [0.1, 0.1, 0.1]);
+  M.player = R.mesh(pl);
+  const fl = GL3D.builder();
+  fl.box(-0.05, 0, -0.05, 0.1, 2.4, 0.1, [0.9, 0.9, 0.9]).box(0.05, 1.7, -0.02, 0.9, 0.6, 0.04, [0.3, 0.9, 0.4]);
+  M.flag = R.mesh(fl);
+  buildCourse();
+  respawn();
+  hud();
+  overlay(ov, `<h2>🧗 Obby 3D</h2><p>Jump to the golden finish. ${best ? `Best time ${Math.floor(best / 60)}:${String(best % 60).padStart(2, '0')}` : ''}</p><button class="btn" onclick="newGame()">Start</button>`);
+  requestAnimationFrame(loop);
+}
+document.addEventListener('keydown', e => { const k = e.key.length === 1 ? e.key.toLowerCase() : e.key; keys[k] = true; if (k === ' ') { e.preventDefault(); jump(); } if (k.startsWith('Arrow')) e.preventDefault(); });
+document.addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
+const ptrs = {};
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  if (e.pointerType !== 'mouse' && x < r.width / 2) { joy = { x, y, cur: { x, y } }; ptrs[e.pointerId] = { kind: 'joy' }; return; }
+  ptrs[e.pointerId] = { kind: 'look', x: e.clientX, y: e.clientY, moved: 0, t: performance.now(), touch: e.pointerType !== 'mouse' };
+});
+cv.addEventListener('pointermove', e => {
+  const q = ptrs[e.pointerId];
+  if (!q) return;
+  if (q.kind === 'joy') { const r = cv.getBoundingClientRect(); joy.cur = { x: e.clientX - r.left, y: e.clientY - r.top }; return; }
+  camYaw += (e.clientX - q.x) * 0.008;
+  camPitch = clamp(camPitch + (e.clientY - q.y) * 0.006, 0.05, 1.3);
+  q.moved += Math.abs(e.clientX - q.x) + Math.abs(e.clientY - q.y);
+  q.x = e.clientX; q.y = e.clientY;
+});
+const lift = e => { const q = ptrs[e.pointerId]; if (!q) return; if (q.kind === 'joy') joy = null; else if (q.touch && q.moved < 12) jump(); delete ptrs[e.pointerId]; };
+cv.addEventListener('pointerup', lift);
+cv.addEventListener('pointercancel', lift);
+document.getElementById('jump').addEventListener('pointerdown', jump);
+</script>
+</body>
+</html>
