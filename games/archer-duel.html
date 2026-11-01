@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archer Duel</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏹 Archer Duel</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="900" height="460"></canvas>
+</div>
+<p class="help">On your turn, drag backwards from your archer (like pulling a bowstring) and let go to shoot. Pull further for more power. Headshots do the most damage. Watch the wind! First archer down loses.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const W = cv.width, H = cv.height, GRAV = 420, FIX = 1 / 240;
+let S, archers, turn, me, over, waiting = false, pending = null, arrow = null, stuck = [], wind = 0, winds = [], shots = 0, drag = null, acc = 0, popups = [], hills;
+const myTurn = () => S && !over && !arrow && !waiting && (S.mode === 'local' || turn === me);
+const dist = (dx, dy) => Math.sqrt(dx * dx + dy * dy);
+
+function begin(s) {
+  S = s;
+  S.on('shot', d => { if (!d || over) return; if (turn !== me && !arrow && !waiting) shoot(+d.a, +d.p, true); else pending = d; });
+  S.startRound(() => ({ h: [randInt(240, 330), randInt(240, 330)], gap: randInt(0, 120), winds: Array.from({ length: 60 }, () => randInt(-40, 40)), first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    me = S.mode === 'online' ? S.seat : 0;
+    hills = cfg.h;
+    archers = [{ x: 110 + cfg.gap / 2, y: hills[0], hp: 100, dir: 1 }, { x: W - 110 - cfg.gap / 2, y: hills[1], hp: 100, dir: -1 }];
+    winds = cfg.winds; shots = 0; wind = winds[0];
+    turn = S.mode === 'local' ? 0 : cfg.first;
+    over = false; arrow = null; stuck = []; popups = []; waiting = false; pending = null;
+    status();
+    if (S.ai && turn !== me) aiShoot();
+  });
+}
+
+function status() {
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : S.mode === 'online' ? 'Online' : '2 players';
+  document.getElementById('vs').innerHTML = [0, 1].map(i => `<b ${i === turn ? 'class="turn"' : ''}>${S.mode === 'local' ? 'P' + (i + 1) : i === me ? S.me.name : S.opp.name} ❤️${Math.max(0, archers[i].hp)}</b>`).join(' vs ');
+  if (over) return;
+  msg.textContent = S.mode === 'local' ? `Player ${turn + 1}: drag back and release` : turn === me ? 'Your shot — drag back and release' : `${S.opp.name} is drawing the bow…`;
+}
+
+// a: angle in degrees (0 = level, toward the enemy), p: power 0-100
+function shoot(a, p, fromNet) {
+  a = Math.round(clamp(a, -30, 85) * 10) / 10; p = Math.round(clamp(p, 10, 100) * 10) / 10;
+  if (!fromNet && S.human && turn === me) S.send('shot', { a, p });
+  const A = archers[turn], rad = a * Math.PI / 180, sp = p * 9;
+  arrow = { x: A.x + A.dir * 14, y: A.y - 44, vx: Math.cos(rad) * sp * A.dir, vy: -Math.sin(rad) * sp, owner: turn };
+  acc = 0;
+  Sound.beep(700, 0.06, 'triangle', 0.04);
+}
+
+// fixed-step flight so both screens agree; returns true when the arrow stops
+function stepArrow() {
+  arrow.vx += wind * FIX; arrow.vy += GRAV * FIX;
+  arrow.x += arrow.vx * FIX; arrow.y += arrow.vy * FIX;
+  const foe = archers[1 - arrow.owner];
+  // head, body, legs
+  const parts = [[foe.y - 58, 9, 'head', 50], [foe.y - 34, 13, 'body', 25], [foe.y - 12, 11, 'legs', 15]];
+  for (const [py, r, name, dmg] of parts) {
+    if (dist(arrow.x - foe.x, arrow.y - py) < r) {
+      foe.hp -= dmg;
+      popups.push({ x: foe.x, y: py - 20, text: `${name === 'head' ? 'HEADSHOT! ' : ''}-${dmg}`, t: 0 });
+      Sound.beep(name === 'head' ? 990 : 300, 0.15, 'square', 0.05);
+      stuck.push({ x: arrow.x - foe.x, y: arrow.y - foe.y, ang: Math.atan2(arrow.vy, arrow.vx), on: 1 - arrow.owner });
+      return true;
+    }
+  }
+  if (arrow.y > groundAt(arrow.x)) { stuck.push({ x: arrow.x, y: groundAt(arrow.x), ang: Math.atan2(arrow.vy, arrow.vx), on: -1 }); Sound.beep(200, 0.05, 'square', 0.03); return true; }
+  if (arrow.x < -200 || arrow.x > W + 200 || arrow.y > H + 50) return true;
+  return false;
+}
+
+function groundAt(x) {
+  // two hills with a valley between them
+  const l = archers[0], r = archers[1];
+  const hl = l.y + ((x - l.x) / 160) ** 2 * 60, hr = r.y + ((x - r.x) / 160) ** 2 * 60;
+  return Math.min(hl, hr, H - 30);
+}
+
+function afterShot() {
+  arrow = null;
+  status();
+  if (archers.some(a => a.hp <= 0)) {
+    over = true;
+    const loser = archers[0].hp <= 0 ? 0 : 1, winner = 1 - loser;
+    const title = S.mode === 'local' ? `Player ${winner + 1} wins the duel! 🏹` : winner === me ? 'You won the duel! 🏹🏆' : `${S.opp.name} won the duel`;
+    msg.textContent = title;
+    setTimeout(() => Lobby.end(S, { result: winner === me ? 1 : 0, title }), 1200);
+    return;
+  }
+  const r = S.round;
+  waiting = true;
+  setTimeout(() => {
+    if (r !== S.round || over) return;
+    waiting = false;
+    turn = 1 - turn; shots++; wind = winds[shots % winds.length];
+    status();
+    if (pending && turn !== me) { const d = pending; pending = null; shoot(+d.a, +d.p, true); }
+    else if (S.ai && turn !== me) aiShoot();
+  }, 700);
+}
+
+// the computer simulates shots to find a good one, then adds error that shrinks with level and practice
+function aiShoot() {
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round || over) return;
+    const A = archers[turn], foe = archers[1 - turn];
+    let best = [40, 60], bd = Infinity;
+    for (let a = -10; a <= 70; a += 2) for (let p = 30; p <= 100; p += 2) {
+      const rad = a * Math.PI / 180, sp = p * 9;
+      let x = A.x + A.dir * 14, y = A.y - 44, vx = Math.cos(rad) * sp * A.dir, vy = -Math.sin(rad) * sp;
+      for (let i = 0; i < 900; i++) {
+        vx += wind / 120; vy += GRAV / 120; x += vx / 120; y += vy / 120;
+        const d = dist(x - foe.x, y - (foe.y - 40));
+        if (d < bd) { bd = d; best = [a, p]; }
+        if (y > groundAt(x) || x < -100 || x > W + 100) break;
+      }
+    }
+    A.practice = (A.practice || 0) + 1;
+    const err = (1 - S.level) * 9 / Math.sqrt(A.practice) + 0.6;
+    shoot(best[0] + rand(-err, err), best[1] + rand(-err, err) * 1.4);
+  }, S.delay(700, 1100));
+}
+
+function drawArcher(A, i) {
+  const x = A.x, y = A.y, col = i === 0 ? '#2563eb' : '#dc2626';
+  ctx.strokeStyle = '#111827'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x, y - 24); ctx.lineTo(x - 7, y); ctx.moveTo(x, y - 24); ctx.lineTo(x + 7, y); ctx.stroke();
+  ctx.strokeStyle = col; ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(x, y - 24); ctx.lineTo(x, y - 46); ctx.stroke();
+  ctx.fillStyle = '#fcd34d'; ctx.beginPath(); ctx.arc(x, y - 58, 9, 0, 7); ctx.fill();
+  // bow pointing along the current aim
+  let a = 0.5;
+  if (drag && turn === i && myTurn()) a = aimFromDrag().a * Math.PI / 180;
+  ctx.save(); ctx.translate(x + A.dir * 10, y - 42); ctx.scale(A.dir, 1); ctx.rotate(-a);
+  ctx.strokeStyle = '#78350f'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 18, -1.2, 1.2); ctx.stroke();
+  ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(Math.cos(-1.2) * 18, Math.sin(-1.2) * 18); ctx.lineTo(drag && turn === i ? -aimFromDrag().p / 6 : 6, 0); ctx.lineTo(Math.cos(1.2) * 18, Math.sin(1.2) * 18); ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#1f2937'; ctx.fillRect(x - 24, y - 84, 48, 6);
+  ctx.fillStyle = A.hp > 50 ? '#22c55e' : A.hp > 25 ? '#f59e0b' : '#ef4444'; ctx.fillRect(x - 24, y - 84, 48 * Math.max(0, A.hp) / 100, 6);
+}
+
+function drawArrow(x, y, ang) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  ctx.strokeStyle = '#78350f'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-26, 0); ctx.lineTo(0, 0); ctx.stroke();
+  ctx.fillStyle = '#9ca3af'; ctx.beginPath(); ctx.moveTo(4, 0); ctx.lineTo(-4, -4); ctx.lineTo(-4, 4); ctx.fill();
+  ctx.fillStyle = '#f87171'; ctx.fillRect(-28, -3, 6, 6);
+  ctx.restore();
+}
+
+function aimFromDrag() {
+  const A = archers[turn], dx = (drag.sx - drag.x) * A.dir, dy = drag.y - drag.sy;
+  return { a: clamp(Math.atan2(dy, dx) * 180 / Math.PI, -30, 85), p: clamp(Math.hypot(dx, dy) * 0.7, 10, 100) };
+}
+
+let last = 0;
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#fbbf24'); g.addColorStop(1, '#fde68a');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  if (archers) {
+    ctx.fillStyle = '#65a30d';
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 6) ctx.lineTo(x, groundAt(x));
+    ctx.lineTo(W, H); ctx.fill();
+    if (arrow) {
+      acc += dt / 1000;
+      while (acc >= FIX && arrow) { acc -= FIX; if (stepArrow()) { afterShot(); break; } }
+    }
+    stuck.forEach(s => { if (s.on < 0) drawArrow(s.x, s.y, s.ang); else drawArrow(archers[s.on].x + s.x, archers[s.on].y + s.y, s.ang); });
+    archers.forEach(drawArcher);
+    if (arrow) drawArrow(arrow.x, arrow.y, Math.atan2(arrow.vy, arrow.vx));
+    if (drag && myTurn()) {
+      const { a, p } = aimFromDrag(), A = archers[turn], rad = a * Math.PI / 180, sp = p * 9;
+      let x = A.x + A.dir * 14, y = A.y - 44, vx = Math.cos(rad) * sp * A.dir, vy = -Math.sin(rad) * sp;
+      ctx.fillStyle = 'rgba(17,24,39,.5)';
+      for (let i = 0; i < 18; i++) { for (let k = 0; k < 4; k++) { vy += GRAV / 120; x += vx / 120; y += vy / 120; } ctx.beginPath(); ctx.arc(x, y, 2, 0, 7); ctx.fill(); }
+    }
+    popups.forEach(p => { p.t += dt; ctx.fillStyle = `rgba(127,29,29,${1 - p.t / 1200})`; ctx.font = 'bold 18px system-ui'; ctx.textAlign = 'center'; ctx.fillText(p.text, p.x, p.y - p.t / 30); });
+    popups = popups.filter(p => p.t < 1200);
+    ctx.fillStyle = '#7c2d12'; ctx.font = 'bold 15px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(`Wind ${Math.abs(wind)} ${wind < 0 ? '◀◀' : wind > 0 ? '▶▶' : ''}`, W / 2, 28);
+  }
+  requestAnimationFrame(loop);
+}
+
+cv.addEventListener('pointerdown', e => { if (!myTurn()) return; const p = canvasPoint(cv, e); drag = { sx: p.x, sy: p.y, x: p.x, y: p.y }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (drag) { const p = canvasPoint(cv, e); drag.x = p.x; drag.y = p.y; } });
+cv.addEventListener('pointerup', () => { if (!drag) return; const { a, p } = aimFromDrag(); const far = Math.hypot(drag.x - drag.sx, drag.y - drag.sy); drag = null; if (far > 15 && myTurn()) shoot(Math.round(a * 10) / 10, Math.round(p * 10) / 10); });
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(loop);
+Lobby.open({ game: 'archer-duel', title: '🏹 Archer Duel', local: true, onStart: begin });
+</script>
+</body>
+</html>

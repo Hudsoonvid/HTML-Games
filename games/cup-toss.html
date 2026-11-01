@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cup Toss</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🥤 Cup Toss</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="440" height="640"></canvas>
+</div>
+<p class="help">Drag the ball up the table and let go to toss it — the direction aims left and right, the length of your swipe sets how far it flies (the dotted marker shows where it will land). Sink the ball in a cup to remove it. First to clear all six of the other player's cups wins.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const W = cv.width, H = cv.height, CR = 24, BX = W / 2, BY = H - 70;
+let S, racks, turn, me, over, drag = null, flight = null, splash = [], waiting = false, pending = null;
+const myTurn = () => S && !over && !flight && !waiting && (S.mode === 'local' || turn === me);
+
+// the rack being thrown at: a triangle of six cups near the far end
+function rack() {
+  const out = [], top = 120;
+  [[0], [-1, 1], [-2, 0, 2]].forEach((row, r) => row.forEach(c => out.push({ x: BX + c * (CR + 2), y: top + (2 - r) * (CR * 1.75), up: true })));
+  return out;
+}
+
+function begin(s) {
+  S = s;
+  S.on('toss', d => { if (!d || over) return; if (turn !== me && !flight && !waiting) toss(d.x, d.y, true); else pending = d; });
+  S.startRound(() => ({ first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    me = S.mode === 'online' ? S.seat : 0;
+    racks = [rack(), rack()];
+    turn = S.mode === 'local' ? 0 : cfg.first;
+    over = false; flight = null; waiting = false; pending = null;
+    status();
+    if (S.ai && turn !== me) aiToss();
+  });
+}
+
+// racks[i] are the cups that player i is aiming at
+function status() {
+  const left = i => racks[i].filter(c => c.up).length;
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : S.mode === 'online' ? 'Online' : '2 players';
+  document.getElementById('vs').innerHTML = [0, 1].map(i => `<b ${i === turn ? 'class="turn"' : ''}>${S.mode === 'local' ? 'P' + (i + 1) : i === me ? S.me.name : S.opp.name}: ${6 - left(i)}/6</b>`).join(' vs ');
+  if (over) return;
+  msg.textContent = S.mode === 'local' ? `Player ${turn + 1}, toss!` : turn === me ? 'Your toss — swipe up!' : `${S.opp.name} is aiming…`;
+}
+
+function toss(x, y, fromNet) {
+  // both screens use exactly the same (rounded) landing point
+  x = Math.round(x); y = Math.round(y);
+  if (!fromNet && S.human && turn === me) S.send('toss', { x, y });
+  flight = { x0: BX, y0: BY, x1: x, y1: y, t: 0 };
+  Sound.beep(500, 0.05, 'triangle', 0.03);
+}
+
+function landed() {
+  const { x1, y1 } = flight;
+  flight = null;
+  const cups = racks[turn];
+  const hit = cups.find(c => c.up && Math.hypot(c.x - x1, c.y - y1) < CR - 4);
+  if (hit) {
+    hit.up = false;
+    splash.push({ x: hit.x, y: hit.y, t: 0 });
+    Sound.beep(880, 0.15, 'triangle', 0.05);
+    msg.textContent = 'Splash! 🎉';
+  } else {
+    const rim = cups.find(c => c.up && Math.hypot(c.x - x1, c.y - y1) < CR + 6);
+    msg.textContent = rim ? 'Off the rim!' : 'Miss!';
+    Sound.beep(rim ? 400 : 180, 0.1, 'square', 0.03);
+  }
+  if (cups.every(c => !c.up)) {
+    over = true;
+    status();
+    const title = S.mode === 'local' ? `Player ${turn + 1} wins! 🥤` : turn === me ? 'You cleared the cups! 🏆' : `${S.opp.name} cleared your cups`;
+    msg.textContent = title;
+    setTimeout(() => Lobby.end(S, { result: turn === me ? 1 : 0, title }), 1100);
+    return;
+  }
+  const r = S.round;
+  waiting = true;
+  setTimeout(() => {
+    if (r !== S.round || over) return;
+    waiting = false;
+    turn = 1 - turn;
+    status();
+    if (pending && turn !== me) { const d = pending; pending = null; toss(d.x, d.y, true); }
+    else if (S.ai && turn !== me) aiToss();
+  }, 900);
+}
+
+function aiToss() {
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round || over) return;
+    const t = pick(racks[turn].filter(c => c.up));
+    const sd = (1 - S.level) * 34 + 5, g = () => (Math.random() + Math.random() + Math.random() - 1.5) * 1.4;
+    toss(t.x + g() * sd, t.y + g() * sd * 1.4);
+  }, S.delay(700, 1100));
+}
+
+// swipe → landing point: sideways follows the swipe angle, distance follows its length
+function target(d) {
+  const dx = d.x - d.sx, dy = d.y - d.sy, len = Math.hypot(dx, dy);
+  if (dy > -10) return null;
+  const dist = clamp(len * 2.2, 60, BY - 40);
+  return { x: BX + (dx / len) * dist * 1.0, y: BY - (-dy / len) * dist };
+}
+
+function draw() {
+  ctx.fillStyle = '#1e3a8a';
+  ctx.fillRect(0, 0, W, H);
+  // table in perspective-ish
+  ctx.fillStyle = '#0f766e';
+  ctx.beginPath(); ctx.moveTo(60, 30); ctx.lineTo(W - 60, 30); ctx.lineTo(W - 10, H - 10); ctx.lineTo(10, H - 10); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W / 2, 30); ctx.lineTo(W / 2, H - 10); ctx.globalAlpha = 0.3; ctx.stroke(); ctx.globalAlpha = 1;
+  if (!S || !racks) return requestAnimationFrame(draw);
+  racks[turn].forEach(c => {
+    if (!c.up) { ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.beginPath(); ctx.arc(c.x, c.y, CR, 0, 7); ctx.fill(); return; }
+    ctx.fillStyle = '#b91c1c'; ctx.beginPath(); ctx.arc(c.x, c.y + 6, CR, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.arc(c.x, c.y, CR, 0, 7); ctx.fill();
+    ctx.fillStyle = '#7f1d1d'; ctx.beginPath(); ctx.arc(c.x, c.y, CR - 5, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(253,230,138,.6)'; ctx.beginPath(); ctx.arc(c.x, c.y + 3, CR - 9, 0, 7); ctx.fill();
+  });
+  splash.forEach(s => { s.t += 16; ctx.strokeStyle = `rgba(255,255,255,${1 - s.t / 500})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(s.x, s.y, CR + s.t / 12, 0, 7); ctx.stroke(); });
+  splash = splash.filter(s => s.t < 500);
+  ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.font = '13px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText(S.mode === 'local' ? `Player ${2 - turn}'s cups` : turn === me ? `${S.opp.name}'s cups` : 'Your cups', W / 2, 22);
+  // aiming guide
+  if (drag && myTurn()) {
+    const t = target(drag);
+    if (t) { ctx.strokeStyle = '#fde047'; ctx.setLineDash([4, 6]); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(t.x, t.y, 8, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
+  }
+  // the ball, in the hand or flying in an arc
+  let bx = BX, by = BY, bs = 1;
+  if (flight) {
+    flight.t += 16;
+    const k = Math.min(1, flight.t / 750);
+    bx = flight.x0 + (flight.x1 - flight.x0) * k;
+    by = flight.y0 + (flight.y1 - flight.y0) * k - Math.sin(k * Math.PI) * 120;
+    bs = 1 + Math.sin(k * Math.PI) * 0.6 - k * 0.3;
+    ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.arc(flight.x0 + (flight.x1 - flight.x0) * k, flight.y0 + (flight.y1 - flight.y0) * k, 8, 0, 7); ctx.fill();
+    if (k >= 1) landed();
+  } else if (drag && myTurn()) { bx = drag.x; by = drag.y; }
+  if (flight || myTurn() || (S.ai && !over)) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(bx, by, 10 * bs, 0, 7); ctx.fill(); ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1; ctx.stroke(); }
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('pointerdown', e => { if (!myTurn()) return; const p = canvasPoint(cv, e); drag = { sx: p.x, sy: p.y, x: p.x, y: p.y }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (drag) { const p = canvasPoint(cv, e); drag.x = p.x; drag.y = p.y; } });
+cv.addEventListener('pointerup', () => { if (!drag) return; const t = target(drag); drag = null; if (t && myTurn()) toss(t.x, t.y); });
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(draw);
+Lobby.open({ game: 'cup-toss', title: '🥤 Cup Toss', local: true, onStart: begin });
+</script>
+</body>
+</html>

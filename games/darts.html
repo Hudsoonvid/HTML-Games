@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Darts</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🎯 Darts</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="520" height="560"></canvas>
+</div>
+<p class="help">301: both players start on 301 and take turns throwing three darts. Your hand drifts — tap (or press <kbd>Space</kbd>) to throw when the sight is where you want it. The outer thin ring scores double, the inner thin ring triple, the bull 50. Reach exactly zero to win; going below zero is a bust and your turn's score doesn't count.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const BX = 260, BY = 260, R = 220, K = R / 170;
+const ORDER = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5];
+let S, scores, turn, darts, turnStart, me, over, sight = { x: BX, y: BY }, t0 = 0, busy = false, flash = '';
+const myTurn = () => S && !over && !busy && (S.mode === 'local' || turn === me);
+const nameOf = i => (S.mode === 'local' ? `Player ${i + 1}` : i === me ? 'You' : S.opp.name);
+
+// score for a point on the board
+function scoreAt(x, y) {
+  const dx = x - BX, dy = y - BY, r = Math.hypot(dx, dy) / K;
+  if (r <= 6.35) return { v: 50, label: 'BULL' };
+  if (r <= 15.9) return { v: 25, label: '25' };
+  if (r > 170) return { v: 0, label: 'Miss' };
+  let a = Math.atan2(dx, -dy) * 180 / Math.PI;
+  a = (a + 360 + 9) % 360;
+  const n = ORDER[Math.floor(a / 18)];
+  if (r >= 99 && r <= 107) return { v: n * 3, label: 'T' + n };
+  if (r >= 162) return { v: n * 2, label: 'D' + n };
+  return { v: n, label: '' + n };
+}
+
+// centre point of a segment (mult 1/2/3) to aim at
+function aimPoint(n, mult) {
+  if (n === 50) return { x: BX, y: BY };
+  if (n === 25) return { x: BX, y: BY - 11 * K };
+  const i = ORDER.indexOf(n), a = (i * 18) * Math.PI / 180;
+  const r = (mult === 3 ? 103 : mult === 2 ? 166 : 135) * K;
+  return { x: BX + Math.sin(a) * r, y: BY - Math.cos(a) * r };
+}
+
+function begin(s) {
+  S = s;
+  S.on('throw', d => { if (d && turn !== me && !over && typeof d.x === 'number') land(d.x, d.y, true); });
+  S.startRound(() => ({ first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    me = S.mode === 'online' ? S.seat : 0;
+    scores = [301, 301];
+    turn = S.mode === 'local' ? 0 : cfg.first;
+    darts = []; turnStart = 301; over = false; busy = false;
+    newTurn();
+  });
+}
+
+function newTurn() {
+  darts = [];
+  turnStart = scores[turn];
+  status();
+  if (S.ai && turn !== me) aiThrow();
+}
+
+function status() {
+  document.getElementById('stat').textContent = S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : S.mode === 'online' ? 'Online · 301' : '2 players · 301';
+  document.getElementById('vs').innerHTML = [0, 1].map(i => `<b ${i === turn ? 'class="turn"' : ''}>${S.mode === 'local' ? 'P' + (i + 1) : i === me ? S.me.name : S.opp.name}: ${scores[i]}</b>`).join(' vs ');
+  if (over) return;
+  msg.textContent = `${S.mode === 'local' ? `Player ${turn + 1}` : turn === me ? 'Your' : S.opp.name + "'s"} throw — dart ${darts.length + 1} of 3${turn === me || S.mode === 'local' ? ' · tap to throw' : ''}`;
+}
+
+// the computer aims for treble 20 early, then for a finish; lower levels are shakier
+function aiThrow() {
+  const r = S.round;
+  busy = true;
+  setTimeout(() => {
+    if (r !== S.round || over) return;
+    const left = scores[turn];
+    let tgt;
+    if (left > 60) tgt = aimPoint(20, 3);
+    else if (left === 50) tgt = aimPoint(50, 1);
+    else if (left <= 20) tgt = aimPoint(left, 1);
+    else if (left <= 40 && left % 2 === 0) tgt = aimPoint(left / 2, 2);
+    else if (left % 3 === 0 && left <= 60) tgt = aimPoint(left / 3, 3);
+    else tgt = aimPoint(Math.min(20, left - 20 > 0 ? left - 20 : left), 1);
+    const sd = (1 - S.level) * 55 + 7;
+    const g = () => { let u = 0; for (let i = 0; i < 6; i++) u += Math.random(); return (u - 3) / 1.2; };
+    busy = false;
+    land(tgt.x + g() * sd, tgt.y + g() * sd);
+    if (!over && !busy && turn !== me && darts.length > 0 && darts.length < 3) aiThrow();
+  }, S.delay(600, 900));
+}
+
+function land(x, y, fromNet) {
+  // both screens score exactly the same (rounded) point
+  x = Math.round(x * 10) / 10; y = Math.round(y * 10) / 10;
+  if (!fromNet && S.human && turn === me) S.send('throw', { x, y });
+  const sc = scoreAt(x, y);
+  darts.push({ x, y, ...sc });
+  Sound.beep(sc.v ? 300 + sc.v * 6 : 120, 0.08, 'triangle', 0.05);
+  const left = scores[turn] - sc.v;
+  flash = sc.label + (sc.v ? ` (${sc.v})` : '');
+  if (left < 0) {
+    // bust: the whole turn's darts don't count
+    flash = 'BUST!';
+    scores[turn] = turnStart;
+    Sound.beep(150, 0.25, 'square', 0.05);
+    return endTurn();
+  }
+  scores[turn] = left;
+  if (left === 0) {
+    over = true;
+    status();
+    const winner = turn;
+    const title = S.mode === 'local' ? `Player ${winner + 1} checks out! 🎯` : winner === me ? 'You checked out! 🎯🏆' : `${S.opp.name} checked out`;
+    msg.textContent = title;
+    Sound.beep(988, 0.4, 'triangle');
+    setTimeout(() => Lobby.end(S, { result: winner === me ? 1 : 0, title }), 1200);
+    return;
+  }
+  if (darts.length >= 3) return endTurn();
+  status();
+}
+
+function endTurn() {
+  busy = true;
+  status();
+  const r = S.round;
+  setTimeout(() => { if (r !== S.round || over) return; busy = false; turn = 1 - turn; newTurn(); }, 1100);
+}
+
+function draw(t) {
+  ctx.fillStyle = '#1c1917';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = '#0a0a0a';
+  ctx.beginPath(); ctx.arc(BX, BY, R + 34, 0, 7); ctx.fill();
+  for (let i = 0; i < 20; i++) {
+    const a0 = (i * 18 - 9 - 90) * Math.PI / 180, a1 = a0 + 18 * Math.PI / 180, dark = i % 2 === 0;
+    const ring = (r0, r1, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(BX, BY, r1 * K, a0, a1); ctx.arc(BX, BY, r0 * K, a1, a0, true); ctx.fill(); };
+    ring(15.9, 99, dark ? '#111827' : '#fef3c7');
+    ring(99, 107, dark ? '#dc2626' : '#16a34a');
+    ring(107, 162, dark ? '#111827' : '#fef3c7');
+    ring(162, 170, dark ? '#dc2626' : '#16a34a');
+    const am = (i * 18 - 90) * Math.PI / 180;
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 17px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(ORDER[i], BX + Math.cos(am) * (R + 18), BY + Math.sin(am) * (R + 18));
+  }
+  ctx.fillStyle = '#16a34a'; ctx.beginPath(); ctx.arc(BX, BY, 15.9 * K, 0, 7); ctx.fill();
+  ctx.fillStyle = '#dc2626'; ctx.beginPath(); ctx.arc(BX, BY, 6.35 * K, 0, 7); ctx.fill();
+  if (S && scores) {
+    darts.forEach(d => { ctx.fillStyle = '#fde047'; ctx.beginPath(); ctx.arc(d.x, d.y, 5, 0, 7); ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.strokeStyle = '#a3a3a3'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(d.x, d.y); ctx.lineTo(d.x + 14, d.y + 18); ctx.stroke(); });
+    if (myTurn()) {
+      // the sight wanders in a lazy figure-eight around where you point
+      const tt = t / 1000, wob = 26;
+      const sx = sight.x + Math.sin(tt * 1.7) * wob + Math.sin(tt * 3.1) * wob * 0.4, sy = sight.y + Math.sin(tt * 2.3 + 1) * wob * 0.8 + Math.cos(tt * 2.9) * wob * 0.3;
+      cur = { x: sx, y: sy };
+      ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sx, sy, 10, 0, 7); ctx.moveTo(sx - 16, sy); ctx.lineTo(sx + 16, sy); ctx.moveTo(sx, sy - 16); ctx.lineTo(sx, sy + 16); ctx.stroke();
+    }
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 20px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(flash, BX, cv.height - 22);
+    ctx.font = '14px system-ui'; ctx.fillStyle = '#a8a29e';
+    ctx.fillText(`This turn: ${darts.map(d => d.label || '–').join('  ') || '—'}`, BX, cv.height - 46);
+  }
+  requestAnimationFrame(draw);
+}
+let cur = null;
+
+function throwDart() { if (myTurn() && cur) land(cur.x, cur.y); }
+cv.addEventListener('pointermove', e => { const p = canvasPoint(cv, e); sight = p; });
+cv.addEventListener('pointerdown', e => { if (e.pointerType !== 'mouse') { sight = canvasPoint(cv, e); return; } throwDart(); });
+cv.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') throwDart(); });
+document.addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'Enter') throwDart(); });
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(draw);
+Lobby.open({ game: 'darts', title: '🎯 Darts 301', local: true, onStart: begin });
+</script>
+</body>
+</html>
