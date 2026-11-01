@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turbo Racer</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🏁 Turbo Racer</h1>
+  <div class="stats">Time <b id="time">30</b> Speed <b id="spd">0</b> Distance <b id="dist">0</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="800" height="480"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="left">◀</button><button id="brake">■</button><button id="right">▶</button></div>
+<p class="help">The car accelerates on its own — steer with <kbd>←</kbd><kbd>→</kbd> (or hold the left/right side of the screen) and brake with <kbd>↓</kbd>. Stay on the road: the grass slows you right down. Weave through traffic and pass the checkpoint flags for extra time before the clock runs out!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, SEG = 200, ROAD = 2000, LANES = 3, DRAW = 160, CAMH = 1000, DEPTH = 0.84, MAXSP = SEG * 60;
+let segs, cars, pos, speed, px, time, dist, best = Store.get('turbo-best', 0), state = 'ready', last = 0, keys = {}, input = 0, nextCheck, flash = 0, hitT = 0;
+
+// a long looping track made of curves and hills
+function build() {
+  segs = [];
+  const add = (n, curve, hill) => { const y0 = segs.length ? segs[segs.length - 1].y : 0; for (let i = 0; i < n; i++) { const k = i / n; segs.push({ i: segs.length, curve: curve * Math.sin(k * Math.PI), y: y0 + hill * (1 - Math.cos(k * Math.PI)) / 2 * SEG * 4, sprites: [] }); } };
+  for (let r = 0; r < 14; r++) add(randInt(40, 90), rand(-4, 4) * (r ? 1 : 0), r % 3 === 1 ? rand(-1, 1) * 20 : 0);
+  // flatten the end back to the start height for a smooth loop
+  const end = segs[segs.length - 1].y, n = 60;
+  for (let i = 0; i < n; i++) segs.push({ i: segs.length, curve: 0, y: end * (1 - i / n), sprites: [] });
+  segs.forEach((s, i) => {
+    if (i % 20 === 0) s.sprites.push({ x: -1.6, k: 'post' }, { x: 1.6, k: 'post' });
+    if (Math.random() < 0.18) s.sprites.push({ x: pick([-1, 1]) * rand(1.4, 3.2), k: pick(['🌳', '🌲', '🌴', '🏠']) });
+  });
+}
+
+function newGame() {
+  build();
+  cars = [];
+  for (let i = 0; i < 40; i++) cars.push({ z: rand(40, segs.length) * SEG, x: pick([-0.66, 0, 0.66]), sp: rand(0.25, 0.55) * MAXSP, e: pick(['🚙', '🚗', '🚕', '🚌', '🚐']) });
+  pos = 0; speed = 0; px = 0; time = 30; dist = 0; nextCheck = 240000; flash = 0; hitT = 0;
+  state = 'play';
+  overlay(ov, null);
+}
+
+function hud() {
+  document.getElementById('time').textContent = Math.ceil(Math.max(0, time || 0));
+  document.getElementById('spd').textContent = Math.round((speed || 0) / MAXSP * 280);
+  document.getElementById('dist').textContent = ((dist || 0) / 120000).toFixed(1) + ' km';
+  document.getElementById('best').textContent = best + ' km';
+}
+
+function update(dt) {
+  const t = dt / 1000, len = segs.length * SEG;
+  const steer = clamp((keys.ArrowRight || keys.d ? 1 : 0) - (keys.ArrowLeft || keys.a ? 1 : 0) + input, -1, 1);
+  const braking = keys.ArrowDown || keys.s || keys.brake;
+  const seg = segs[Math.floor(pos / SEG) % segs.length];
+  if (braking) speed -= MAXSP * 1.4 * t; else speed += MAXSP * 0.35 * t;
+  // off-road drag
+  if (Math.abs(px) > 1) speed -= speed * 2.2 * t;
+  if (hitT > 0) { hitT -= dt; speed = Math.min(speed, MAXSP * 0.25); }
+  speed = clamp(speed, 0, MAXSP);
+  px += steer * 2.2 * t * (speed / MAXSP);
+  // centrifugal push on curves
+  px -= seg.curve * 0.0016 * (speed / MAXSP) * dt / 16;
+  px = clamp(px, -2.5, 2.5);
+  pos = (pos + speed * t) % len;
+  dist += speed * t;
+  time -= t;
+  if (dist >= nextCheck) { nextCheck += 240000; time += 15; flash = 1500; Sound.beep(880, 0.25, 'triangle', 0.05); }
+  flash = Math.max(0, flash - dt);
+  for (const c of cars) {
+    c.z = (c.z + c.sp * t) % len;
+    let dz = c.z - pos;
+    if (dz < -len / 2) dz += len;
+    if (dz > 0 && dz < SEG * 1.2 && Math.abs(c.x - px) < 0.5 && speed > c.sp) { speed = c.sp * 0.6; hitT = 500; Sound.beep(140, 0.15, 'square', 0.05); }
+  }
+  if (time <= 0) {
+    state = 'over';
+    const d = Math.round(dist / 12000) / 10;
+    if (recordBest('turbo-best', d)) best = d;
+    Sound.beep(200, 0.5, 'triangle');
+    overlay(ov, `<h2>Time's up! ⏱</h2><p>You drove ${d} km</p><button class="btn" onclick="newGame()">Race again</button>`);
+  }
+  hud();
+}
+
+function project(wx, wy, wz, camX, camY, camZ) {
+  const scale = DEPTH / Math.max(1, wz - camZ);
+  return { x: Math.round(W / 2 + scale * (wx - camX) * W / 2), y: Math.round(H / 2 - scale * (wy - camY) * H / 2), w: Math.round(scale * ROAD * W / 2), s: scale };
+}
+
+function poly(x1, y1, w1, x2, y2, w2, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x1 - w1, y1); ctx.lineTo(x2 - w2, y2); ctx.lineTo(x2 + w2, y2); ctx.lineTo(x1 + w1, y1); ctx.fill(); }
+
+function draw() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H / 2);
+  sky.addColorStop(0, '#1d4ed8'); sky.addColorStop(1, '#93c5fd');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#4c1d95';
+  for (let i = 0; i < 6; i++) { const x = ((i * 190 - (pos || 0) / 400) % (W + 300) + W + 300) % (W + 300) - 150; ctx.beginPath(); ctx.moveTo(x - 180, H / 2 + 10); ctx.lineTo(x, H / 2 - 70 - (i % 3) * 20); ctx.lineTo(x + 180, H / 2 + 10); ctx.fill(); }
+  if (!segs) return;
+  const base = Math.floor(pos / SEG), basePct = (pos % SEG) / SEG, bs = segs[base % segs.length];
+  const camY = CAMH + bs.y + (segs[(base + 1) % segs.length].y - bs.y) * basePct;
+  let x = 0, dx = -(bs.curve * basePct), maxY = H;
+  const projected = [];
+  for (let n = 0; n < DRAW; n++) {
+    const s = segs[(base + n) % segs.length];
+    const p1 = project(x - px * ROAD, s.y, n * SEG, 0, camY, basePct * SEG);
+    const s2 = segs[(base + n + 1) % segs.length];
+    const p2 = project(x + dx - px * ROAD, s2.y, (n + 1) * SEG, 0, camY, basePct * SEG);
+    x += dx; dx += s.curve;
+    projected.push({ s, p1, p2, clip: maxY });
+    if (p2.y >= maxY || p1.s <= 0) continue;
+    const dark = Math.floor((base + n) / 3) % 2;
+    ctx.fillStyle = dark ? '#16a34a' : '#22c55e'; ctx.fillRect(0, p2.y, W, p1.y - p2.y + 1);
+    poly(p1.x, p1.y, p1.w * 1.15, p2.x, p2.y, p2.w * 1.15, dark ? '#e5e7eb' : '#dc2626');
+    poly(p1.x, p1.y, p1.w, p2.x, p2.y, p2.w, dark ? '#52525b' : '#57575f');
+    if (dark) for (let l = 1; l < LANES; l++) { const k = -1 + 2 * l / LANES; poly(p1.x + p1.w * k, p1.y, p1.w * 0.02, p2.x + p2.w * k, p2.y, p2.w * 0.02, '#f8fafc'); }
+    maxY = p2.y;
+  }
+  // sprites and traffic, far to near
+  for (let n = DRAW - 1; n > 0; n--) {
+    const pr = projected[n];
+    if (!pr) continue;
+    const { s, p1 } = pr;
+    if (p1.s <= 0) continue;
+    s.sprites.forEach(sp => {
+      const sx = p1.x + p1.w * sp.x, size = Math.max(4, p1.w * 0.5);
+      if (sp.k === 'post') { ctx.fillStyle = '#f8fafc'; ctx.fillRect(sx - size * 0.05, p1.y - size, size * 0.1, size); ctx.fillStyle = '#dc2626'; ctx.fillRect(sx - size * 0.05, p1.y - size, size * 0.1, size * 0.2); }
+      else { ctx.font = `${size}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText(sp.k, sx, p1.y); }
+    });
+    for (const c of cars) {
+      if (Math.floor(c.z / SEG) % segs.length !== s.i) continue;
+      const size = Math.max(4, p1.w * 0.42);
+      ctx.font = `${size}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.save(); ctx.translate(p1.x + p1.w * c.x, p1.y); ctx.scale(-1, 1); ctx.fillText(c.e, 0, 0); ctx.restore();
+    }
+  }
+  // player car
+  const bounce = speed > 0 ? Math.sin(performance.now() / 60) * (Math.abs(px) > 1 ? 4 : 1) : 0;
+  ctx.font = '84px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  ctx.save(); ctx.translate(W / 2, H - 6 + bounce); ctx.scale(-1, 1); ctx.fillText('🏎️', 0, 0); ctx.restore();
+  if (flash) { ctx.fillStyle = '#fde047'; ctx.font = 'bold 38px system-ui'; ctx.textBaseline = 'middle'; ctx.fillText('CHECKPOINT! +15s', W / 2, H / 3); }
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e => { keys[e.key] = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') newGame(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+cv.addEventListener('pointerdown', e => { const r = cv.getBoundingClientRect(); input = e.clientX - r.left < r.width / 2 ? -1 : 1; });
+cv.addEventListener('pointermove', e => { if (input) { const r = cv.getBoundingClientRect(); input = e.clientX - r.left < r.width / 2 ? -1 : 1; } });
+cv.addEventListener('pointerup', () => { input = 0; });
+cv.addEventListener('pointercancel', () => { input = 0; });
+holdButton(document.getElementById('left'), v => { keys.ArrowLeft = v; });
+holdButton(document.getElementById('right'), v => { keys.ArrowRight = v; });
+holdButton(document.getElementById('brake'), v => { keys.brake = v; });
+hud();
+build(); pos = 0; px = 0; speed = 0; cars = [];
+overlay(ov, '<h2>🏁 Turbo Racer</h2><p>Beat the clock — checkpoints add time.</p><button class="btn" onclick="newGame()">Race</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
