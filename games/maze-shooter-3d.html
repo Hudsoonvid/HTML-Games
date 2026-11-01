@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maze Shooter 3D</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🧟 Maze Shooter 3D</h1>
+  <div class="stats">Level <b id="level">1</b> ❤️ <b id="hp">100</b> 👾 <b id="left">0</b> Ammo <b id="ammo">∞</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="640" height="400"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help"><b>Keyboard:</b> <kbd>W</kbd><kbd>S</kbd>/<kbd>↑</kbd><kbd>↓</kbd> move, <kbd>A</kbd><kbd>D</kbd>/<kbd>←</kbd><kbd>→</kbd> turn (hold <kbd>Shift</kbd> to strafe), <kbd>Space</kbd> or click to shoot; drag the mouse to look. <b>Touch:</b> the left half is a joystick, drag on the right half to look and tap it to shoot. Clear the monsters, then find the glowing green exit.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, FOV = Math.PI / 3, COLW = 2, RAYS = W / COLW;
+let level = 1, map, N, P, foes, shots, exitPos, state = 'ready', last = 0, keys = {}, flashT = 0, hurtT = 0, zbuf = new Float32Array(RAYS), joy = null, look = null, best = Store.get('mazeshooter-best', 0);
+
+// carve a maze with a random depth-first search, then knock out some walls to make loops
+function makeMap() {
+  N = 11 + Math.min(level, 6) * 2;
+  map = Array.from({ length: N }, () => Array(N).fill(1));
+  const stack = [[1, 1]];
+  map[1][1] = 0;
+  while (stack.length) {
+    const [x, y] = stack[stack.length - 1];
+    const nb = shuffle([[2, 0], [-2, 0], [0, 2], [0, -2]]).map(([dx, dy]) => [x + dx, y + dy, x + dx / 2, y + dy / 2]).filter(([nx, ny]) => nx > 0 && ny > 0 && nx < N - 1 && ny < N - 1 && map[ny][nx]);
+    if (!nb.length) { stack.pop(); continue; }
+    const [nx, ny, wx, wy] = nb[0];
+    map[wy][wx] = 0; map[ny][nx] = 0;
+    stack.push([nx, ny]);
+  }
+  for (let k = 0; k < N * 1.5; k++) { const x = randInt(1, N - 2), y = randInt(1, N - 2); if (map[y][x] && ((map[y][x - 1] === 0 && map[y][x + 1] === 0) || (map[y - 1][x] === 0 && map[y + 1][x] === 0))) map[y][x] = 0; }
+  // wall styles
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (map[y][x]) map[y][x] = 1 + ((x * 7 + y * 3) % 3);
+  exitPos = { x: N - 2, y: N - 2 };
+}
+
+function newLevel() {
+  makeMap();
+  P = { x: 1.5, y: 1.5, a: 0, hp: P && P.hp > 0 ? Math.min(100, P.hp + 30) : 100 };
+  foes = []; shots = [];
+  const n = 3 + level * 2;
+  let tries = 0;
+  while (foes.length < n && tries++ < 500) {
+    const x = randInt(1, N - 2), y = randInt(1, N - 2);
+    if (map[y][x] || Math.hypot(x - 1, y - 1) < 5) continue;
+    const kind = Math.random() < 0.25 + level * 0.04 ? 'tough' : 'basic';
+    foes.push({ x: x + 0.5, y: y + 0.5, hp: kind === 'tough' ? 5 : 2, e: kind === 'tough' ? '👹' : pick(['👾', '🧟', '👻']), cd: rand(500, 1500), hit: 0, sp: kind === 'tough' ? 0.9 : 1.3 });
+  }
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+function newGame() { level = 1; P = null; newLevel(); }
+
+function hud() {
+  document.getElementById('level').textContent = level;
+  document.getElementById('hp').textContent = Math.max(0, Math.round(P ? P.hp : 100));
+  document.getElementById('left').textContent = foes ? foes.length : 0;
+}
+
+const wall = (x, y) => { const cx = Math.floor(x), cy = Math.floor(y); return cx < 0 || cy < 0 || cx >= N || cy >= N || map[cy][cx] > 0; };
+
+function tryMove(o, dx, dy, r = 0.22) {
+  if (!wall(o.x + dx + Math.sign(dx) * r, o.y)) o.x += dx;
+  if (!wall(o.x, o.y + dy + Math.sign(dy) * r)) o.y += dy;
+}
+
+function shoot() {
+  if (state !== 'play' || flashT > 0) return;
+  flashT = 180;
+  Sound.beep(160, 0.08, 'square', 0.06);
+  // hit the nearest visible monster close to the centre of the screen
+  let best = null, bd = Infinity;
+  for (const f of foes) {
+    const dx = f.x - P.x, dy = f.y - P.y, d = Math.hypot(dx, dy);
+    let ang = Math.atan2(dy, dx) - P.a;
+    ang = Math.atan2(Math.sin(ang), Math.cos(ang));
+    if (Math.abs(ang) < 0.12 + 0.25 / d && d < bd && clearLine(P.x, P.y, f.x, f.y)) { bd = d; best = f; }
+  }
+  if (best) { best.hp--; best.hit = 150; Sound.beep(400, 0.06, 'triangle', 0.05); if (best.hp <= 0) { foes = foes.filter(f => f !== best); Sound.beep(700, 0.12, 'triangle', 0.05); hud(); } }
+}
+
+function clearLine(x0, y0, x1, y1) {
+  const d = Math.hypot(x1 - x0, y1 - y0), steps = Math.ceil(d * 8);
+  for (let i = 1; i < steps; i++) if (wall(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps)) return false;
+  return true;
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  let fwd = 0, side = 0, turn = 0;
+  if (keys.w || keys.W || keys.ArrowUp) fwd += 1;
+  if (keys.s || keys.S || keys.ArrowDown) fwd -= 1;
+  const strafe = keys.Shift;
+  if (keys.a || keys.A || keys.ArrowLeft) strafe ? side -= 1 : turn -= 1;
+  if (keys.d || keys.D || keys.ArrowRight) strafe ? side += 1 : turn += 1;
+  if (joy && joy.cur) { const dx = joy.cur.x - joy.x, dy = joy.cur.y - joy.y; fwd += clamp(-dy / 50, -1, 1); side += clamp(dx / 50, -1, 1); }
+  P.a += turn * 2.6 * s;
+  const sp = 2.8 * s;
+  tryMove(P, (Math.cos(P.a) * fwd - Math.sin(P.a) * side) * sp, (Math.sin(P.a) * fwd + Math.cos(P.a) * side) * sp);
+  flashT = Math.max(0, flashT - dt);
+  hurtT = Math.max(0, hurtT - dt);
+  for (const f of foes) {
+    f.hit = Math.max(0, f.hit - dt);
+    const dx = P.x - f.x, dy = P.y - f.y, d = Math.hypot(dx, dy);
+    const sees = d < 9 && clearLine(f.x, f.y, P.x, P.y);
+    if (sees && d > 0.8) tryMove(f, dx / d * f.sp * s, dy / d * f.sp * s, 0.25);
+    f.cd -= dt;
+    if (sees && d < 1.1 && f.cd <= 0) { f.cd = 900; P.hp -= f.e === '👹' ? 14 : 8; hurtT = 250; Sound.beep(120, 0.15, 'sawtooth', 0.05); hud(); }
+  }
+  if (P.hp <= 0) {
+    state = 'over';
+    if (level - 1 > best) { best = level - 1; Store.set('mazeshooter-best', best); }
+    Sound.beep(90, 0.7, 'sawtooth', 0.06);
+    overlay(ov, `<h2>You were overrun 💀</h2><p>Reached level ${level}</p><button class="btn" onclick="newGame()">Try again</button>`);
+  }
+  if (!foes.length && Math.floor(P.x) === exitPos.x && Math.floor(P.y) === exitPos.y) {
+    state = 'won';
+    level++;
+    Sound.beep(988, 0.3, 'triangle');
+    overlay(ov, `<h2>Level cleared! 🚪</h2><button class="btn" onclick="newLevel()">Level ${level}</button>`);
+  }
+}
+
+const WALLCOL = { 1: [120, 120, 140], 2: [140, 110, 90], 3: [90, 120, 110] };
+function draw() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H / 2);
+  sky.addColorStop(0, '#1e1b4b'); sky.addColorStop(1, '#4c1d95');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H / 2);
+  const fl = ctx.createLinearGradient(0, H / 2, 0, H);
+  fl.addColorStop(0, '#1c1917'); fl.addColorStop(1, '#57534e');
+  ctx.fillStyle = fl; ctx.fillRect(0, H / 2, W, H / 2);
+  if (!P || !map) return;
+  // walls: one ray per column using grid stepping (DDA)
+  for (let i = 0; i < RAYS; i++) {
+    const ra = P.a - FOV / 2 + FOV * (i + 0.5) / RAYS, dx = Math.cos(ra), dy = Math.sin(ra);
+    let mx = Math.floor(P.x), my = Math.floor(P.y);
+    const ddx = Math.abs(1 / dx), ddy = Math.abs(1 / dy);
+    const stepX = dx < 0 ? -1 : 1, stepY = dy < 0 ? -1 : 1;
+    let sx = (dx < 0 ? P.x - mx : mx + 1 - P.x) * ddx, sy = (dy < 0 ? P.y - my : my + 1 - P.y) * ddy, sideHit = 0, cell = 0;
+    for (let k = 0; k < 64; k++) {
+      if (sx < sy) { sx += ddx; mx += stepX; sideHit = 0; } else { sy += ddy; my += stepY; sideHit = 1; }
+      if (mx < 0 || my < 0 || mx >= N || my >= N) { cell = 1; break; }
+      if (map[my][mx]) { cell = map[my][mx]; break; }
+    }
+    const dist = (sideHit ? sy - ddy : sx - ddx) * Math.cos(ra - P.a);
+    zbuf[i] = dist;
+    const h = Math.min(H * 3, H / dist);
+    const shade = clamp(1.25 - dist / 10, 0.15, 1) * (sideHit ? 0.75 : 1);
+    const base = WALLCOL[cell] || WALLCOL[1];
+    // brick stripes from where the ray hit the wall
+    const hitPos = sideHit ? P.x + dist / Math.cos(ra - P.a) * dx : P.y + dist / Math.cos(ra - P.a) * dy;
+    const stripe = Math.floor((hitPos - Math.floor(hitPos)) * 8) % 2 ? 0.88 : 1;
+    ctx.fillStyle = `rgb(${base[0] * shade * stripe | 0},${base[1] * shade * stripe | 0},${base[2] * shade * stripe | 0})`;
+    ctx.fillRect(i * COLW, (H - h) / 2, COLW, h);
+  }
+  // sprites: monsters and the exit, far to near, clipped by the wall depth buffer
+  const sprites = foes.map(f => ({ x: f.x, y: f.y, e: f.e, hit: f.hit })).concat(foes.length ? [] : [{ x: exitPos.x + 0.5, y: exitPos.y + 0.5, e: '🚪', exit: true }]);
+  sprites.map(sp => ({ ...sp, d: Math.hypot(sp.x - P.x, sp.y - P.y) })).sort((a, b) => b.d - a.d).forEach(sp => {
+    let ang = Math.atan2(sp.y - P.y, sp.x - P.x) - P.a;
+    ang = Math.atan2(Math.sin(ang), Math.cos(ang));
+    if (Math.abs(ang) > FOV / 2 + 0.3 || sp.d < 0.2) return;
+    const sx = W / 2 + Math.tan(ang) / Math.tan(FOV / 2) * W / 2, size = H / (sp.d * Math.cos(ang)) * 0.7;
+    const col = Math.floor(sx / COLW);
+    if (col >= 0 && col < RAYS && zbuf[col] < sp.d - 0.2) return;
+    ctx.globalAlpha = clamp(1.4 - sp.d / 9, 0.25, 1);
+    if (sp.exit) { ctx.fillStyle = 'rgba(34,197,94,.35)'; ctx.fillRect(sx - size / 2, H / 2 - size / 2, size, size); }
+    ctx.font = `${size}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(sp.e, sx, H / 2 + size * 0.1);
+    if (sp.hit) { ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.beginPath(); ctx.arc(sx, H / 2, size * 0.35, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  });
+  // gun and crosshair
+  ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(W / 2 - 8, H / 2); ctx.lineTo(W / 2 + 8, H / 2); ctx.moveTo(W / 2, H / 2 - 8); ctx.lineTo(W / 2, H / 2 + 8); ctx.stroke();
+  const bob = Math.sin(performance.now() / 120) * (keys.w || keys.ArrowUp || joy ? 4 : 0);
+  ctx.fillStyle = '#334155'; ctx.fillRect(W / 2 + 40, H - 90 + bob + (flashT ? 8 : 0), 40, 90);
+  ctx.fillStyle = '#64748b'; ctx.fillRect(W / 2 + 48, H - 120 + bob + (flashT ? 8 : 0), 24, 40);
+  if (flashT > 100) { ctx.fillStyle = '#fde047'; ctx.beginPath(); ctx.arc(W / 2 + 60, H - 128 + bob, 14, 0, 7); ctx.fill(); }
+  if (hurtT) { ctx.fillStyle = `rgba(220,38,38,${hurtT / 600})`; ctx.fillRect(0, 0, W, H); }
+  // minimap
+  const ms = 4;
+  ctx.globalAlpha = 0.7;
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { ctx.fillStyle = map[y][x] ? '#94a3b8' : x === exitPos.x && y === exitPos.y ? '#22c55e' : '#0f172a'; ctx.fillRect(8 + x * ms, 8 + y * ms, ms, ms); }
+  ctx.fillStyle = '#fde047'; ctx.fillRect(8 + P.x * ms - 2, 8 + P.y * ms - 2, 4, 4);
+  ctx.fillStyle = '#ef4444'; foes.forEach(f => ctx.fillRect(8 + f.x * ms - 1, 8 + f.y * ms - 1, 3, 3));
+  ctx.globalAlpha = 1;
+  if (joy && joy.cur) { ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.arc(joy.x, joy.y, 44, 0, 7); ctx.stroke(); ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.arc(joy.cur.x, joy.cur.y, 18, 0, 7); ctx.fill(); }
+}
+
+function loop(t) {
+  const dt = Math.min(40, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+const ptrs = {};
+cv.addEventListener('pointerdown', e => {
+  if (state !== 'play') return;
+  const p = canvasPoint(cv, e);
+  cv.setPointerCapture(e.pointerId);
+  if (e.pointerType === 'mouse') { ptrs[e.pointerId] = { kind: 'look', x: p.x, moved: 0 }; shoot(); return; }
+  if (p.x < W / 2) { joy = { x: p.x, y: p.y, cur: p, id: e.pointerId }; ptrs[e.pointerId] = { kind: 'joy' }; }
+  else ptrs[e.pointerId] = { kind: 'look', x: p.x, moved: 0, t: performance.now() };
+});
+cv.addEventListener('pointermove', e => {
+  const q = ptrs[e.pointerId];
+  if (!q) return;
+  const p = canvasPoint(cv, e);
+  if (q.kind === 'joy' && joy) joy.cur = p;
+  else if (q.kind === 'look') { P.a += (p.x - q.x) * 0.006; q.moved += Math.abs(p.x - q.x); q.x = p.x; }
+});
+const lift = e => {
+  const q = ptrs[e.pointerId];
+  if (q && q.kind === 'joy') joy = null;
+  if (q && q.kind === 'look' && e.pointerType !== 'mouse' && q.moved < 12 && performance.now() - q.t < 300) shoot();
+  delete ptrs[e.pointerId];
+};
+cv.addEventListener('pointerup', lift);
+cv.addEventListener('pointercancel', lift);
+document.addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ') { if (state === 'play') shoot(); else if (state === 'ready' || state === 'over') newGame(); } });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+hud();
+overlay(ov, '<h2>🧟 Maze Shooter 3D</h2><p>Clear the monsters, then find the exit.</p><button class="btn" onclick="newGame()">Play</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
