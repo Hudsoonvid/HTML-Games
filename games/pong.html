@@ -10,41 +10,43 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>🏓 Pong</h1>
-  <div class="stats">First to <b>7</b></div>
+  <div class="stats" id="stat">First to <b>7</b></div>
 </header>
-<div class="controls">
-  <select id="mode">
-    <option value="easy">1 player · Easy</option>
-    <option value="normal" selected>1 player · Normal</option>
-    <option value="hard">1 player · Hard</option>
-    <option value="2p">2 players</option>
-  </select>
-  <button class="btn" id="go">New match</button>
-</div>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
 <div class="stage">
   <canvas id="c" class="game" width="720" height="440"></canvas>
-  <div class="overlay" id="ov"></div>
+  <div class="overlay hidden" id="ov"></div>
 </div>
-<p class="help">Left paddle: <kbd>W</kbd>/<kbd>S</kbd>, mouse or touch. Right paddle (2 players): <kbd>↑</kbd>/<kbd>↓</kbd>. <kbd>Space</kbd> serves / pauses.</p>
+<p class="help">Move your paddle with the mouse, touch, or <kbd>W</kbd>/<kbd>S</kbd> (also <kbd>↑</kbd>/<kbd>↓</kbd>). Two players on one device: left uses <kbd>W</kbd>/<kbd>S</kbd> or the left half of the screen, right uses <kbd>↑</kbd>/<kbd>↓</kbd> or the right half. First to 7 wins. <kbd>Space</kbd> pauses vs the computer.</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
 const W = cv.width, H = cv.height, PH = 80, PW = 12, WIN = 7;
-let L, R, ball, state = 'ready', keys = {}, last = 0, mode = 'normal', serveDir = 1, aiError = 0, aiTimer = 0;
-const AI = { easy: { speed: 4, react: 0.35, err: 60 }, normal: { speed: 6, react: 0.2, err: 35 }, hard: { speed: 8.5, react: 0.08, err: 12 } };
+let S, L, R, ball, state = 'idle', keys = {}, last = 0, serveDir = 1, aiError = 0, aiTimer = 0, sendT = 0, touches = {};
+// the host (seat 0) plays the left paddle and runs the ball; the guest plays the right paddle
+const mine = () => (S && S.mode === 'online' && S.seat === 1 ? R : L);
+const runsBall = () => !S || !S.human || S.host;
 
-function resetBall() {
-  ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, r: 8, wait: 700 };
-}
+function resetBall() { ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, r: 8, wait: 900 }; }
 
-function newMatch() {
-  mode = document.getElementById('mode').value;
-  L = { y: H / 2, score: 0 };
-  R = { y: H / 2, score: 0 };
-  serveDir = Math.random() < 0.5 ? -1 : 1;
-  resetBall();
-  state = 'play';
-  overlay(ov, null);
+function begin(s) {
+  S = s;
+  S.on('st', d => { if (!S.host && d) { Object.assign(ball, d.b); L.y = d.l; L.score = d.ls; R.score = d.rs; } });
+  S.on('in', d => { if (S.host && d && typeof d.y === 'number') R.y = clamp(d.y, PH / 2, H - PH / 2); });
+  S.on('end', d => { if (!S.host && d) { L.score = d.ls; R.score = d.rs; endMatch(); } });
+  S.startRound(() => ({ serve: randInt(0, 1) ? 1 : -1 }), cfg => {
+    L = { y: H / 2, score: 0 };
+    R = { y: H / 2, score: 0 };
+    serveDir = cfg.serve === -1 ? -1 : 1;
+    resetBall();
+    state = 'play';
+    overlay(ov, null);
+    const you = S.mode === 'online' && S.seat === 1 ? 'right' : 'left';
+    document.getElementById('vs').innerHTML = S.mode === 'local' ? '<b style="color:#8b5cf6">Left</b> vs <b style="color:#22d3ee">Right</b>' : you === 'left' ? `<b style="color:#8b5cf6">${S.me.name} (you)</b> vs <b style="color:#22d3ee">${S.opp.name}</b>` : `<b style="color:#8b5cf6">${S.opp.name}</b> vs <b style="color:#22d3ee">${S.me.name} (you)</b>`;
+    document.getElementById('stat').innerHTML = S.mode === 'cpu' ? `First to <b>7</b> · CPU ${S.level.toFixed(2)}` : 'First to <b>7</b>';
+  });
 }
 
 function serve() {
@@ -65,49 +67,71 @@ function paddleHit(p, x, dir) {
   }
 }
 
+function endMatch() {
+  if (state === 'over') return;
+  state = 'over';
+  const myScore = mine() === L ? L.score : R.score, theirs = mine() === L ? R.score : L.score;
+  const title = S.mode === 'local' ? (L.score > R.score ? 'Left player wins!' : 'Right player wins!') : myScore > theirs ? 'You win! 🎉' : `${S.opp.name} wins`;
+  setTimeout(() => Lobby.end(S, { result: myScore > theirs ? 1 : 0, title, detail: `${L.score} – ${R.score}` }), 700);
+}
+
 function point(side) {
   side.score++;
   Sound.beep(200, 0.2, 'triangle');
   serveDir = side === L ? 1 : -1;
-  if (side.score >= WIN) {
-    state = 'over';
-    const who = mode === '2p' ? (side === L ? 'Left player wins!' : 'Right player wins!') : (side === L ? 'You win! 🎉' : 'The computer wins');
-    overlay(ov, `<h2>${who}</h2><p>${L.score} – ${R.score}</p><button class="btn" onclick="newMatch()">Play again</button>`);
-  }
   resetBall();
+  if (side.score >= WIN) {
+    if (S.human) S.send('end', { ls: L.score, rs: R.score });
+    endMatch();
+  }
+}
+
+// the computer gets faster, quicker to react and more accurate as the level rises
+function aiMove(p, x, f, dt) {
+  const L0 = S.level, speed = 3.5 + L0 * 6, react = 0.4 - L0 * 0.33, err = 70 - L0 * 60;
+  aiTimer -= dt;
+  if (aiTimer <= 0) { aiTimer = react * 1000; aiError = rand(-err, err); }
+  let target = H / 2;
+  if (ball.vx > 0) {
+    // predict where the ball will reach the paddle, including wall bounces
+    const t = (x - ball.x) / ball.vx;
+    let py = ball.y + ball.vy * t;
+    const span = H - 2 * ball.r;
+    py = ((py - ball.r) % (2 * span) + 2 * span) % (2 * span);
+    py = py > span ? 2 * span - py : py;
+    target = py + ball.r + aiError;
+  }
+  p.y += clamp(target - p.y, -speed * f, speed * f);
 }
 
 function update(dt) {
-  const f = dt / 16.67;
-  const sp = 7 * f;
-  if (keys.w || keys.W) L.y -= sp;
-  if (keys.s || keys.S) L.y += sp;
-  if (mode === '2p') {
+  const f = dt / 16.67, sp = 7 * f;
+  if (S.mode === 'local') {
+    if (keys.w || keys.W) L.y -= sp;
+    if (keys.s || keys.S) L.y += sp;
     if (keys.ArrowUp) R.y -= sp;
     if (keys.ArrowDown) R.y += sp;
   } else {
-    const ai = AI[mode];
-    aiTimer -= dt;
-    if (aiTimer <= 0) { aiTimer = ai.react * 1000; aiError = rand(-ai.err, ai.err); }
-    let target = H / 2;
-    if (ball.vx > 0) {
-      // predict where the ball will reach the paddle, including wall bounces
-      const t = (W - 30 - ball.x) / ball.vx;
-      let py = ball.y + ball.vy * t;
-      const span = H - 2 * ball.r;
-      py = ((py - ball.r) % (2 * span) + 2 * span) % (2 * span);
-      py = py > span ? 2 * span - py : py;
-      target = py + ball.r + aiError;
-    }
-    const d = target - R.y;
-    R.y += clamp(d, -ai.speed * f, ai.speed * f);
+    const me = mine();
+    if (keys.w || keys.W || keys.ArrowUp) me.y -= sp;
+    if (keys.s || keys.S || keys.ArrowDown) me.y += sp;
+    if (S.ai) aiMove(R, W - 30, f, dt);
   }
   L.y = clamp(L.y, PH / 2, H - PH / 2);
   R.y = clamp(R.y, PH / 2, H - PH / 2);
 
+  if (S.human) {
+    sendT += dt;
+    if (sendT > 60) {
+      sendT = 0;
+      if (S.host) S.send('st', { b: { x: Math.round(ball.x), y: Math.round(ball.y), vx: +ball.vx.toFixed(2), vy: +ball.vy.toFixed(2), wait: Math.round(ball.wait) }, l: Math.round(L.y), ls: L.score, rs: R.score });
+      else S.send('in', { y: Math.round(R.y) });
+    }
+  }
+
   if (ball.wait > 0) {
     ball.wait -= dt;
-    if (ball.wait <= 0) serve();
+    if (ball.wait <= 0 && runsBall()) serve();
     return;
   }
   const steps = 3;
@@ -119,8 +143,11 @@ function update(dt) {
     paddleHit(L, 30, 1);
     paddleHit(R, W - 30, -1);
   }
-  if (ball.x < -20) point(R);
-  else if (ball.x > W + 20) point(L);
+  // only the host decides points; the guest waits for its snapshot
+  if (runsBall()) {
+    if (ball.x < -20) point(R);
+    else if (ball.x > W + 20) point(L);
+  }
 }
 
 function draw() {
@@ -137,10 +164,17 @@ function draw() {
   ctx.fillRect(30 - PW / 2, L.y - PH / 2, PW, PH);
   ctx.fillStyle = '#22d3ee';
   ctx.fillRect(W - 30 - PW / 2, R.y - PH / 2, PW, PH);
-  ctx.fillStyle = '#fff';
-  ctx.beginPath();
-  ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
-  ctx.fill();
+  if (S && S.mode !== 'local' && state === 'play') {
+    ctx.font = 'bold 13px system-ui';
+    ctx.fillStyle = '#fde047';
+    ctx.fillText('YOU', mine() === L ? 30 : W - 30, mine().y - PH / 2 - 8);
+  }
+  if (ball.x > -30 && ball.x < W + 30) {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 function loop(t) {
@@ -151,31 +185,32 @@ function loop(t) {
   requestAnimationFrame(loop);
 }
 
+// touch/mouse: you move your own paddle; on one device each half of the screen drives one paddle
 function pointerMove(e) {
-  if (state !== 'play') return;
+  if (state !== 'play' || (e.pointerType === 'mouse' && e.type === 'pointermove' && !S)) return;
   const p = canvasPoint(cv, e);
-  if (mode === '2p' && p.x > W / 2) R.y = p.y;
-  else L.y = p.y;
+  if (S.mode === 'local') (p.x > W / 2 ? R : L).y = p.y;
+  else mine().y = p.y;
 }
 cv.addEventListener('pointermove', pointerMove);
 cv.addEventListener('pointerdown', pointerMove);
+cv.style.touchAction = 'none';
 document.addEventListener('keydown', e => {
   keys[e.key] = true;
-  if (e.key === ' ') {
+  if (['ArrowUp', 'ArrowDown', ' '].includes(e.key)) e.preventDefault();
+  if (e.key === ' ' && S && !S.human && S.mode !== 'online') {
     if (state === 'play') { state = 'paused'; overlay(ov, '<h2>Paused</h2><p>Space to resume</p>'); }
     else if (state === 'paused') { state = 'play'; overlay(ov, null); }
-    else newMatch();
   }
 });
 document.addEventListener('keyup', e => { keys[e.key] = false; });
-document.getElementById('go').onclick = newMatch;
-document.getElementById('mode').onchange = newMatch;
+document.getElementById('menu').onclick = () => Lobby.open();
 
 L = { y: H / 2, score: 0 };
 R = { y: H / 2, score: 0 };
 resetBall();
-overlay(ov, '<h2>Pong</h2><p>Pick a mode above, then start.</p><button class="btn" onclick="newMatch()">Start</button>');
 requestAnimationFrame(loop);
+Lobby.open({ game: 'pong', title: '🏓 Pong', local: true, onStart: begin });
 </script>
 </body>
 </html>

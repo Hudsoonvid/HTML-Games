@@ -14,46 +14,69 @@
 </header>
 <div class="controls">
   <select id="opp">
-    <option value="1">vs 1 bot</option>
-    <option value="2">vs 2 bots</option>
-    <option value="3" selected>vs 3 bots</option>
+    <option value="0">No extra bots</option>
+    <option value="1">+1 bot</option>
+    <option value="2" selected>+2 bots</option>
   </select>
-  <button class="btn" id="go">New match</button>
+  <button class="btn alt" id="menu">Change mode</button>
 </div>
 <div class="stage">
   <canvas id="c" class="game" width="600" height="600"></canvas>
-  <div class="overlay" id="ov"></div>
+  <div class="overlay hidden" id="ov"></div>
 </div>
-<p class="help">Turn with <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd>/<kbd>WASD</kbd> or swipe. Don't hit any trail or wall. Last rider standing wins the round — first to 3 rounds wins the match.</p>
+<p class="help">Turn with <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd>/<kbd>WASD</kbd> or swipe. Don't hit any trail or wall. Last rider standing wins the round — first to 3 rounds wins the match. Two players on one device: cyan uses <kbd>WASD</kbd> (or swipes on the left half), red uses the arrows (or swipes on the right half).</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
-const N = 60, S = cv.width / N, STEP = 55;
-const RIDERS = [
-  { name: 'You', color: '#22d3ee', x: 10, y: 30, dx: 1, dy: 0 },
-  { name: 'Red', color: '#ef4444', x: 50, y: 30, dx: -1, dy: 0 },
-  { name: 'Gold', color: '#facc15', x: 30, y: 10, dx: 0, dy: 1 },
-  { name: 'Lime', color: '#84cc16', x: 30, y: 50, dx: 0, dy: -1 }
+const N = 60, CS = cv.width / N;
+const START = [
+  { color: '#22d3ee', x: 10, y: 30, dx: 1, dy: 0 },
+  { color: '#ef4444', x: 50, y: 30, dx: -1, dy: 0 },
+  { color: '#facc15', x: 30, y: 10, dx: 0, dy: 1 },
+  { color: '#84cc16', x: 30, y: 50, dx: 0, dy: -1 }
 ];
-let grid, riders, wins, state = 'ready', last = 0, acc = 0, queue = [], countdown = 0;
+let S, grid, riders = [], wins = [], names = [], state = 'idle', last = 0, acc = 0, queues = [[], []], countdown = 0, myIdx = 0, step = 55, sendT = 0, tickNo = 0;
+// rider 0 is the host (or you), rider 1 the guest / second player / main opponent, 2-3 are extra bots
+const isHuman = i => (i === 0 ? true : i === 1 ? S.mode === 'local' || S.human : false);
+const hostRuns = () => !S.human || S.host;
 
 function scoresHud() {
-  document.getElementById('scores').innerHTML = riders.map((r, i) => `<span style="color:${r.color}">${r.name} <b>${wins[i]}</b></span>`).join(' ');
+  document.getElementById('scores').innerHTML = riders.map((r, i) => `<span style="color:${r.color}">${names[i]} <b>${wins[i]}</b></span>`).join(' ');
 }
 
-function newMatch() {
-  const n = 1 + +document.getElementById('opp').value;
-  riders = RIDERS.slice(0, n).map(r => ({ ...r }));
-  wins = riders.map(() => 0);
-  newRound();
+function begin(s) {
+  S = s;
+  S.on('in', d => { if (S.host && d && Math.abs(d.dx) + Math.abs(d.dy) === 1 && queues[1].length < 3) queues[1].push([d.dx, d.dy]); });
+  S.on('st', d => { if (!S.host && d) applySnap(d); });
+  S.on('round', d => { if (!S.host && d) { wins = d.wins; showRound(d.winner); } });
+  S.on('nr', () => { if (!S.host) newRound(); });
+  S.startRound(() => ({ bots: +document.getElementById('opp').value }), cfg => {
+    const bots = clamp(cfg.bots | 0, 0, 2);
+    document.getElementById('opp').value = bots;
+    document.getElementById('opp').disabled = S.human;
+    myIdx = S.human && !S.host ? 1 : 0;
+    step = S.human ? 75 : 55;
+    const n = 2 + bots;
+    if (S.mode === 'local') names = ['Cyan', 'Red', 'Gold', 'Lime'];
+    else {
+      const meName = S.me.name + ' (you)';
+      names = myIdx === 0 ? [meName, S.opp.name, 'Gold', 'Lime'] : [S.opp.name, meName, 'Gold', 'Lime'];
+    }
+    names = names.slice(0, n);
+    riders = START.slice(0, n).map(r => ({ ...r }));
+    wins = riders.map(() => 0);
+    newRound();
+  });
 }
 
 function newRound() {
   grid = Array.from({ length: N }, () => Array(N).fill(-1));
-  riders = riders.map((r, i) => ({ ...RIDERS[i], alive: true }));
+  riders = riders.map((r, i) => ({ ...START[i], alive: true }));
   riders.forEach((r, i) => { grid[r.y][r.x] = i; });
-  queue = [];
+  queues = [[], []];
   acc = 0;
+  tickNo = 0;
   state = 'countdown';
   countdown = 1500;
   overlay(ov, null);
@@ -63,7 +86,7 @@ function newRound() {
 const free = (x, y) => x >= 0 && y >= 0 && x < N && y < N && grid[y][x] < 0;
 
 // Count reachable free cells from (x,y), capped, to judge how roomy a direction is.
-function space(x, y, cap = 300) {
+function space(x, y, cap) {
   if (!free(x, y)) return 0;
   const seen = new Set([x + y * N]), q = [[x, y]];
   while (q.length && seen.size < cap) {
@@ -76,34 +99,39 @@ function space(x, y, cap = 300) {
   return seen.size;
 }
 
-function botThink(r) {
-  const opts = [[r.dx, r.dy], [r.dy, -r.dx], [-r.dy, r.dx]];
+// smarter bots look further ahead and wobble less as the level rises
+function botThink(r, i) {
+  const lv = S.level;
+  const opts = [[r.dx, r.dy], [r.dy, -r.dx], [-r.dy, r.dx]].filter(([dx, dy]) => free(r.x + dx, r.y + dy));
+  if (!opts.length) return;
+  if (Math.random() < (1 - lv) * 0.12) { [r.dx, r.dy] = pick(opts); return; }
   let bestD = null, bestScore = -Infinity;
   for (const [dx, dy] of opts) {
     const nx = r.x + dx, ny = r.y + dy;
-    if (!free(nx, ny)) continue;
-    let sc = space(nx, ny);
-    // look a few cells ahead in a straight line
+    let sc = space(nx, ny, 40 + lv * 360);
     let run = 0;
     while (run < 8 && free(nx + dx * run, ny + dy * run)) run++;
     sc += run * 2;
     if (dx === r.dx && dy === r.dy) sc += 3;
-    // mild aggression: drift toward the player's head
-    const p = riders[0];
-    if (p.alive) sc -= Math.hypot(nx - p.x, ny - p.y) * 0.15;
-    sc += Math.random() * 4;
+    // mild aggression: drift toward the nearest human's head
+    const p = riders[myIdx];
+    if (p && p.alive && i !== myIdx) sc -= Math.hypot(nx - p.x, ny - p.y) * 0.15 * lv;
+    sc += Math.random() * (2 + (1 - lv) * 8);
     if (sc > bestScore) { bestScore = sc; bestD = [dx, dy]; }
   }
   if (bestD) { r.dx = bestD[0]; r.dy = bestD[1]; }
 }
 
 function tick() {
-  if (queue.length) {
-    const [dx, dy] = queue.shift();
-    const p = riders[0];
-    if (p.alive && !(dx === -p.dx && dy === -p.dy)) { p.dx = dx; p.dy = dy; }
-  }
-  riders.forEach((r, i) => { if (i > 0 && r.alive) botThink(r); });
+  tickNo++;
+  [0, 1].forEach(i => {
+    const q = queues[i], r = riders[i];
+    if (q.length && r) {
+      const [dx, dy] = q.shift();
+      if (r.alive && !(dx === -r.dx && dy === -r.dy)) { r.dx = dx; r.dy = dy; }
+    }
+  });
+  riders.forEach((r, i) => { if (!isHuman(i) && r.alive) botThink(r, i); });
   const next = riders.map(r => ({ x: r.x + r.dx, y: r.y + r.dy }));
   riders.forEach((r, i) => {
     if (!r.alive) return;
@@ -111,7 +139,7 @@ function tick() {
     let dead = !free(n.x, n.y);
     // head-on collisions kill both riders
     riders.forEach((o, j) => { if (j !== i && o.alive && next[j].x === n.x && next[j].y === n.y) dead = true; });
-    if (dead) { r.alive = false; r.crash = n; if (i === 0) Sound.beep(120, 0.4, 'sawtooth'); }
+    if (dead) { r.alive = false; r.crash = n; if (i === myIdx) Sound.beep(120, 0.4, 'sawtooth'); }
   });
   riders.forEach((r, i) => {
     if (!r.alive) return;
@@ -119,22 +147,50 @@ function tick() {
     r.y = next[i].y;
     grid[r.y][r.x] = i;
   });
+  if (S.human) S.send('st', { t: tickNo, r: riders.map(r => [r.x, r.y, r.dx, r.dy, r.alive ? 1 : 0, r.crash ? r.crash.x : -1, r.crash ? r.crash.y : -1]) });
   const alive = riders.filter(r => r.alive);
-  if (!riders[0].alive || alive.length <= 1) endRound(alive);
+  if (alive.length <= 1) endRound(alive);
+}
+
+// the guest draws the host's moves: fill the trail from the old head to the new one
+function applySnap(d) {
+  if (state !== 'play' && state !== 'countdown') return;
+  if (state === 'countdown') state = 'play';
+  d.r.forEach(([x, y, dx, dy, alive, cx, cy], i) => {
+    const r = riders[i];
+    if (!r) return;
+    let px = r.x, py = r.y, guard = 0;
+    while ((px !== x || py !== y) && guard++ < 6) {
+      if (px !== x) px += Math.sign(x - px); else py += Math.sign(y - py);
+      if (px >= 0 && py >= 0 && px < N && py < N) grid[py][px] = i;
+    }
+    r.x = x; r.y = y;
+    if (i !== myIdx) { r.dx = dx; r.dy = dy; }
+    if (!alive && r.alive) { r.alive = false; r.crash = { x: cx, y: cy }; if (i === myIdx) Sound.beep(120, 0.4, 'sawtooth'); }
+  });
 }
 
 function endRound(alive) {
   const winner = alive.length === 1 ? riders.indexOf(alive[0]) : -1;
   if (winner >= 0) wins[winner]++;
+  if (S.human) S.send('round', { winner, wins });
+  showRound(winner);
+}
+
+function showRound(winner) {
   scoresHud();
   const champ = wins.findIndex(w => w >= 3);
+  const nm = i => (S.mode !== 'local' && i === myIdx ? 'You' : names[i].replace(' (you)', ''));
   if (champ >= 0) {
     state = 'over';
-    overlay(ov, `<h2>${champ === 0 ? 'You win the match! 🏆' : riders[champ].name + ' wins the match'}</h2><button class="btn" onclick="newMatch()">New match</button>`);
+    const title = S.mode === 'local' ? `${names[champ]} wins the match! 🏆` : champ === myIdx ? 'You win the match! 🏆' : `${nm(champ)} wins the match`;
+    setTimeout(() => Lobby.end(S, { result: champ === myIdx ? 1 : 0, title, detail: names.map((n, i) => `${n.replace(' (you)', '')} ${wins[i]}`).join(' · ') }), 900);
   } else {
     state = 'between';
-    const msg = winner === 0 ? 'You win the round!' : winner > 0 ? `${riders[winner].name} wins the round` : 'Draw!';
-    overlay(ov, `<h2>${msg}</h2><p>Press Space or click for the next round</p><button class="btn" onclick="newRound()">Next round</button>`);
+    const msg = winner < 0 ? 'Draw!' : S.mode !== 'local' && winner === myIdx ? 'You win the round!' : `${nm(winner)} wins the round`;
+    overlay(ov, `<h2>${msg}</h2><p>Next round starting…</p>`);
+    const r = S.round;
+    if (hostRuns()) setTimeout(() => { if (r === S.round && state === 'between') { if (S.human) S.send('nr'); newRound(); } }, 2000);
   }
 }
 
@@ -143,70 +199,99 @@ function draw() {
   ctx.fillRect(0, 0, cv.width, cv.height);
   ctx.strokeStyle = '#0f1530';
   for (let i = 0; i <= N; i += 5) {
-    ctx.beginPath(); ctx.moveTo(i * S, 0); ctx.lineTo(i * S, cv.height); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, i * S); ctx.lineTo(cv.width, i * S); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(i * CS, 0); ctx.lineTo(i * CS, cv.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * CS); ctx.lineTo(cv.width, i * CS); ctx.stroke();
   }
   if (!grid) return;
   for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
     const o = grid[y][x];
-    if (o < 0) continue;
+    if (o < 0 || !riders[o]) continue;
     ctx.fillStyle = riders[o].color;
     ctx.globalAlpha = riders[o].alive ? 0.85 : 0.35;
-    ctx.fillRect(x * S + 1, y * S + 1, S - 2, S - 2);
+    ctx.fillRect(x * CS + 1, y * CS + 1, CS - 2, CS - 2);
   }
   ctx.globalAlpha = 1;
-  riders.forEach(r => {
+  riders.forEach((r, i) => {
     if (r.alive) {
       ctx.fillStyle = '#fff';
       ctx.shadowColor = r.color;
       ctx.shadowBlur = 12;
-      ctx.fillRect(r.x * S, r.y * S, S, S);
+      ctx.fillRect(r.x * CS, r.y * CS, CS, CS);
       ctx.shadowBlur = 0;
+      if (state === 'countdown' && (S.mode === 'local' ? i < 2 : i === myIdx)) {
+        ctx.fillStyle = r.color;
+        ctx.font = 'bold 14px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(S.mode === 'local' ? names[i] : 'YOU', r.x * CS + CS / 2, r.y * CS - 8);
+      }
     } else if (r.crash) {
       ctx.font = '18px system-ui';
       ctx.textAlign = 'center';
-      ctx.fillText('💥', r.crash.x * S + S / 2, r.crash.y * S + S);
+      ctx.fillText('💥', r.crash.x * CS + CS / 2, r.crash.y * CS + CS);
     }
   });
   if (state === 'countdown') {
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 64px system-ui';
     ctx.textAlign = 'center';
-    ctx.fillText(Math.ceil(countdown / 500), cv.width / 2, cv.height / 2 + 20);
+    ctx.fillText(Math.max(1, Math.ceil(countdown / 500)), cv.width / 2, cv.height / 2 + 20);
   }
 }
 
 function loop(t) {
   const dt = Math.min(100, t - last);
   last = t;
-  if (state === 'countdown') { countdown -= dt; if (countdown <= 0) state = 'play'; }
-  else if (state === 'play') {
+  if (state === 'countdown') { countdown -= dt; if (countdown <= 0 && hostRuns()) state = 'play'; }
+  else if (state === 'play' && hostRuns()) {
     acc += dt;
-    while (acc >= STEP && state === 'play') { acc -= STEP; tick(); }
+    // once every person is out, the bots race to a finish
+    const st = riders.some((r, i) => r.alive && isHuman(i)) ? step : 14;
+    while (acc >= st && state === 'play') { acc -= st; tick(); }
   }
   draw();
   requestAnimationFrame(loop);
 }
 
-function turn(dx, dy) {
-  if (state === 'play' || state === 'countdown') { if (queue.length < 3) queue.push([dx, dy]); }
-}
-const KEYS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0], w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0] };
-document.addEventListener('keydown', e => {
-  if (KEYS[e.key]) turn(...KEYS[e.key]);
-  if (e.key === ' ' || e.key === 'Enter') {
-    if (state === 'between') newRound();
-    else if (state === 'over' || state === 'ready') newMatch();
+function turnRider(i, dx, dy) {
+  if (!S || (state !== 'play' && state !== 'countdown')) return;
+  if (S.human && !S.host) {
+    // the guest steers by telling the host; show the turn straight away on the head
+    const r = riders[1];
+    if (r && r.alive && !(dx === -r.dx && dy === -r.dy)) { r.dx = dx; r.dy = dy; }
+    S.send('in', { dx, dy });
+    return;
   }
+  if (queues[i].length < 3) queues[i].push([dx, dy]);
+}
+function turnMine(d) { const v = { u: [0, -1], d: [0, 1], l: [-1, 0], r: [1, 0] }[d]; turnRider(myIdx, ...v); }
+const ARROWS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+const WASD = { w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0], W: [0, -1], S: [0, 1], A: [-1, 0], D: [1, 0] };
+document.addEventListener('keydown', e => {
+  if (!S) return;
+  if (ARROWS[e.key]) { e.preventDefault(); turnRider(S.mode === 'local' ? 1 : myIdx, ...ARROWS[e.key]); }
+  if (WASD[e.key]) turnRider(S.mode === 'local' ? 0 : myIdx, ...WASD[e.key]);
 });
-onSwipe(cv, d => turn(...{ up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[d]));
-document.getElementById('go').onclick = newMatch;
+// swipes: on one device the left half steers cyan and the right half steers red
+let swipes = {};
+cv.style.touchAction = 'none';
+cv.addEventListener('pointerdown', e => { if (e.pointerType !== 'mouse') swipes[e.pointerId] = canvasPoint(cv, e); });
+cv.addEventListener('pointermove', e => {
+  const st = swipes[e.pointerId];
+  if (!st) return;
+  const p = canvasPoint(cv, e), dx = p.x - st.x, dy = p.y - st.y;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 18) return;
+  const dir = Math.abs(dx) > Math.abs(dy) ? [Math.sign(dx), 0] : [0, Math.sign(dy)];
+  turnRider(S.mode === 'local' ? (st.x > cv.width / 2 ? 1 : 0) : myIdx, ...dir);
+  swipes[e.pointerId] = p;
+});
+const endSwipe = e => { delete swipes[e.pointerId]; };
+cv.addEventListener('pointerup', endSwipe);
+cv.addEventListener('pointercancel', endSwipe);
+document.getElementById('opp').onchange = () => { if (S && !S.human) Lobby.open(); };
+document.getElementById('menu').onclick = () => Lobby.open();
 
-riders = RIDERS.slice(0, 4).map(r => ({ ...r }));
-wins = [0, 0, 0, 0];
-scoresHud();
-overlay(ov, '<h2>Light Cycles</h2><p>You are the cyan rider on the left.</p><button class="btn" onclick="newMatch()">Start</button>');
 requestAnimationFrame(loop);
+Lobby.open({ game: 'light-cycles', title: '🏍️ Light Cycles', local: true, onStart: begin });
 </script>
 </body>
 </html>

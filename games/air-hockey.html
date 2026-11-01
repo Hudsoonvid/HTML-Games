@@ -10,43 +10,50 @@
 <header class="topbar">
   <a class="back" href="../index.html">← Arcade</a>
   <h1>🏒 Air Hockey</h1>
-  <div class="stats">You <b id="ps">0</b> CPU <b id="cs">0</b></div>
+  <div class="stats" id="stat"></div>
 </header>
-<div class="controls">
-  <select id="diff"><option value="0">Easy</option><option value="1" selected>Medium</option><option value="2">Hard</option></select>
-  <button class="btn" id="go">New match</button>
-</div>
+<div class="controls"><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
 <div class="stage">
   <canvas id="c" class="game" width="420" height="680"></canvas>
-  <div class="overlay" id="ov"></div>
+  <div class="overlay hidden" id="ov"></div>
 </div>
-<p class="help">Move your mallet (bottom) with the mouse or a finger, or with <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd>. Hit the puck into the CPU's goal. First to 7 wins.</p>
+<p class="help">Move your mallet (bottom) with the mouse or a finger, or with <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd>. Hit the puck into the far goal. First to 7 wins. Two players on one device: each player uses their own half of the screen (top player can also use <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>).</p>
 <script src="shared.js"></script>
+<script src="net.js"></script>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
 const W = cv.width, H = cv.height, PR = 16, MR = 26, GOAL = 140, WIN = 7;
-const DIFF = [{ speed: 4.5, aggro: 0.6 }, { speed: 7, aggro: 0.85 }, { speed: 10, aggro: 1 }];
-let puck, me, cpu, ps, cs, state = 'ready', last = 0, target = null, keys = {}, pauseT = 0;
+// P1 = bottom (host), P2 = top (guest / computer). The guest sees the table turned round.
+let S, puck, P1, P2, state = 'idle', last = 0, keys = {}, pauseT = 0, sendT = 0, ptrs = {};
+const mine = () => (S && S.mode === 'online' && S.seat === 1 ? P2 : P1);
+const flipped = () => mine() === P2;
+const runsPuck = () => !S || !S.human || S.host;
 
 function resetPuck(towards) {
   puck = { x: W / 2, y: towards > 0 ? H / 2 + 60 : H / 2 - 60, vx: 0, vy: 0 };
-  pauseT = 600;
+  pauseT = 700;
 }
 
-function newMatch() {
-  me = { x: W / 2, y: H - 80, vx: 0, vy: 0 };
-  cpu = { x: W / 2, y: 80, vx: 0, vy: 0 };
-  ps = cs = 0;
-  target = { x: me.x, y: me.y };
-  resetPuck(Math.random() < 0.5 ? 1 : -1);
-  state = 'play';
-  overlay(ov, null);
-  hud();
+function begin(s) {
+  S = s;
+  S.on('st', d => { if (!S.host && d) { Object.assign(puck, d.p); P1.x = d.a.x; P1.y = d.a.y; P1.vx = d.a.vx; P1.vy = d.a.vy; P1.score = d.s[0]; P2.score = d.s[1]; pauseT = d.w; hud(); } });
+  S.on('in', d => { if (S.host && d && typeof d.x === 'number') { P2.tx = d.x; P2.ty = d.y; } });
+  S.on('end', d => { if (!S.host && d) { P1.score = d.s[0]; P2.score = d.s[1]; endMatch(); } });
+  S.startRound(() => ({ towards: randInt(0, 1) ? 1 : -1 }), cfg => {
+    P1 = { x: W / 2, y: H - 80, vx: 0, vy: 0, tx: W / 2, ty: H - 80, score: 0 };
+    P2 = { x: W / 2, y: 80, vx: 0, vy: 0, tx: W / 2, ty: 80, score: 0 };
+    resetPuck(cfg.towards);
+    state = 'play';
+    overlay(ov, null);
+    hud();
+  });
 }
 
 function hud() {
-  document.getElementById('ps').textContent = ps;
-  document.getElementById('cs').textContent = cs;
+  const meP = mine(), oppP = meP === P1 ? P2 : P1;
+  document.getElementById('stat').innerHTML = S.mode === 'local' ? `Blue <b>${P1.score}</b> Red <b>${P2.score}</b>` : `You <b>${meP.score}</b> ${S.mode === 'cpu' ? 'CPU' : 'Them'} <b>${oppP.score}</b>`;
+  document.getElementById('vs').innerHTML = S.mode === 'local' ? '<b style="color:#2563eb">Blue (bottom)</b> vs <b style="color:#ef4444">Red (top)</b>' : `<b style="color:${meP === P1 ? '#2563eb' : '#ef4444'}">${S.me.name}</b> vs <b style="color:${meP === P1 ? '#ef4444' : '#2563eb'}">${S.opp.name}</b>${S.mode === 'cpu' ? ` · level ${S.level.toFixed(2)}` : ''}`;
 }
 
 function collide(m) {
@@ -63,9 +70,9 @@ function collide(m) {
   }
 }
 
-function moveMallet(m, tx, ty, maxSp, f, minY, maxY) {
-  tx = clamp(tx, MR, W - MR);
-  ty = clamp(ty, minY, maxY);
+function moveMallet(m, maxSp, f) {
+  const minY = m === P1 ? H / 2 + MR : MR, maxY = m === P1 ? H - MR : H / 2 - MR;
+  const tx = clamp(m.tx, MR, W - MR), ty = clamp(m.ty, minY, maxY);
   let dx = tx - m.x, dy = ty - m.y;
   const d = Math.hypot(dx, dy), lim = maxSp * f;
   if (d > lim) { dx *= lim / d; dy *= lim / d; }
@@ -75,27 +82,44 @@ function moveMallet(m, tx, ty, maxSp, f, minY, maxY) {
   m.y += dy;
 }
 
+// the computer (top) is faster and more aggressive at higher levels
+function aiTarget(f) {
+  const lv = S.level, aggro = 0.5 + lv * 0.5;
+  if (puck.y < H / 2 + 40 && (puck.vy < 2 || puck.y < P2.y + 40)) {
+    if (puck.y < P2.y) { P2.tx = puck.x + (puck.x < W / 2 ? 30 : -30); P2.ty = puck.y - 40; }
+    else { P2.tx = puck.x + (W / 2 - puck.x) * 0.1; P2.ty = puck.y - MR * aggro; }
+  } else {
+    P2.tx = W / 2 + (puck.x - W / 2) * 0.6;
+    P2.ty = 70;
+  }
+  return 4 + lv * 7;
+}
+
+function keyAim(m, l, r, u, d, flip) {
+  if (!(keys[l] || keys[r] || keys[u] || keys[d])) return;
+  const sx = flip ? -1 : 1;
+  m.tx = m.x + ((keys[r] ? 1 : 0) - (keys[l] ? 1 : 0)) * 12 * sx;
+  m.ty = m.y + ((keys[d] ? 1 : 0) - (keys[u] ? 1 : 0)) * 12 * sx;
+}
+
 function update(dt) {
   const f = Math.max(dt / 16.67, 0.01);
-  // player
-  if (keys.ArrowLeft || keys.ArrowRight || keys.ArrowUp || keys.ArrowDown) {
-    target.x = me.x + ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) * 12;
-    target.y = me.y + ((keys.ArrowDown ? 1 : 0) - (keys.ArrowUp ? 1 : 0)) * 12;
+  if (S.mode === 'local') {
+    keyAim(P1, 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', false);
+    keyAim(P2, 'a', 'd', 'w', 's', false);
+  } else keyAim(mine(), 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', flipped());
+  moveMallet(P1, 22, f);
+  moveMallet(P2, S.ai ? aiTarget(f) : 22, f);
+  if (S.human) {
+    sendT += dt;
+    if (sendT > 60) {
+      sendT = 0;
+      const r = v => Math.round(v * 10) / 10;
+      if (S.host) S.send('st', { p: { x: r(puck.x), y: r(puck.y), vx: r(puck.vx), vy: r(puck.vy) }, a: { x: r(P1.x), y: r(P1.y), vx: r(P1.vx), vy: r(P1.vy) }, s: [P1.score, P2.score], w: Math.round(pauseT) });
+      else S.send('in', { x: Math.round(P2.tx), y: Math.round(P2.ty) });
+    }
   }
-  moveMallet(me, target.x, target.y, 22, f, H / 2 + MR, H - MR);
-  // cpu
-  const d = DIFF[+document.getElementById('diff').value];
-  let tx, ty;
-  if (puck.y < H / 2 + 40 && (puck.vy < 2 || puck.y < cpu.y + 40)) {
-    if (puck.y < cpu.y) { tx = puck.x + (puck.x < W / 2 ? 30 : -30); ty = puck.y - 40; }
-    else { tx = puck.x + (W / 2 - puck.x) * 0.1; ty = puck.y - MR * d.aggro; }
-  } else {
-    tx = W / 2 + (puck.x - W / 2) * 0.6;
-    ty = 70;
-  }
-  moveMallet(cpu, tx, ty, d.speed, f, MR, H / 2 - MR);
   if (pauseT > 0) { pauseT -= dt; return; }
-  // puck
   const steps = 4;
   for (let i = 0; i < steps; i++) {
     puck.x += puck.vx * f / steps;
@@ -107,26 +131,37 @@ function update(dt) {
       if (puck.y < PR) { puck.y = PR; puck.vy = Math.abs(puck.vy) * 0.9; }
       if (puck.y > H - PR) { puck.y = H - PR; puck.vy = -Math.abs(puck.vy) * 0.9; }
     }
-    collide(me);
-    collide(cpu);
+    collide(P1);
+    collide(P2);
   }
   puck.vx *= Math.pow(0.996, f);
   puck.vy *= Math.pow(0.996, f);
   const sp = Math.hypot(puck.vx, puck.vy);
   if (sp > 20) { puck.vx *= 20 / sp; puck.vy *= 20 / sp; }
-  if (puck.y < -PR) goal(true);
-  else if (puck.y > H + PR) goal(false);
+  if (runsPuck()) {
+    if (puck.y < -PR) goal(P1);
+    else if (puck.y > H + PR) goal(P2);
+  } else if (puck.y < -PR || puck.y > H + PR) { puck.vx = puck.vy = 0; }
 }
 
-function goal(mine) {
-  if (mine) ps++; else cs++;
-  Sound.beep(mine ? 880 : 220, 0.3, 'triangle');
+function endMatch() {
+  if (state === 'over') return;
+  state = 'over';
   hud();
-  if (ps >= WIN || cs >= WIN) {
-    state = 'over';
-    overlay(ov, `<h2>${ps > cs ? 'You win! 🏆' : 'CPU wins'}</h2><p>${ps} – ${cs}</p><button class="btn" onclick="newMatch()">Play again</button>`);
+  const meP = mine(), oppP = meP === P1 ? P2 : P1;
+  const title = S.mode === 'local' ? (P1.score > P2.score ? 'Blue wins! 🏆' : 'Red wins! 🏆') : meP.score > oppP.score ? 'You win! 🏆' : `${S.opp.name} wins`;
+  setTimeout(() => Lobby.end(S, { result: meP.score > oppP.score ? 1 : 0, title, detail: `${meP.score} – ${oppP.score}` }), 700);
+}
+
+function goal(scorer) {
+  scorer.score++;
+  Sound.beep(scorer === mine() || S.mode === 'local' ? 880 : 220, 0.3, 'triangle');
+  hud();
+  resetPuck(scorer === P1 ? -1 : 1);
+  if (scorer.score >= WIN) {
+    if (S.human) S.send('end', { s: [P1.score, P2.score] });
+    endMatch();
   }
-  resetPuck(mine ? -1 : 1);
 }
 
 function mallet(m, color) {
@@ -139,6 +174,8 @@ function mallet(m, color) {
 }
 
 function draw() {
+  ctx.save();
+  if (flipped()) { ctx.translate(W, H); ctx.rotate(Math.PI); }
   ctx.fillStyle = '#e0f2fe';
   ctx.fillRect(0, 0, W, H);
   ctx.strokeStyle = '#fca5a5';
@@ -154,14 +191,16 @@ function draw() {
   ctx.strokeStyle = '#334155';
   ctx.lineWidth = 8;
   ctx.strokeRect(0, 0, W, H);
-  if (!puck) return;
-  mallet(cpu, '#ef4444');
-  mallet(me, '#2563eb');
-  ctx.fillStyle = '#111827';
-  ctx.beginPath(); ctx.arc(puck.x, puck.y, PR, 0, 7); ctx.fill();
-  ctx.strokeStyle = '#4b5563';
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(puck.x, puck.y, PR - 4, 0, 7); ctx.stroke();
+  if (puck) {
+    mallet(P2, '#ef4444');
+    mallet(P1, '#2563eb');
+    ctx.fillStyle = '#111827';
+    ctx.beginPath(); ctx.arc(puck.x, puck.y, PR, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#4b5563';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(puck.x, puck.y, PR - 4, 0, 7); ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function loop(t) {
@@ -172,15 +211,34 @@ function loop(t) {
   requestAnimationFrame(loop);
 }
 
-const aim = e => { if (state === 'play') target = canvasPoint(cv, e); };
-cv.addEventListener('pointermove', aim);
-cv.addEventListener('pointerdown', aim);
-document.addEventListener('keydown', e => { keys[e.key] = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') newMatch(); });
+// each pointer steers the mallet on the half of the table where it went down (two-player touch works)
+function tablePoint(e) { const p = canvasPoint(cv, e); return flipped() ? { x: W - p.x, y: H - p.y } : p; }
+cv.addEventListener('pointerdown', e => {
+  if (state !== 'play') return;
+  const p = tablePoint(e);
+  ptrs[e.pointerId] = S.mode === 'local' ? (p.y > H / 2 ? P1 : P2) : mine();
+  ptrs[e.pointerId].tx = p.x; ptrs[e.pointerId].ty = p.y;
+});
+cv.addEventListener('pointermove', e => {
+  if (state !== 'play') return;
+  const p = tablePoint(e);
+  let m = ptrs[e.pointerId];
+  if (!m && e.pointerType === 'mouse') m = S.mode === 'local' ? (p.y > H / 2 ? P1 : P2) : mine();
+  if (m) { m.tx = p.x; m.ty = p.y; }
+});
+const lift = e => { delete ptrs[e.pointerId]; };
+cv.addEventListener('pointerup', lift);
+cv.addEventListener('pointercancel', lift);
+cv.style.touchAction = 'none';
+document.addEventListener('keydown', e => { keys[e.key] = true; if (e.key.startsWith('Arrow')) e.preventDefault(); });
 document.addEventListener('keyup', e => { keys[e.key] = false; });
-document.getElementById('go').onclick = newMatch;
+document.getElementById('menu').onclick = () => Lobby.open();
 
-overlay(ov, '<h2>Air Hockey</h2><p>You are blue (bottom). First to 7.</p><button class="btn" onclick="newMatch()">Start</button>');
+P1 = { x: W / 2, y: H - 80, vx: 0, vy: 0, tx: W / 2, ty: H - 80, score: 0 };
+P2 = { x: W / 2, y: 80, vx: 0, vy: 0, tx: W / 2, ty: 80, score: 0 };
+resetPuck(1);
 requestAnimationFrame(loop);
+Lobby.open({ game: 'air-hockey', title: '🏒 Air Hockey', local: true, onStart: begin });
 </script>
 </body>
 </html>
