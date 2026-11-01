@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backgammon</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🎲 Backgammon</h1>
+  <div class="stats" id="stat"></div>
+</header>
+<div class="controls"><button class="btn" id="roll">🎲 Roll</button><button class="btn alt" id="undo">↶ Undo move</button><button class="btn alt" id="menu">Change mode</button></div>
+<div class="vsbar" id="vs"></div>
+<div class="msg" id="msg"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="760" height="520"></canvas>
+</div>
+<p class="help">Move all fifteen of your checkers around the board into your home quarter, then bear them off. Roll, tap a checker, then tap a highlighted point (or the tray on the right to bear off). Doubles let you move four times. A lone checker (a blot) can be hit and sent to the bar — it must come back in before anything else moves. Points with two or more of your checkers are safe.</p>
+<script src="shared.js"></script>
+<script src="net.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), msg = document.getElementById('msg');
+const W = cv.width, H = cv.height, BAR = 40, TRAY = 60, PW = (W - BAR - TRAY - 20) / 12, CR = Math.min(PW / 2 - 2, 20);
+// board[1..24]: + white (player 0, moves 24→1, home 1-6), − red (player 1, moves 1→24, home 19-24)
+let S, me, board, bar, off, turn, dice, rolled, over, busy, sel = null, plans, turnStart, pending = [];
+const sgn = p => (p === 0 ? 1 : -1);
+const myTurn = () => S && !over && !busy && (S.mode === 'local' || turn === me);
+
+function setup() {
+  board = Array(25).fill(0);
+  board[24] = 2; board[13] = 5; board[8] = 3; board[6] = 5;
+  board[1] = -2; board[12] = -5; board[17] = -3; board[19] = -5;
+  bar = [0, 0]; off = [0, 0];
+}
+
+const own = (b, i, p) => b[i] * sgn(p) > 0;
+const blocked = (b, i, p) => b[i] * sgn(p) <= -2;
+function allHome(st, p) {
+  if (st.bar[p]) return false;
+  for (let i = 1; i <= 24; i++) if (own(st.board, i, p) && (p === 0 ? i > 6 : i < 19)) return false;
+  return true;
+}
+
+// single moves for player p with die d in state st: [{from, to}] (from 0 = bar, to 0/25 = off)
+function singles(st, p, d) {
+  const out = [], b = st.board;
+  if (st.bar[p]) {
+    const to = p === 0 ? 25 - d : d;
+    if (!blocked(b, to, p)) out.push({ from: 'bar', to });
+    return out;
+  }
+  const home = allHome(st, p);
+  for (let i = 1; i <= 24; i++) {
+    if (!own(b, i, p)) continue;
+    const to = p === 0 ? i - d : i + d;
+    if (to >= 1 && to <= 24) { if (!blocked(b, to, p)) out.push({ from: i, to }); }
+    else if (home) {
+      const exact = p === 0 ? to === 0 : to === 25;
+      // overshooting is only allowed from the furthest-back checker
+      let furthest = true;
+      if (!exact) for (let j = 1; j <= 24; j++) if (own(b, j, p) && (p === 0 ? j > i : j < i)) furthest = false;
+      if (exact || furthest) out.push({ from: i, to: 'off' });
+    }
+  }
+  return out;
+}
+
+function apply(st, p, m) {
+  const b = st.board.slice(), br = st.bar.slice(), of = st.off.slice();
+  if (m.from === 'bar') br[p]--; else b[m.from] -= sgn(p);
+  let hit = false;
+  if (m.to === 'off') of[p]++;
+  else {
+    if (b[m.to] * sgn(p) === -1) { b[m.to] = 0; br[1 - p]++; hit = true; }
+    b[m.to] += sgn(p);
+  }
+  return { board: b, bar: br, off: of, hit };
+}
+
+// every legal way to play the dice; only the longest plans count, and with one die usable the larger must be played
+function allPlans(st, p, ds) {
+  const res = [];
+  const rec = (s, left, seq) => {
+    let any = false;
+    const tried = new Set();
+    left.forEach((d, i) => {
+      if (tried.has(d)) return;
+      tried.add(d);
+      for (const m of singles(s, p, d)) {
+        any = true;
+        rec(apply(s, p, m), left.filter((_, j) => j !== i), seq.concat([{ ...m, d }]));
+      }
+    });
+    if (!any) res.push(seq);
+  };
+  rec(st, ds, []);
+  const max = Math.max(...res.map(r => r.length));
+  let best = res.filter(r => r.length === max);
+  if (max === 1 && ds.length === 2 && ds[0] !== ds[1]) {
+    const big = Math.max(...ds), withBig = best.filter(r => r[0].d === big);
+    if (withBig.length) best = withBig;
+  }
+  return best;
+}
+
+const state = () => ({ board, bar, off });
+
+function begin(s) {
+  S = s;
+  S.on('roll', d => { if (d && Array.isArray(d.d)) { pending.push(['roll', d.d]); drain(); } });
+  S.on('mv', d => { if (d) { pending.push(['mv', d]); drain(); } });
+  S.startRound(() => ({ first: S.lastFirst == null ? randInt(0, 1) : 1 - S.lastFirst }), cfg => {
+    S.lastFirst = cfg.first;
+    me = S.mode === 'online' ? S.seat : 0;
+    setup();
+    turn = S.mode === 'local' ? 0 : cfg.first;
+    dice = []; rolled = false; over = false; busy = false; sel = null; pending = [];
+    status();
+    if (S.ai && turn !== me) ai();
+  });
+}
+
+function drain() {
+  while (pending.length && !busy && !over && turn !== me) {
+    const [k, v] = pending[0];
+    if (k === 'roll' && !rolled) { pending.shift(); doRoll(v, true); }
+    else if (k === 'mv' && rolled) { pending.shift(); doMove(v, true); }
+    else break;
+  }
+}
+
+function pips(p) {
+  let n = bar[p] * 25;
+  for (let i = 1; i <= 24; i++) if (own(board, i, p)) n += Math.abs(board[i]) * (p === 0 ? i : 25 - i);
+  return n;
+}
+
+function status() {
+  document.getElementById('stat').textContent = S.mode === 'online' ? 'Online' : S.mode === 'cpu' ? `CPU level ${S.level.toFixed(2)}` : '2 players';
+  document.getElementById('vs').innerHTML = [0, 1].map(i => `<b ${i === turn ? 'class="turn"' : ''}>${i ? '🔴' : '⚪'} ${S.mode === 'local' ? (i ? 'Red' : 'White') : i === me ? S.me.name : S.opp.name} · pips ${pips(i)} · off ${off[i]}</b>`).join(' vs ');
+  document.getElementById('roll').disabled = !myTurn() || rolled;
+  document.getElementById('undo').disabled = !myTurn() || !rolled || !turnStart || S.human;
+  if (over) return;
+  const who = S.mode === 'local' ? (turn ? 'Red' : 'White') : turn === me ? 'You' : S.opp.name;
+  msg.textContent = !rolled ? `${who}: roll the dice` : `${who} rolled ${dice.join(' & ') || '—'}${turn === me || S.mode === 'local' ? ' — tap a checker' : ''}`;
+}
+
+function doRoll(d, fromNet) {
+  if (!fromNet && S.human && turn === me) S.send('roll', { d });
+  dice = d[0] === d[1] ? [d[0], d[0], d[0], d[0]] : d.slice();
+  rolled = true;
+  turnStart = { board: board.slice(), bar: bar.slice(), off: off.slice(), dice: dice.slice() };
+  Sound.beep(300, 0.06, 'square', 0.03);
+  plans = allPlans(state(), turn, dice);
+  status();
+  if (!plans[0].length) {
+    msg.textContent = `No legal move with ${d.join(' & ')}.`;
+    busy = true;
+    const r = S.round;
+    setTimeout(() => { if (r !== S.round) return; busy = false; endTurn(); }, 1100);
+    return;
+  }
+  if (S.ai && turn !== me) ai();
+  drain();
+}
+
+// legal next single moves right now (first steps of any best plan)
+const nextMoves = () => (plans || []).filter(p => p.length).map(p => p[0]);
+
+function doMove(m, fromNet) {
+  const ok = nextMoves().find(x => String(x.from) === String(m.from) && String(x.to) === String(m.to));
+  if (!ok) return;
+  if (!fromNet && S.human && turn === me) S.send('mv', { from: ok.from, to: ok.to });
+  const st = apply(state(), turn, ok);
+  board = st.board; bar = st.bar; off = st.off;
+  dice.splice(dice.indexOf(ok.d), 1);
+  plans = plans.filter(p => p.length && String(p[0].from) === String(ok.from) && String(p[0].to) === String(ok.to) && p[0].d === ok.d).map(p => p.slice(1));
+  Sound.beep(st.hit ? 180 : 520, st.hit ? 0.2 : 0.05, st.hit ? 'sawtooth' : 'triangle', 0.04);
+  sel = null;
+  if (off[turn] === 15) {
+    over = true;
+    status();
+    const gammon = off[1 - turn] === 0;
+    const title = S.mode === 'local' ? `${turn ? 'Red' : 'White'} wins${gammon ? ' a gammon' : ''}! 🎲` : turn === me ? `You win${gammon ? ' a gammon' : ''}! 🏆` : `${S.opp.name} wins${gammon ? ' a gammon' : ''}`;
+    msg.textContent = title;
+    setTimeout(() => Lobby.end(S, { result: turn === me ? 1 : 0, title }), 1000);
+    return;
+  }
+  if (!plans.length || !plans[0].length) { busy = true; const r = S.round; setTimeout(() => { if (r !== S.round) return; busy = false; endTurn(); }, 500); }
+  status();
+}
+
+function endTurn() {
+  turn = 1 - turn; rolled = false; dice = []; plans = null; sel = null; turnStart = null;
+  status();
+  if (S.ai && turn !== me) ai();
+  drain();
+}
+
+// computer: scores every full plan; weaker levels add more noise
+function ai() {
+  const r = S.round;
+  setTimeout(() => {
+    if (r !== S.round || over || busy || turn === me) return;
+    if (!rolled) return doRoll([randInt(1, 6), randInt(1, 6)]);
+    if (!plans || !plans[0] || !plans[0].length) return;
+    const p = turn;
+    let best = null, bv = -Infinity;
+    const seen = new Set();
+    for (const plan of plans.slice(0, 400)) {
+      let st = state(), hits = 0;
+      for (const m of plan) { st = apply(st, p, m); if (st.hit) hits++; }
+      const key = st.board.join() + st.bar.join() + st.off.join();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let v = hits * 14 + st.off[p] * 8;
+      for (let i = 1; i <= 24; i++) {
+        const c = st.board[i] * sgn(p);
+        if (c >= 2) v += 4 + ((p === 0 ? i <= 6 : i >= 19) ? 3 : 0);
+        if (c === 1) {
+          // a blot within reach of the opponent is risky
+          let threat = 0;
+          for (let j = 1; j <= 24; j++) if (st.board[j] * sgn(p) < 0) { const dist = p === 0 ? i - j : j - i; if (dist < 0 && -dist <= 12) threat++; }
+          if (st.bar[1 - p] && (p === 0 ? i >= 19 : i <= 6)) threat++;
+          v -= Math.min(threat, 3) * 4;
+        }
+      }
+      // fewer pips left is better
+      let pip = st.bar[p] * 25;
+      for (let i = 1; i <= 24; i++) if (st.board[i] * sgn(p) > 0) pip += Math.abs(st.board[i]) * (p === 0 ? i : 25 - i);
+      v -= pip * 0.15;
+      v += rand(0, (1 - S.level) * 25);
+      if (v > bv) { bv = v; best = plan; }
+    }
+    // play the chosen plan one move at a time
+    const stepIt = k => {
+      if (r !== S.round || over || k >= best.length) return;
+      doMove(best[k]);
+      setTimeout(() => stepIt(k + 1), S.mode === 'online' ? 650 : 400);
+    };
+    stepIt(0);
+  }, S.delay(500, 900));
+}
+
+// geometry: points 13-24 along the top (left→right), 12-1 along the bottom; white home bottom-right
+function pointX(i) {
+  const col = i >= 13 ? i - 13 : 12 - i;
+  return 10 + col * PW + (col >= 6 ? BAR : 0) + PW / 2;
+}
+const isTop = i => i >= 13;
+
+function draw() {
+  ctx.fillStyle = '#78350f';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#a16207';
+  ctx.fillRect(10, 10, 6 * PW, H - 20);
+  ctx.fillRect(10 + 6 * PW + BAR, 10, 6 * PW, H - 20);
+  ctx.fillStyle = '#451a03'; ctx.fillRect(W - TRAY, 10, TRAY - 10, H - 20);
+  const moves = myTurn() && rolled ? nextMoves() : [];
+  const targets = sel != null ? moves.filter(m => String(m.from) === String(sel)).map(m => String(m.to)) : [];
+  for (let i = 1; i <= 24; i++) {
+    const x = pointX(i), top = isTop(i), tip = top ? H / 2 - 30 : H / 2 + 30, base = top ? 10 : H - 10;
+    ctx.fillStyle = targets.includes(String(i)) ? '#22c55e' : i % 2 ? '#fde68a' : '#7f1d1d';
+    ctx.beginPath(); ctx.moveTo(x - PW / 2 + 2, base); ctx.lineTo(x + PW / 2 - 2, base); ctx.lineTo(x, tip); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.font = '10px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(i, x, top ? 8 : H - 1);
+  }
+  if (!S || !board) return requestAnimationFrame(draw);
+  const fromPts = new Set(moves.map(m => String(m.from)));
+  const checker = (x, y, p, hi) => {
+    ctx.fillStyle = p === 0 ? '#f8fafc' : '#dc2626';
+    ctx.beginPath(); ctx.arc(x, y, CR, 0, 7); ctx.fill();
+    ctx.strokeStyle = hi ? '#22c55e' : p === 0 ? '#94a3b8' : '#7f1d1d'; ctx.lineWidth = hi ? 4 : 2; ctx.stroke();
+  };
+  for (let i = 1; i <= 24; i++) {
+    const n = Math.abs(board[i]);
+    if (!n) continue;
+    const p = board[i] > 0 ? 0 : 1, x = pointX(i), top = isTop(i);
+    const step = Math.min(CR * 2, (H / 2 - 40) / Math.max(n, 1));
+    for (let k = 0; k < n; k++) {
+      const y = top ? 10 + CR + k * step : H - 10 - CR - k * step;
+      checker(x, y, p, k === n - 1 && (String(sel) === String(i) || (sel == null && fromPts.has(String(i)) && p === turn)));
+    }
+  }
+  // bar and borne-off trays
+  const bx = 10 + 6 * PW + BAR / 2;
+  for (let p = 0; p < 2; p++) for (let k = 0; k < bar[p]; k++) checker(bx, p === 0 ? H / 2 + 30 + k * 12 : H / 2 - 30 - k * 12, p, k === bar[p] - 1 && p === turn && fromPts.has('bar'));
+  for (let p = 0; p < 2; p++) for (let k = 0; k < off[p]; k++) { ctx.fillStyle = p === 0 ? '#f8fafc' : '#dc2626'; ctx.fillRect(W - TRAY + 8, p === 0 ? H - 18 - k * 9 : 14 + k * 9, TRAY - 26, 7); }
+  if (targets.includes('off')) { ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 4; ctx.strokeRect(W - TRAY + 2, 12, TRAY - 14, H - 24); }
+  // dice
+  dice.forEach((d, i) => {
+    const x = 10 + 9 * PW + BAR + i * 40 - (dice.length - 1) * 20, y = H / 2;
+    ctx.fillStyle = turn === 0 ? '#f8fafc' : '#dc2626'; ctx.strokeStyle = '#111'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(x - 16, y - 16, 32, 32, 6); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = turn === 0 ? '#111' : '#fff'; ctx.font = 'bold 18px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(d, x, y + 1);
+  });
+  requestAnimationFrame(draw);
+}
+
+function hitTest(p) {
+  if (p.x > W - TRAY) return 'off';
+  const bx = 10 + 6 * PW;
+  if (p.x > bx && p.x < bx + BAR) return 'bar';
+  for (let i = 1; i <= 24; i++) if (Math.abs(p.x - pointX(i)) < PW / 2 && (isTop(i) ? p.y < H / 2 : p.y > H / 2)) return i;
+  return null;
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (!myTurn()) return;
+  if (!rolled) return doRoll([randInt(1, 6), randInt(1, 6)]);
+  const h = hitTest(canvasPoint(cv, e));
+  if (h == null) { sel = null; return; }
+  const moves = nextMoves();
+  if (sel != null) {
+    const m = moves.find(x => String(x.from) === String(sel) && String(x.to) === String(h));
+    if (m) return doMove(m);
+  }
+  if (moves.some(x => String(x.from) === String(h))) {
+    sel = h;
+    // only one place to go? go there
+    const t = moves.filter(x => String(x.from) === String(h));
+    if (new Set(t.map(x => String(x.to))).size === 1 && h !== 'off') doMove(t[0]);
+  } else sel = null;
+});
+document.getElementById('roll').onclick = () => { if (myTurn() && !rolled) doRoll([randInt(1, 6), randInt(1, 6)]); };
+document.getElementById('undo').onclick = () => {
+  if (!myTurn() || !turnStart || S.human) return;
+  ({ board, bar, off } = { board: turnStart.board.slice(), bar: turnStart.bar.slice(), off: turnStart.off.slice() });
+  dice = turnStart.dice.slice();
+  plans = allPlans(state(), turn, dice);
+  sel = null;
+  status();
+};
+document.getElementById('menu').onclick = () => Lobby.open();
+requestAnimationFrame(draw);
+Lobby.open({ game: 'backgammon', title: '🎲 Backgammon', local: true, onStart: begin });
+</script>
+</body>
+</html>
