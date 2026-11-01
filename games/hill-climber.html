@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hill Climber</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🚙 Hill Climber</h1>
+  <div class="stats">Distance <b id="dist">0</b>m 🪙 <b id="coins">0</b> Best <b id="best">0</b>m</div>
+</header>
+<div class="controls" id="shop"></div>
+<div class="stage">
+  <canvas id="c" class="game" width="800" height="460"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<div class="touchpad"><button id="brake">◀ Brake</button><button id="gas">Gas ▶</button></div>
+<p class="help">Hold <kbd>→</kbd>/<kbd>D</kbd> (or the right side of the screen) for gas and <kbd>←</kbd>/<kbd>A</kbd> (left side) to brake and reverse. In the air, gas tilts the car back and brake tilts it forward. Grab fuel cans ⛽ before the tank runs dry, and don't land on your head! Spend coins on upgrades.</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, WR = 16, AXLE = 58;
+let up = Store.get('hill-up', { engine: 0, tires: 0, tank: 0 }), bank = Store.get('hill-coins', 0), best = Store.get('hill-best', 0);
+let car, fuel, pickups, gotCoins, camX, camY, state = 'ready', last = 0, gas = false, brake = false, seed;
+
+// rolling hills that get steeper the further you go
+function groundY(x) {
+  const k = Math.min(1 + x / 6000, 3.2);
+  return 330 - (Math.sin(x * 0.004 + seed) * 50 + Math.sin(x * 0.0113 + seed * 2) * 26 * k + Math.sin(x * 0.0021) * 70 + Math.sin(x * 0.027 + seed) * 6 * k) - (x > 0 ? 0 : 0);
+}
+const slope = x => (groundY(x + 2) - groundY(x - 2)) / 4;
+
+function newRun() {
+  seed = rand(0, 100);
+  car = { x: 120, y: groundY(120) - 40, vx: 0, vy: 0, ang: 0, va: 0, dead: false };
+  fuel = 100; gotCoins = 0;
+  pickups = [];
+  for (let x = 400; x < 40000; x += rand(120, 220)) pickups.push({ x, kind: 'coin' });
+  for (let x = 900; x < 40000; x += 650 + x * 0.05) pickups.push({ x, kind: 'fuel' });
+  camX = 0; camY = 0;
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('dist').textContent = car ? Math.max(0, Math.floor((car.x - 120) / 20)) : 0;
+  document.getElementById('coins').textContent = bank + (gotCoins || 0);
+  document.getElementById('best').textContent = best;
+  const shop = document.getElementById('shop');
+  const items = [['engine', '⚙️ Engine'], ['tires', '🛞 Tires'], ['tank', '⛽ Fuel tank']];
+  shop.innerHTML = items.map(([k, n]) => { const cost = 60 * Math.pow(2, up[k]); return `<button class="btn alt" data-k="${k}" ${up[k] >= 6 || bank < cost || state === 'play' ? 'disabled' : ''}>${n} ${up[k]}/6 · 🪙${up[k] >= 6 ? 'max' : cost}</button>`; }).join('');
+  shop.querySelectorAll('button').forEach(b => { b.onclick = () => { const k = b.dataset.k, cost = 60 * Math.pow(2, up[k]); if (bank >= cost && up[k] < 6) { bank -= cost; up[k]++; Store.set('hill-up', up); Store.set('hill-coins', bank); Sound.beep(880, 0.1, 'triangle'); hud(); } }; });
+}
+
+function end(why) {
+  if (state !== 'play') return;
+  state = 'over';
+  bank += gotCoins; gotCoins = 0;
+  Store.set('hill-coins', bank);
+  const d = Math.floor((car.x - 120) / 20);
+  if (recordBest('hill-best', d)) best = d;
+  Sound.beep(110, 0.5, 'sawtooth', 0.05);
+  hud();
+  setTimeout(() => overlay(ov, `<h2>${why}</h2><p>${d} m · coins banked: ${bank}</p><button class="btn" onclick="newRun()">Drive again</button>`), 600);
+}
+
+function wheelPos() {
+  const c = Math.cos(car.ang), s = Math.sin(car.ang);
+  return [{ x: car.x - c * AXLE / 2 + s * 14, y: car.y - s * AXLE / 2 + c * 14 }, { x: car.x + c * AXLE / 2 + s * 14, y: car.y + s * AXLE / 2 + c * 14 }];
+}
+
+function update(dt) {
+  const s = dt / 1000, power = 520 + up.engine * 110, grip = 0.9 + up.tires * 0.04;
+  car.vy += 900 * s;
+  const wheels = wheelPos();
+  let contacts = 0;
+  wheels.forEach((w, i) => {
+    const gy = groundY(w.x);
+    if (w.y + WR > gy - 1) {
+      contacts++;
+      // push the car out of the ground and turn velocity along the slope
+      const pen = w.y + WR - gy;
+      car.y -= pen * 0.5;
+      const sl = slope(w.x), nx = -sl / Math.hypot(1, sl), ny = -1 / Math.hypot(1, sl);
+      const vn = car.vx * nx + car.vy * ny;
+      if (vn < 0) { car.vx -= vn * nx * 1.15; car.vy -= vn * ny * 1.15; }
+      // torque the body toward the slope
+      const want = Math.atan(sl);
+      car.va += (want - car.ang) * 14 * s * (i ? 1 : 1);
+      const tx = 1 / Math.hypot(1, sl), ty = sl / Math.hypot(1, sl);
+      if (fuel > 0 && gas) { car.vx += tx * power * s * grip * 0.5; car.vy += ty * power * s * grip * 0.5; }
+      if (brake) { const vt = car.vx * tx + car.vy * ty; const b = vt > 20 ? -900 : fuel > 0 ? -power * 0.5 : 0; car.vx += tx * b * s * 0.5; car.vy += ty * b * s * 0.5; }
+      car.vx *= Math.pow(0.6, s); car.vy *= Math.pow(0.6, s);
+    }
+  });
+  if (!contacts) { if (gas) car.va -= 4.5 * s; if (brake) car.va += 4.5 * s; }
+  car.va *= Math.pow(0.25, s);
+  car.ang += car.va * s * 3;
+  car.x += car.vx * s;
+  car.y += car.vy * s;
+  if (gas || brake) fuel -= s * (5.5 - up.tank * 0.5);
+  else fuel -= s * 0.6;
+  fuel = Math.max(0, fuel);
+  // landing on the roof ends the run
+  const head = { x: car.x + Math.sin(car.ang) * -26, y: car.y - Math.cos(car.ang) * 26 };
+  if (head.y > groundY(head.x) - 4) end('Ouch — you flipped! 🙃');
+  if (car.x < 40) { car.x = 40; car.vx = Math.max(0, car.vx); }
+  pickups = pickups.filter(p => {
+    const py = groundY(p.x) - 30;
+    if (Math.hypot(p.x - car.x, py - car.y) < 40) {
+      if (p.kind === 'coin') { gotCoins += 5; Sound.beep(1200, 0.03, 'triangle', 0.02); }
+      else { fuel = 100; Sound.beep(600, 0.15, 'triangle', 0.04); }
+      return false;
+    }
+    return p.x > car.x - W;
+  });
+  if (fuel <= 0 && Math.hypot(car.vx, car.vy) < 8) end('Out of fuel ⛽');
+  camX += (car.x - 250 - camX) * Math.min(1, 6 * s);
+  camY += (car.y - H * 0.55 - camY) * Math.min(1, 4 * s);
+  hud();
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#38bdf8'); g.addColorStop(1, '#bae6fd');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  if (!car) return;
+  ctx.fillStyle = '#93c5fd';
+  for (let i = 0; i < 6; i++) { const x = ((i * 260 - camX * 0.2) % (W + 300) + W + 300) % (W + 300) - 150; ctx.beginPath(); ctx.moveTo(x - 160, H); ctx.lineTo(x, 180); ctx.lineTo(x + 160, H); ctx.fill(); }
+  ctx.save();
+  ctx.translate(-camX, -camY);
+  ctx.fillStyle = '#65a30d';
+  ctx.beginPath();
+  ctx.moveTo(camX, camY + H + 50);
+  for (let x = camX - 10; x <= camX + W + 10; x += 8) ctx.lineTo(x, groundY(x));
+  ctx.lineTo(camX + W + 10, camY + H + 50);
+  ctx.fill();
+  ctx.strokeStyle = '#3f6212'; ctx.lineWidth = 6;
+  ctx.beginPath();
+  for (let x = camX - 10; x <= camX + W + 10; x += 8) ctx.lineTo(x, groundY(x));
+  ctx.stroke();
+  ctx.font = '22px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  pickups.forEach(p => { if (p.x > camX - 30 && p.x < camX + W + 30) ctx.fillText(p.kind === 'coin' ? '🪙' : '⛽', p.x, groundY(p.x) - 30); });
+  // car body and wheels
+  const ws = wheelPos();
+  ctx.save();
+  ctx.translate(car.x, car.y);
+  ctx.rotate(car.ang);
+  ctx.fillStyle = '#dc2626';
+  ctx.beginPath(); ctx.roundRect(-44, -14, 88, 24, 8); ctx.fill();
+  ctx.fillStyle = '#7dd3fc'; ctx.beginPath(); ctx.roundRect(-8, -30, 30, 18, 5); ctx.fill();
+  ctx.font = '20px system-ui'; ctx.fillText('🧑', -16, -22);
+  ctx.restore();
+  ws.forEach(w => {
+    ctx.fillStyle = '#111827'; ctx.beginPath(); ctx.arc(w.x, w.y, WR, 0, 7); ctx.fill();
+    ctx.fillStyle = '#9ca3af'; ctx.beginPath(); ctx.arc(w.x, w.y, WR * 0.45, 0, 7); ctx.fill();
+  });
+  ctx.restore();
+  // fuel gauge
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(14, 14, 160, 16);
+  ctx.fillStyle = fuel > 30 ? '#22c55e' : '#ef4444'; ctx.fillRect(16, 16, 156 * fuel / 100, 12);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'left'; ctx.fillText('FUEL', 20, 23);
+}
+
+function loop(t) {
+  const dt = Math.min(25, t - last);
+  last = t;
+  if (state === 'play') { update(dt / 2); update(dt / 2); }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+const keys = { ArrowRight: 'g', d: 'g', ArrowLeft: 'b', a: 'b' };
+document.addEventListener('keydown', e => { if (keys[e.key] === 'g') gas = true; if (keys[e.key] === 'b') brake = true; if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') newRun(); });
+document.addEventListener('keyup', e => { if (keys[e.key] === 'g') gas = false; if (keys[e.key] === 'b') brake = false; });
+cv.addEventListener('pointerdown', e => { const p = canvasPoint(cv, e); if (p.x > W / 2) gas = true; else brake = true; });
+const release = () => { gas = false; brake = false; };
+cv.addEventListener('pointerup', release);
+cv.addEventListener('pointercancel', release);
+holdButton(document.getElementById('gas'), v => { gas = v; });
+holdButton(document.getElementById('brake'), v => { brake = v; });
+seed = 1;
+hud();
+overlay(ov, '<h2>🚙 Hill Climber</h2><p>Gas, brake, balance in the air — and watch your fuel.</p><button class="btn" onclick="newRun()">Drive</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

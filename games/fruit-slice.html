@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fruit Slice</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🍍 Fruit Slice</h1>
+  <div class="stats">Score <b id="score">0</b> Lives <b id="lives">❌❌❌</b> Best <b id="best">0</b></div>
+</header>
+<div class="stage">
+  <canvas id="c" class="game" width="640" height="560"></canvas>
+  <div class="overlay" id="ov"></div>
+</div>
+<p class="help">Swipe (or drag the mouse) through the flying fruit to slice it. Slice three or more in one swipe for a combo bonus. Let three fruit drop and the game ends — and never slice a bomb 💣!</p>
+<script src="shared.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), ov = document.getElementById('ov');
+const W = cv.width, H = cv.height, G = 520;
+const FRUITS = [['🍉', '#22c55e'], ['🍊', '#fb923c'], ['🍎', '#ef4444'], ['🍍', '#facc15'], ['🍋', '#fde047'], ['🥝', '#84cc16'], ['🍑', '#fdba74'], ['🍇', '#a855f7'], ['🥥', '#e7e5e4']];
+let items, halves = [], splats = [], trail = [], score = 0, lives = 3, best = Store.get('fruitslice-best', 0), state = 'ready', last = 0, waveT, swipeHits = 0, swiping = false, combos = [], elapsed = 0;
+
+function newGame() {
+  items = []; halves = []; splats = []; trail = []; combos = [];
+  score = 0; lives = 3; waveT = 600; elapsed = 0;
+  state = 'play';
+  overlay(ov, null);
+  hud();
+}
+
+function hud() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('lives').textContent = '❌'.repeat(3 - lives) + '⭕'.repeat(Math.max(0, lives));
+  document.getElementById('best').textContent = best;
+}
+
+function wave() {
+  const n = randInt(1, Math.min(2 + Math.floor(elapsed / 15000), 6));
+  const bombChance = Math.min(0.08 + elapsed / 300000, 0.25);
+  for (let i = 0; i < n; i++) {
+    const x = rand(80, W - 80);
+    items.push({ x, y: H + 30, vx: (W / 2 - x) * rand(0.2, 0.6) + rand(-40, 40), vy: -rand(560, 720), r: 30, rot: 0, vr: rand(-4, 4), bomb: Math.random() < bombChance, f: pick(FRUITS), delay: i * rand(80, 220) });
+  }
+}
+
+function gameOver(why) {
+  state = 'over';
+  if (recordBest('fruitslice-best', score)) best = score;
+  hud();
+  Sound.beep(110, 0.6, 'sawtooth', 0.06);
+  setTimeout(() => overlay(ov, `<h2>${why}</h2><p>Score ${score}</p><button class="btn" onclick="newGame()">Play again</button>`), 500);
+}
+
+function segHitsCircle(ax, ay, bx, by, cx, cy, r) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy || 1;
+  const t = clamp(((cx - ax) * dx + (cy - ay) * dy) / l2, 0, 1);
+  return Math.hypot(ax + dx * t - cx, ay + dy * t - cy) < r;
+}
+
+function slice(a, b) {
+  for (const it of items) {
+    if (it.delay > 0 || it.cut) continue;
+    if (!segHitsCircle(a.x, a.y, b.x, b.y, it.x, it.y, it.r)) continue;
+    it.cut = true;
+    if (it.bomb) { splats.push({ x: it.x, y: it.y, c: '#111827', t: 0, big: true }); return gameOver('Boom! 💥 You hit a bomb'); }
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    [-1, 1].forEach(s => halves.push({ x: it.x, y: it.y, vx: it.vx + Math.cos(ang + Math.PI / 2) * s * 90, vy: it.vy * 0.4 + Math.sin(ang + Math.PI / 2) * s * 90 - 60, rot: ang, vr: s * 3, f: it.f, side: s }));
+    splats.push({ x: it.x, y: it.y, c: it.f[1], t: 0 });
+    score++;
+    swipeHits++;
+    Sound.beep(500 + swipeHits * 90, 0.06, 'triangle', 0.05);
+  }
+  items = items.filter(it => !it.cut);
+  hud();
+}
+
+function endSwipe() {
+  if (swipeHits >= 3 && state === 'play') {
+    score += swipeHits;
+    combos.push({ x: trail.length ? trail[trail.length - 1].x : W / 2, y: trail.length ? trail[trail.length - 1].y : H / 2, n: swipeHits, t: 0 });
+    Sound.beep(1200, 0.2, 'triangle', 0.05);
+    hud();
+  }
+  swipeHits = 0;
+  swiping = false;
+}
+
+function update(dt) {
+  const s = dt / 1000;
+  elapsed += dt;
+  waveT -= dt;
+  if (waveT <= 0 && !items.length) { wave(); waveT = Math.max(400, 1400 - elapsed / 60); }
+  else if (waveT <= -1500) { wave(); waveT = 900; }
+  for (const it of items) {
+    if (it.delay > 0) { it.delay -= dt; continue; }
+    it.vy += G * s; it.x += it.vx * s; it.y += it.vy * s; it.rot += it.vr * s;
+    if (it.vy > 0 && it.y > H + 40) {
+      it.gone = true;
+      if (!it.bomb) { lives--; Sound.beep(200, 0.2, 'square', 0.04); hud(); if (lives <= 0) return gameOver('Too many dropped!'); }
+    }
+  }
+  items = items.filter(it => !it.gone);
+  halves.forEach(h => { h.vy += G * s; h.x += h.vx * s; h.y += h.vy * s; h.rot += h.vr * s; });
+  halves = halves.filter(h => h.y < H + 60);
+}
+
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#78350f'); g.addColorStop(1, '#451a03');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(0,0,0,.25)';
+  for (let x = 0; x < W; x += 80) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  splats.forEach(sp => {
+    sp.t += 16;
+    ctx.globalAlpha = Math.max(0, 0.6 - sp.t / 3000);
+    ctx.fillStyle = sp.c;
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, sp.big ? 80 : 34, 0, 7); ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+  splats = splats.filter(sp => sp.t < 1800);
+  if (!items) return;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  items.forEach(it => {
+    if (it.delay > 0) return;
+    ctx.save(); ctx.translate(it.x, it.y); ctx.rotate(it.rot);
+    ctx.font = '58px system-ui';
+    ctx.fillText(it.bomb ? '💣' : it.f[0], 0, 0);
+    ctx.restore();
+  });
+  halves.forEach(h => {
+    ctx.save(); ctx.translate(h.x, h.y); ctx.rotate(h.rot);
+    ctx.beginPath(); ctx.rect(-40, h.side < 0 ? -40 : 0, 80, 40); ctx.clip();
+    ctx.font = '58px system-ui';
+    ctx.fillText(h.f[0], 0, 0);
+    ctx.restore();
+  });
+  // blade trail
+  const now = performance.now();
+  trail = trail.filter(p => now - p.t < 160);
+  if (trail.length > 1) {
+    ctx.lineCap = 'round';
+    for (let i = 1; i < trail.length; i++) {
+      const k = i / trail.length;
+      ctx.strokeStyle = `rgba(255,255,255,${k})`;
+      ctx.lineWidth = 2 + k * 8;
+      ctx.beginPath(); ctx.moveTo(trail[i - 1].x, trail[i - 1].y); ctx.lineTo(trail[i].x, trail[i].y); ctx.stroke();
+    }
+  }
+  combos.forEach(c => { c.t += 16; ctx.fillStyle = `rgba(253,224,71,${1 - c.t / 900})`; ctx.font = 'bold 30px system-ui'; ctx.fillText(`${c.n} fruit combo! +${c.n}`, c.x, c.y - c.t / 20); });
+  combos = combos.filter(c => c.t < 900);
+}
+
+function loop(t) {
+  const dt = Math.min(34, t - last);
+  last = t;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function addPoint(e) {
+  const p = canvasPoint(cv, e);
+  p.t = performance.now();
+  const prev = trail[trail.length - 1];
+  trail.push(p);
+  if (prev && state === 'play' && swiping) slice(prev, p);
+}
+cv.addEventListener('pointerdown', e => { swiping = true; trail = []; addPoint(e); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => { if (swiping || e.pointerType === 'mouse') { if (!swiping && e.buttons === 0) { swiping = true; } addPoint(e); } });
+cv.addEventListener('pointerup', endSwipe);
+cv.addEventListener('pointercancel', endSwipe);
+cv.addEventListener('pointerleave', endSwipe);
+document.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && state !== 'play') newGame(); });
+hud();
+overlay(ov, '<h2>🍍 Fruit Slice</h2><p>Swipe to slice. Avoid the bombs!</p><button class="btn" onclick="newGame()">Play</button>');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

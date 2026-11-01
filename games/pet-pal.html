@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pet Pal</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  #room { position: relative; width: min(520px, calc(100vw - 16px)); height: 340px; margin: 0 auto; border-radius: 18px; overflow: hidden; background: linear-gradient(#fde68a 0 62%, #a16207 62%); box-shadow: 0 10px 40px rgba(0,0,0,.4); touch-action: none; user-select: none; -webkit-user-select: none; }
+  #room.night { filter: brightness(.35) saturate(.6); }
+  #room.bath { background: linear-gradient(#bae6fd 0 62%, #e0f2fe 62%); }
+  #pet { position: absolute; left: 50%; bottom: 60px; font-size: 110px; transform: translateX(-50%); transition: transform .2s; cursor: pointer; line-height: 1; }
+  #pet.bounce { animation: bounce .5s; }
+  @keyframes bounce { 50% { transform: translateX(-50%) translateY(-30px); } }
+  #mood { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); background: #fff; color: #111; padding: 6px 12px; border-radius: 14px; font-weight: 700; font-size: 15px; white-space: nowrap; }
+  .fx { position: absolute; font-size: 28px; pointer-events: none; animation: rise 1s forwards; }
+  @keyframes rise { to { transform: translateY(-80px); opacity: 0; } }
+  .dirt { position: absolute; font-size: 26px; cursor: pointer; }
+  .ballx { position: absolute; font-size: 42px; cursor: pointer; }
+  #bars { width: min(520px, calc(100vw - 16px)); margin: 10px auto; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .bar { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; font-size: 14px; }
+  .bar .b { height: 8px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; margin-top: 4px; }
+  .bar .b i { display: block; height: 100%; }
+  #actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin: 6px 0; }
+  #actions .btn { font-size: 16px; }
+  #foods { display: none; gap: 6px; justify-content: center; flex-wrap: wrap; margin: 6px 0; }
+  #foods button { font-size: 15px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="back" href="../index.html">← Arcade</a>
+  <h1>🐣 Pet Pal</h1>
+  <div class="stats">🪙 <b id="coins">0</b> Age <b id="age">0</b>d</div>
+</header>
+<div id="room"><div id="mood">Hello!</div><div id="pet">🥚</div></div>
+<div id="bars"></div>
+<div id="actions">
+  <button class="btn" id="feed">🍎 Feed</button>
+  <button class="btn" id="play">⚽ Play</button>
+  <button class="btn" id="wash">🛁 Wash</button>
+  <button class="btn" id="sleep">💤 Sleep</button>
+</div>
+<div id="foods"></div>
+<p class="help">Look after your pet: feed it, play catch (earns coins), wash away the mess and put it to bed when it's tired. Keep it happy and it grows from an egg into a full-grown pal. Your pet lives on while you're away, so come back to check on it!</p>
+<script src="shared.js"></script>
+<script>
+const STAGES = [{ e: '🥚', name: 'Egg', at: 0 }, { e: '🐣', name: 'Hatchling', at: 30 }, { e: '🐥', name: 'Chick', at: 160 }, { e: '🐤', name: 'Young bird', at: 400 }, { e: '🐔', name: 'Grown-up', at: 900 }, { e: '🦚', name: 'Majestic', at: 2000 }];
+const FOODS = [['🍎', 'Apple', 0, 18], ['🍞', 'Bread', 0, 22], ['🍕', 'Pizza', 6, 40], ['🍰', 'Cake', 10, 30, 15], ['🍣', 'Sushi', 14, 55]];
+let pet = Store.get('petpal', null) || { food: 80, fun: 80, clean: 90, energy: 90, care: 0, coins: 10, born: Date.now(), last: Date.now(), asleep: false, name: 'Pal' };
+const $ = id => document.getElementById(id);
+const room = $('room'), petEl = $('pet');
+let mode = null;
+
+function stage() { let s = STAGES[0]; for (const x of STAGES) if (pet.care >= x.at) s = x; return s; }
+
+// time passes even when the page is closed (capped at a day)
+function decay(sec) {
+  const k = sec / 60;
+  pet.food = clamp(pet.food - k * 1.6, 0, 100);
+  pet.fun = clamp(pet.fun - k * 1.3, 0, 100);
+  pet.clean = clamp(pet.clean - k * 0.9, 0, 100);
+  pet.energy = clamp(pet.energy + (pet.asleep ? k * 6 : -k * 0.8), 0, 100);
+  if (pet.asleep && pet.energy >= 100) pet.asleep = false;
+  // good care grows the pet
+  const avg = (pet.food + pet.fun + pet.clean + pet.energy) / 4;
+  if (avg > 50) pet.care += k * 6 * (avg / 100);
+}
+
+function render() {
+  const s = stage();
+  const avg = (pet.food + pet.fun + pet.clean + pet.energy) / 4;
+  petEl.textContent = pet.asleep ? '😴' : s.e;
+  room.classList.toggle('night', pet.asleep);
+  const need = pet.asleep ? 'Zzz… sleeping' : pet.food < 25 ? "I'm hungry! 🍎" : pet.energy < 20 ? "I'm so tired… 💤" : pet.clean < 25 ? 'I feel grubby 🛁' : pet.fun < 25 ? "I'm bored! ⚽" : avg > 80 ? `I love you! ❤️ (${s.name})` : `Feeling okay (${s.name})`;
+  $('mood').textContent = need;
+  const bars = [['🍎 Food', pet.food, '#ef4444'], ['⚽ Fun', pet.fun, '#facc15'], ['🛁 Clean', pet.clean, '#38bdf8'], ['⚡ Energy', pet.energy, '#22c55e']];
+  $('bars').innerHTML = bars.map(([n, v, c]) => `<div class="bar">${n} <b>${Math.round(v)}</b><div class="b"><i style="width:${v}%;background:${c}"></i></div></div>`).join('') + `<div class="bar" style="grid-column:1/-1">🌱 Growth <b>${s.name}</b><div class="b"><i style="width:${Math.min(100, (pet.care / (STAGES[Math.min(STAGES.indexOf(s) + 1, STAGES.length - 1)].at || 1)) * 100)}%;background:#a855f7"></i></div></div>`;
+  $('coins').textContent = pet.coins;
+  $('age').textContent = Math.floor((Date.now() - pet.born) / 86400000);
+  ['feed', 'play', 'wash'].forEach(id => { $(id).disabled = pet.asleep || stage().e === '🥚' && id !== 'wash'; });
+  $('sleep').textContent = pet.asleep ? '☀️ Wake up' : '💤 Sleep';
+  // dirt appears as cleanliness drops
+  const want = pet.clean < 30 ? 4 : pet.clean < 60 ? 2 : 0;
+  const have = room.querySelectorAll('.dirt');
+  for (let i = have.length; i < want && mode !== 'wash'; i++) addDirt();
+}
+
+function fx(t, x = 50, y = 40) {
+  const f = document.createElement('div');
+  f.className = 'fx'; f.textContent = t; f.style.left = x + '%'; f.style.top = y + '%';
+  room.appendChild(f);
+  setTimeout(() => f.remove(), 1000);
+}
+
+function addDirt() {
+  const d = document.createElement('div');
+  d.className = 'dirt'; d.textContent = pick(['💩', '🟤', '🦠']);
+  d.style.left = rand(10, 85) + '%'; d.style.top = rand(55, 85) + '%';
+  d.onclick = () => { d.remove(); pet.clean = clamp(pet.clean + 12, 0, 100); fx('✨', parseFloat(d.style.left), parseFloat(d.style.top)); Sound.beep(900, 0.05, 'triangle', 0.03); save(); render(); };
+  room.appendChild(d);
+}
+
+function save() { pet.last = Date.now(); Store.set('petpal', pet); }
+
+$('feed').onclick = () => {
+  const f = $('foods');
+  f.style.display = f.style.display === 'flex' ? 'none' : 'flex';
+  f.innerHTML = FOODS.map(([e, n, cost, food, fun], i) => `<button class="btn alt" data-i="${i}" ${pet.coins < cost ? 'disabled' : ''}>${e} ${n}${cost ? ' 🪙' + cost : ''}</button>`).join('');
+  f.querySelectorAll('button').forEach(b => { b.onclick = () => {
+    const [e, , cost, food, fun] = FOODS[+b.dataset.i];
+    if (pet.coins < cost) return;
+    if (pet.food > 95) { fx('🤢'); $('mood').textContent = "I'm full!"; return; }
+    pet.coins -= cost; pet.food = clamp(pet.food + food, 0, 100); pet.fun = clamp(pet.fun + (fun || 0), 0, 100);
+    fx(e); fx('😋', 55, 30);
+    Sound.beep(500, 0.06, 'triangle', 0.04); setTimeout(() => Sound.beep(650, 0.06, 'triangle', 0.04), 120);
+    petEl.classList.remove('bounce'); void petEl.offsetWidth; petEl.classList.add('bounce');
+    f.style.display = 'none';
+    save(); render();
+  }; });
+};
+
+// catch game: tap the bouncing ball before it lands
+$('play').onclick = () => {
+  if (mode) return;
+  mode = 'play';
+  let caught = 0, misses = 0;
+  const spawnBall = () => {
+    if (misses >= 3 || caught >= 8) {
+      mode = null;
+      pet.fun = clamp(pet.fun + caught * 7, 0, 100);
+      pet.energy = clamp(pet.energy - 6, 0, 100);
+      pet.coins += caught;
+      $('mood').textContent = `Caught ${caught}! +${caught} 🪙`;
+      save(); render();
+      return;
+    }
+    const b = document.createElement('div');
+    b.className = 'ballx'; b.textContent = pick(['⚽', '🏀', '🎾', '🥏']);
+    let x = rand(10, 80), y = 0, vx = rand(-0.4, 0.4), vy = 0;
+    b.style.left = x + '%';
+    room.appendChild(b);
+    const tick = setInterval(() => {
+      vy += 0.09; y += vy; x = clamp(x + vx, 2, 88);
+      b.style.top = y + '%'; b.style.left = x + '%';
+      if (y > 72) { clearInterval(tick); b.remove(); misses++; fx('💨', x, 70); spawnBall(); }
+    }, 30);
+    b.onpointerdown = () => { clearInterval(tick); b.remove(); caught++; fx('⭐', x, y); Sound.beep(700 + caught * 50, 0.06, 'triangle', 0.04); spawnBall(); };
+  };
+  $('mood').textContent = 'Catch the balls!';
+  spawnBall();
+};
+
+$('wash').onclick = () => {
+  room.classList.toggle('bath');
+  if (room.classList.contains('bath')) {
+    mode = 'wash';
+    $('mood').textContent = 'Rub me with the sponge! 🧽';
+    let rubs = 0;
+    const rub = e => { if (e.buttons || e.pointerType !== 'mouse') { rubs++; if (rubs % 6 === 0) { fx('🫧', rand(30, 70), rand(40, 70)); pet.clean = clamp(pet.clean + 4, 0, 100); Sound.beep(rand(600, 1000), 0.03, 'sine', 0.02); render(); } } };
+    room.onpointermove = rub;
+    room.querySelectorAll('.dirt').forEach(d => d.remove());
+  } else { mode = null; room.onpointermove = null; save(); render(); }
+};
+
+$('sleep').onclick = () => { pet.asleep = !pet.asleep; if (room.classList.contains('bath')) $('wash').onclick(); Sound.beep(pet.asleep ? 300 : 700, 0.2, 'sine', 0.04); save(); render(); };
+petEl.onclick = () => { if (pet.asleep) return; if (stage().e === '🥚') { pet.care += 1; $('mood').textContent = 'Tap tap… keep me warm!'; } pet.fun = clamp(pet.fun + 2, 0, 100); fx('❤️', rand(40, 60), 30); Sound.beep(880, 0.05, 'triangle', 0.03); petEl.classList.remove('bounce'); void petEl.offsetWidth; petEl.classList.add('bounce'); save(); render(); };
+
+const away = Math.min(86400, (Date.now() - pet.last) / 1000);
+const before = stage();
+decay(away);
+if (stage() !== before) fx('🎉');
+setInterval(() => { const s0 = stage(); decay(2); if (stage() !== s0) { fx('🎉'); $('mood').textContent = `I grew into a ${stage().name}!`; Sound.beep(988, 0.3, 'triangle'); } save(); render(); }, 2000);
+save();
+render();
+</script>
+</body>
+</html>
